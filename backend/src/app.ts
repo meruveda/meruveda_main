@@ -1,0 +1,129 @@
+import express from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import morgan from 'morgan';
+import { config } from './config/env';
+
+const app = express();
+
+// Behind Vercel / reverse proxies the original scheme arrives via
+// X-Forwarded-Proto. Trust it so req.protocol is https in production —
+// otherwise PayU surl/furl are generated as http:// and the customer's
+// browser warns about insecure submission (and callbacks can break).
+app.set('trust proxy', 1);
+
+// Middleware
+app.use(helmet());
+app.use(cors({
+  origin: (origin, callback) => {
+    // Return true for any incoming origin (wildcard equivalent for credentials: true)
+    callback(null, true);
+  },
+  credentials: true
+}));
+app.use(morgan('dev'));
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+import { supabase } from './database/supabase';
+
+// Root Route
+app.get('/', (req, res) => {
+  res.json({
+    status: "online",
+    service: "MeruVeda Backend",
+    version: "1.0.0"
+  });
+});
+
+// Health Check
+app.get('/api/health', async (req, res) => {
+  try {
+    const { error } = await supabase.from('products').select('id', { head: true, count: 'exact' }).limit(1);
+    if (error) {
+      return res.status(500).json({
+        status: 'error',
+        database: 'disconnected',
+        error: error.message,
+        timestamp: new Date().toISOString()
+      });
+    }
+    res.status(200).json({
+      status: 'online',
+      database: 'connected',
+      timestamp: new Date().toISOString()
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      status: 'error',
+      database: 'disconnected',
+      error: err.message || err,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+import authRoutes from './routes/authRoutes';
+import productRoutes from './routes/productRoutes';
+import orderRoutes from './routes/orderRoutes';
+import cartRoutes from './routes/cartRoutes';
+import wishlistRoutes from './routes/wishlistRoutes';
+import categoryRoutes from './routes/categoryRoutes';
+import settingsRoutes from './routes/settingsRoutes';
+
+import customerRoutes from './routes/customerRoutes';
+import analyticsRoutes from './routes/analyticsRoutes';
+import mediaRoutes from './routes/mediaRoutes';
+import notificationRoutes from './routes/notificationRoutes';
+import activityLogRoutes from './routes/activityLogRoutes';
+import transactionRoutes from './routes/transactionRoutes';
+import supportRoutes from './routes/supportRoutes';
+import couponRoutes from './routes/couponRoutes';
+import reviewRoutes from './routes/reviewRoutes';
+import blogRoutes from './routes/blogRoutes';
+import shiprocketRoutes from './routes/shiprocketRoutes';
+import bannerRoutes from './routes/bannerRoutes';
+import payuRoutes from './routes/payuRoutes';
+import whatsappRoutes from './routes/whatsappRoutes';
+import jobRoutes from './routes/jobRoutes';
+import imageRoutes from './routes/imageRoutes';
+import path from 'path';
+
+// Routes
+app.use('/api/auth', authRoutes);
+app.use('/api/products', productRoutes);
+app.use('/api/orders', orderRoutes);
+app.use('/api/cart', cartRoutes);
+app.use('/api/wishlist', wishlistRoutes);
+app.use('/api/categories', categoryRoutes);
+app.use('/api/settings', settingsRoutes);
+app.use('/api/customers', customerRoutes);
+app.use('/api/analytics', analyticsRoutes);
+app.use('/api/coupons', couponRoutes);
+app.use('/api/reviews', reviewRoutes);
+app.use('/api/blogs', blogRoutes);
+app.use('/api/media', mediaRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/activity-logs', activityLogRoutes);
+app.use('/api/transactions', transactionRoutes);
+app.use('/api/support', supportRoutes);
+app.use('/api/shiprocket', shiprocketRoutes);
+app.use('/api/banners', bannerRoutes);
+app.use('/api/payu', payuRoutes);
+app.use('/api/whatsapp', whatsappRoutes);
+app.use('/api/jobs', jobRoutes);
+app.use('/api/images', imageRoutes);
+
+// Global Error Handler
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error(err?.stack || err);
+  const status = err.status || 500;
+  res.status(status).json({
+    error: {
+      message: err.message || 'Internal Server Error',
+      ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
+    }
+  });
+});
+
+export default app;

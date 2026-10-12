@@ -1,0 +1,23 @@
+{
+  "name": "meruveda-root",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "frontend",
+    "admin",
+    "backend",
+    "shared"
+  ],
+  "dependencies": {
+    "date-fns": "^3.6.0"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "scripts": {
+    "dev": "concurrently -n \"frontend,admin,backend\" -c \"cyan,magenta,green\" \"npm run dev -w meruveda\" \"npm run dev -w meruveda-admin\" \"npm run dev -w backend\"",
+    "build": "npm run build -w @meruveda/shared -w meruveda -w meruveda-admin -w backend",
+    "build:shared": "npm run build -w @meruveda/shared",
+    "lint": "npm run lint --workspaces --if-present"
+  }
+}

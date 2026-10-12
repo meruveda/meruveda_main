@@ -1,0 +1,58 @@
+@import "tailwindcss";
+
+@theme {
+  --color-deep-purple: #2E0F36;
+  --color-gold: #B08A3E;
+  --color-ivory: #FBF6EE;
+  --color-bg-ivory: #FBF6EE;
+  --color-plum-deep: #2E0F36;
+  --color-gold-antique: #B08A3E;
+  --color-sage: #6E8464;
+  --color-rose-clay: #D96B72;
+  --color-stone-100: #EFE9DD;
+  --color-text-dark: #2E0F36;
+}
+
+@layer base {
+  :root {
+    --background: var(--color-bg-ivory);
+    --foreground: var(--color-text-dark);
+  }
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+}
+
+/* Custom styles for Rich Text / HTML blog content */
+.prose ul {
+  list-style-type: disc !important;
+  padding-left: 1.5rem !important;
+  margin-top: 0.5rem !important;
+  margin-bottom: 0.5rem !important;
+}
+
+.prose ol {
+  list-style-type: decimal !important;
+  padding-left: 1.5rem !important;
+  margin-top: 0.5rem !important;
+  margin-bottom: 0.5rem !important;
+}
+
+.prose li {
+  margin-top: 0.25rem !important;
+  margin-bottom: 0.25rem !important;
+}
+
+.prose p {
+  margin-top: 0.5rem !important;
+  margin-bottom: 0.5rem !important;
+}
+
+.prose h1, .prose h2, .prose h3, .prose h4 {
+  margin-top: 1.25rem !important;
+  margin-bottom: 0.5rem !important;
+  font-weight: 700 !important;
+}
+

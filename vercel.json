@@ -1,0 +1,74 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "services": {
+    "frontend": {
+      "root": "frontend",
+      "framework": "nextjs",
+      "bindings": [
+        {
+          "type": "service",
+          "service": "backend",
+          "format": "url",
+          "env": "BACKEND_SERVICE_URL"
+        }
+      ]
+    },
+    "backend": {
+      "root": "backend",
+      "framework": "express",
+      "entrypoint": "src/server.ts",
+      "buildCommand": "cd .. && npm run build -w @meruveda/shared && npm run build -w backend"
+    },
+    "admin": {
+      "root": "admin",
+      "framework": "vite",
+      "buildCommand": "cd .. && npm run build -w @meruveda/shared && npm run build -w meruveda-admin",
+      "rewrites": [
+        {
+          "source": "/admin/(.*)",
+          "destination": "/admin/index.html"
+        },
+        {
+          "source": "/admin",
+          "destination": "/admin/index.html"
+        }
+      ]
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/admin",
+      "destination": {
+        "service": "admin"
+      }
+    },
+    {
+      "source": "/admin/(.*)",
+      "destination": {
+        "service": "admin"
+      }
+    },
+    {
+      "source": "/api/(.*)",
+      "destination": {
+        "service": "backend"
+      }
+    },
+    {
+      "source": "/(.*)",
+      "destination": {
+        "service": "frontend"
+      }
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/jobs/review-requests",
+      "schedule": "0 10 * * *"
+    },
+    {
+      "path": "/api/orders/retry-shiprocket-failed?limit=20",
+      "schedule": "*/30 * * * *"
+    }
+  ]
+}
