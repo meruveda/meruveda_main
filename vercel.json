@@ -68,7 +68,7 @@
     },
     {
       "path": "/api/orders/retry-shiprocket-failed?limit=20",
-      "schedule": "*/30 * * * *"
+      "schedule": "0 3 * * *"
     }
   ]
 }

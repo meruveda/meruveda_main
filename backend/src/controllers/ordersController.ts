@@ -5,6 +5,7 @@ import { supabase } from '../database/supabase';
 import { normalizePhone } from '../services/whatsappService';
 import { hasColumn } from '../services/schemaGuard';
 import { verifyToken } from '../utils/jwt';
+import { config } from '../config/env';
 import { shiprocketTrackingService } from '../services/shiprocket/tracking.service';
 import { shiprocketWebhookService } from '../services/shiprocket/webhook.service';
 import { getOrderForInvoice, generateInvoicePdf } from '../services/invoiceService';
@@ -273,7 +274,7 @@ export const pushToShiprocket = async (req: Request, res: Response, next: NextFu
 /** Retry failed pushes (admin JWT or cron with CRON_SECRET — no user session needed). */
 export const retryShiprocketPushes = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const cronSecret = process.env.CRON_SECRET;
+    const cronSecret = config.cronSecret;
     const authHeader = String(req.headers.authorization || '');
     const isCron = !!cronSecret && authHeader === `Bearer ${cronSecret}`;
     // Optional admin JWT: this route sits before requireAuth so cron can pass.
@@ -286,7 +287,7 @@ export const retryShiprocketPushes = async (req: Request, res: Response, next: N
       }
     }
     if (!isAdmin && !isCron) {
-      return res.status(403).json({ error: { message: 'Forbidden' } });
+      return res.status(401).json({ error: { message: 'Unauthorized' } });
     }
     const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
     const results = await retryFailedShiprocketPushes(limit);
