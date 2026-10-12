@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import axiosInstance from '../api/axiosInstance';
 import { useAuth } from './AuthContext';
+import { track } from '@vercel/analytics';
 
 export type CartItem = {
   id: string;
@@ -131,6 +132,18 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
       updatedCart = [...cart, { ...newItem, quantity: qty } as CartItem];
     }
     setCart(updatedCart);
+
+    // Vercel Web Analytics custom event — fire-and-forget, never blocks the cart.
+    try {
+      track('add_to_cart', {
+        item_id: newItem.id,
+        item_name: newItem.name,
+        value: newItem.price,
+        quantity: qty,
+      });
+    } catch {
+      /* analytics must never break shopping */
+    }
 
     // Show beautiful toast notification
     setToast({ show: true, productName: newItem.name, productImage: newItem.image });

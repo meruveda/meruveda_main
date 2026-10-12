@@ -124,7 +124,9 @@ export interface Notification {
 
 // ===== Support Ticket =====
 export type TicketStatus = 'open' | 'in_progress' | 'resolved' | 'closed'
-export type TicketPriority = 'low' | 'medium' | 'high' | 'urgent'
+// DB CHECK is ('low','normal','high','urgent'); 'medium' is kept so any legacy
+// row written by an older client still type-checks.
+export type TicketPriority = 'low' | 'normal' | 'medium' | 'high' | 'urgent'
 
 export interface SupportTicket {
   id: string

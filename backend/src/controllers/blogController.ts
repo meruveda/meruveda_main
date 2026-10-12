@@ -2,8 +2,9 @@ import { Request, Response, NextFunction } from 'express';
 import { supabase } from '../database/supabase';
 import { slugify } from '@meruveda/shared';
 import { storageService } from '../services/storageService';
+import { hasColumn } from '../services/schemaGuard';
 
-const buildBlogData = (rawData: any) => {
+const buildBlogData = async (rawData: any) => {
   const blogData: any = {};
   
   if (rawData.title !== undefined) blogData.title = rawData.title;
@@ -11,10 +12,16 @@ const buildBlogData = (rawData: any) => {
   if (rawData.excerpt !== undefined) blogData.excerpt = rawData.excerpt;
   if (rawData.content !== undefined) blogData.content = rawData.content;
   if (rawData.authorId !== undefined) blogData.author_id = rawData.authorId;
-  if (rawData.featuredImage !== undefined) blogData.featured_image = rawData.featuredImage;
   if (rawData.status !== undefined) blogData.status = rawData.status;
   if (rawData.publishedAt !== undefined) blogData.published_at = rawData.publishedAt;
-  
+
+  // `blogs.featured_image` / `blogs.seo_metadata` are pending DB columns. Skipping
+  // them (instead of sending them) keeps the rest of the blog saveable on an
+  // un-migrated schema; admin UI shows the missing-image/SEO state.
+  if (rawData.featuredImage !== undefined && (await hasColumn('blogs', 'featured_image'))) {
+    blogData.featured_image = rawData.featuredImage;
+  }
+
   // Extra fields stored in seo_metadata
   const extraFields = ['seoTitle', 'seoDescription', 'tags', 'scheduledAt'];
   const seo_metadata: any = {};
@@ -27,7 +34,7 @@ const buildBlogData = (rawData: any) => {
     }
   }
   
-  if (hasMetadata) {
+  if (hasMetadata && (await hasColumn('blogs', 'seo_metadata'))) {
     blogData.seo_metadata = seo_metadata;
   }
   
@@ -103,7 +110,7 @@ export const createBlog = async (req: Request, res: Response, next: NextFunction
       rawBody.publishedAt = new Date().toISOString();
     }
 
-    const blogData = buildBlogData(rawBody);
+    const blogData = await buildBlogData(rawBody);
 
     const { data, error } = await supabase.from('blogs').insert(blogData).select().single();
     if (error) throw error;
@@ -137,7 +144,7 @@ export const updateBlog = async (req: Request, res: Response, next: NextFunction
       }
     }
 
-    const blogData = buildBlogData(updates);
+    const blogData = await buildBlogData(updates);
 
     const { data, error } = await supabase.from('blogs').update(blogData).eq('id', id).select().single();
     if (error) throw error;

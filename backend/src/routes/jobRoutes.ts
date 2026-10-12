@@ -2,6 +2,8 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { reviewJobService } from '../services/reviewJobService';
 import { config } from '../config/env';
 import { requireAuth, requireAdmin } from '../middleware/auth';
+import { invoiceDispatchService } from '../services/invoiceDispatchService';
+import { retryFailedShiprocketPushes } from '../services/orderService';
 
 /**
  * Scheduled jobs.
@@ -11,6 +13,13 @@ import { requireAuth, requireAdmin } from '../middleware/auth';
  *     with `Authorization: Bearer ${CRON_SECRET}`.
  *   - Admins may also trigger it manually.
  *   - Idempotent: an order is only ever processed once.
+ *
+ * GET|POST /api/jobs/retry-failures
+ *   - Daily sweep that retries (a) invoices that never went out and
+ *     (b) Shiprocket pushes that failed.
+ *   - Same CRON_SECRET Bearer auth; 401 when the secret mismatches and the
+ *     caller is not an authenticated admin.
+ *   - Both steps are individually flag-gated and idempotent.
  */
 const router = Router();
 
@@ -20,6 +29,14 @@ const authorize = (req: Request, res: Response, next: any) => {
   const provided = bearer || (req.query.secret as string) || '';
 
   if (config.cronSecret && provided === config.cronSecret) return next();
+
+  // Explicit 401 when a wrong secret was supplied and no admin session exists.
+  if (config.cronSecret && provided && provided !== config.cronSecret) {
+    return requireAuth(req, res, (err: any) => {
+      if (err) return next(err);
+      requireAdmin(req, res, next);
+    });
+  }
 
   // Fallback: an authenticated admin can run it from the dashboard.
   return requireAuth(req, res, (err: any) => {
@@ -36,5 +53,51 @@ router.get('/review-requests', authorize, async (req: Request, res: Response, ne
     next(error);
   }
 });
+
+router.get('/retry-failures', authorize, retryFailuresHandler);
+router.post('/retry-failures', authorize, retryFailuresHandler);
+
+async function retryFailuresHandler(req: Request, res: Response, next: NextFunction) {
+  try {
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 15));
+
+    let invoices: any[] = [];
+    if (config.invoiceAutoSend) {
+      try {
+        invoices = await invoiceDispatchService.retryPendingInvoices(limit);
+      } catch (err: any) {
+        console.error('[Jobs] invoice retry sweep failed:', err?.message || err);
+      }
+    }
+
+    let shiprocket: any[] = [];
+    if (config.shiprocketAutoPush) {
+      try {
+        shiprocket = await retryFailedShiprocketPushes(limit);
+      } catch (err: any) {
+        console.error('[Jobs] shiprocket retry sweep failed:', err?.message || err);
+      }
+    }
+
+    res.json({
+      data: {
+        invoice: {
+          enabled: config.invoiceAutoSend,
+          attempted: invoices.length,
+          sent: invoices.filter((r) => r.ok && !r.skipped).length,
+          results: invoices,
+        },
+        shiprocket: {
+          enabled: config.shiprocketAutoPush,
+          attempted: shiprocket.length,
+          pushed: shiprocket.filter((r) => r.ok).length,
+          results: shiprocket,
+        },
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
 
 export default router;

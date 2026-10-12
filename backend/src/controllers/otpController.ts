@@ -3,8 +3,9 @@ import { supabase } from '../database/supabase';
 import { generateToken } from '../utils/jwt';
 import { otpService } from '../services/otpService';
 import { normalizePhone, isWhatsappConfigured } from '../services/whatsappService';
-import { canonicalPhone, isPlaceholderEmail, isValidEmail } from '../utils/phone';
+import { canonicalPhone, isPlaceholderEmail, isValidEmail, isValidPhone10 } from '../utils/phone';
 import { config } from '../config/env';
+import { hasColumn } from '../services/schemaGuard';
 
 const MESSAGES: Record<string, string> = {
   not_found: 'No active OTP found for this number. Please request a new code.',
@@ -16,6 +17,13 @@ const MESSAGES: Record<string, string> = {
 
 const handleSend = async (req: Request, res: Response, next: NextFunction) => {
   try {
+    // OTP_DISABLED TEMPORARILY - re-enable by setting OTP_ENABLED=true.
+    if (!config.otpEnabled) {
+      return res.status(503).json({
+        error: { message: 'OTP sign-in is temporarily disabled. Please use Sign up / Login instead.' },
+      });
+    }
+
     const { phone } = req.body;
 
     // Fail loudly in production when WhatsApp credentials are missing —
@@ -46,6 +54,13 @@ export const resendOtp = handleSend;
 
 export const verifyOtp = async (req: Request, res: Response, next: NextFunction) => {
   try {
+    // OTP_DISABLED TEMPORARILY - re-enable by setting OTP_ENABLED=true.
+    if (!config.otpEnabled) {
+      return res.status(503).json({
+        error: { message: 'OTP verification is temporarily disabled. Please use Sign up / Login instead.' },
+      });
+    }
+
     const { phone, code, name } = req.body;
     const result = await otpService.verifyOtp(phone, code);
 
@@ -57,7 +72,12 @@ export const verifyOtp = async (req: Request, res: Response, next: NextFunction)
     // customer in. Either way the order gets linked to this user id.
     const { user, created } = await otpService.findOrCreateUserByPhone(phone, name);
 
-    const token = generateToken({ id: user.id, email: user.email, role: user.role });
+    // A successful OTP is the proof of ownership — flip phone_verified on.
+    if (await hasColumn('users', 'phone_verified')) {
+      await supabase.from('users').update({ phone_verified: true }).eq('id', user.id);
+    }
+
+    const token = generateToken({ id: user.id, email: user.email, role: user.role, phone_verified: true });
 
     try {
       await supabase.from('activity_logs').insert({
@@ -169,6 +189,80 @@ export const updateCheckoutProfile = async (req: Request, res: Response, next: N
         role: updated.role,
         ...(persistAddress ? { address: updated.address } : {}),
       },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * No-OTP checkout sign-up / login.
+ *
+ * Given a name + 10-digit Indian mobile number:
+ *   - number already in DB  => log the existing customer in
+ *   - number unknown        => auto-create the customer, then log in
+ *
+ * SECURITY: this endpoint does NOT prove ownership of the phone number.
+ * The issued JWT carries phone_verified=false so GET /api/orders/my (and
+ * other sensitive reads) can refuse until a real OTP verification flips
+ * the flag. Rate limiting lives on the route (createRateLimiter).
+ */
+export const quickLogin = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { phone, name } = req.body;
+
+    if (!isValidPhone10(phone)) {
+      return res.status(400).json({ error: { message: 'Please enter a valid 10-digit mobile number' } });
+    }
+    const cleanName = typeof name === 'string' ? name.trim() : '';
+    if (!cleanName) {
+      return res.status(400).json({ error: { message: 'Please enter your name' } });
+    }
+
+    const { user, created } = await otpService.findOrCreateUserByPhone(phone, cleanName);
+
+    // New quick-login users start unverified; pre-existing users keep whatever
+    // they already had (password accounts and OTP-verified ones stay usable).
+    let phoneVerified = true;
+    if (await hasColumn('users', 'phone_verified')) {
+      if (created) {
+        await supabase.from('users').update({ phone_verified: false }).eq('id', user.id);
+        phoneVerified = false;
+      } else {
+        phoneVerified = user.phone_verified !== false;
+      }
+    }
+
+    const token = generateToken({
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      phone_verified: phoneVerified,
+    });
+
+    try {
+      await supabase.from('activity_logs').insert({
+        user_id: user.id,
+        action: created ? 'register_quick' : 'login_quick',
+        entity_type: 'users',
+        entity_id: user.id,
+        details: { phone: normalizePhone(phone) },
+      });
+    } catch (logErr) {
+      console.error('Failed to log quick-login activity:', logErr);
+    }
+
+    const { password_hash, first_name, last_name, ...rest } = user;
+    res.json({
+      message: created ? 'Account created.' : 'Logged in.',
+      user: {
+        ...rest,
+        firstName: first_name,
+        lastName: last_name,
+        phone_verified: phoneVerified,
+      },
+      token,
+      isNewUser: created,
     });
   } catch (error) {
     next(error);

@@ -7,6 +7,7 @@ import { WishlistProvider } from "@/context/WishlistContext";
 import Header from "@/components/Header";
 import Footer from "@/components/Footer";
 import WhatsAppButton from "@/components/WhatsAppButton";
+import PageViewTracker from "@/components/PageViewTracker";
 import { Analytics } from "@vercel/analytics/next";
 
 const fraunces = Fraunces({
@@ -55,6 +56,7 @@ export default function RootLayout({
             </CartProvider>
           </WishlistProvider>
         </AuthProvider>
+        <PageViewTracker />
         <Analytics />
       </body>
     </html>

@@ -1,5 +1,6 @@
 import { PDFDocument, StandardFonts, rgb, PDFPage } from 'pdf-lib';
 import { supabase } from '../database/supabase';
+import { config } from '../config/env';
 
 const BRAND = rgb(0.169, 0.094, 0.125); // deep purple #2B1820
 const GOLD = rgb(0.753, 0.619, 0.353); // #C09E5A
@@ -8,15 +9,61 @@ const WHITE = rgb(1, 1, 1);
 
 const money = (value: any) => `Rs. ${Number(value || 0).toFixed(2)}`;
 
-const SELLER = {
+// Fallbacks only so a tax invoice is never rendered blank when the operator has
+// not set BUSINESS_NAME / BUSINESS_ADDRESS / BUSINESS_GSTIN yet. The env values
+// always win — set them in backend/.env (or the Vercel project settings).
+const DEFAULT_SELLER = {
   name: 'MeruVeda Wellness',
-  line1: 'Keharsh Enterprises (Sole Proprietorship)',
-  line2: 'S/N. 12, Viru City Gym Road, Inside Jalori Gate,',
-  line3: 'Jodhpur - 342001, Rajasthan, India',
-  gstin: process.env.GSTIN || '08BFPPS7045C1Z4',
-  email: 'customercare@meruvedawellness.com',
-  website: process.env.FRONTEND_URL || 'https://meruvedawellness.com',
+  address: 'Keharsh Enterprises (Sole Proprietorship)\nS/N. 12, Viru City Gym Road, Inside Jalori Gate,\nJodhpur - 342001, Rajasthan, India',
 };
+
+let warnedMissingBusinessEnv = false;
+
+export interface SellerIdentity {
+  name: string;
+  addressLines: string[];
+  gstin: string;
+  email: string;
+  website: string;
+}
+
+/** Seller block for the invoice, resolved from env on every call. */
+export function getSellerIdentity(): SellerIdentity {
+  const name = config.businessName || DEFAULT_SELLER.name;
+  const address = config.businessAddress || DEFAULT_SELLER.address;
+  const gstin = config.businessGstin || '';
+  if (!warnedMissingBusinessEnv && (!config.businessName || !config.businessAddress || !config.businessGstin)) {
+    warnedMissingBusinessEnv = true;
+    console.warn(
+      '[Invoice] BUSINESS_NAME / BUSINESS_ADDRESS / BUSINESS_GSTIN not fully set — falling back to defaults. Set them in the backend env before going live.'
+    );
+  }
+  return {
+    name,
+    addressLines: String(address).split('\n').map((l) => l.trim()).filter(Boolean),
+    gstin,
+    email: 'customercare@meruvedawellness.com',
+    website: process.env.FRONTEND_URL || 'https://meruvedawellness.com',
+  };
+}
+
+/**
+ * Invoice number. Derived deterministically from the order number — NO counter
+ * table exists, so this is NOT a gap-free sequential invoice series and must not
+ * be presented as one for GST filing. See docs/ADMIN_AUDIT.md "Known risks".
+ */
+export function buildInvoiceNumber(orderNumber: string): string {
+  return `MW-INV-${orderNumber || 'UNKNOWN'}`;
+}
+
+/** Intra-state (Rajasthan) -> CGST+SGST, otherwise IGST. Mirrors checkout. */
+function isRajasthan(state?: string): boolean {
+  if (!state) return true;
+  const s = String(state).trim().toLowerCase();
+  const validMatches = ['rajasthan', 'rj', 'rajsthan', 'rajasthn', 'rajastan', 'rajasthna', 'rajastran', 'raj'];
+  if (validMatches.includes(s)) return true;
+  return s.startsWith('raj') && s.length >= 5;
+}
 
 /** Load an order with items + buyer details, shaped for invoicing. */
 export async function getOrderForInvoice(orderId: string) {
@@ -34,13 +81,19 @@ export async function getOrderForInvoice(orderId: string) {
   return data;
 }
 
-function drawHeader(page: PDFPage, width: number, orderNumber: string, createdAt: string) {
+function drawHeader(
+  page: PDFPage,
+  width: number,
+  invoiceNumber: string,
+  orderNumber: string,
+  createdAt: string
+) {
   page.drawRectangle({ x: 0, y: 762, width, height: 80, color: BRAND });
-  page.drawText(SELLER.name, { x: 40, y: 806, size: 22, color: WHITE });
+  page.drawText(getSellerIdentity().name, { x: 40, y: 806, size: 22, color: WHITE });
   page.drawText('Ayurvedic Wellness', { x: 40, y: 788, size: 10, color: GOLD });
-  page.drawText('TAX INVOICE', { x: width - 140, y: 806, size: 16, color: WHITE });
-  page.drawText(`#${orderNumber}`, { x: width - 140, y: 788, size: 11, color: GOLD });
-  page.drawText(createdAt, { x: width - 140, y: 772, size: 9, color: WHITE });
+  page.drawText('TAX INVOICE', { x: width - 200, y: 806, size: 16, color: WHITE });
+  page.drawText(invoiceNumber, { x: width - 200, y: 788, size: 11, color: GOLD });
+  page.drawText(`Order #${orderNumber}  ${createdAt}`, { x: width - 200, y: 772, size: 9, color: WHITE });
 }
 
 /**
@@ -57,6 +110,7 @@ export async function generateInvoicePdf(order: any): Promise<Buffer> {
   const page = doc.addPage([width, height]);
 
   const orderNumber = order.order_number || 'MV-000000';
+  const invoiceNumber = buildInvoiceNumber(orderNumber);
   const createdDate = order.created_at ? new Date(order.created_at) : null;
   const created =
     createdDate && !Number.isNaN(createdDate.getTime())
@@ -66,15 +120,23 @@ export async function generateInvoicePdf(order: any): Promise<Buffer> {
         })
       : 'Date unavailable';
 
-  drawHeader(page, width, orderNumber, created);
+  drawHeader(page, width, invoiceNumber, orderNumber, created);
+
+  const seller = getSellerIdentity();
 
   // ---- Seller / buyer blocks ----
   // Fixed template: header + From / Bill To / Ship To + items + totals.
   let y = 730;
   page.drawText('From', { x: 40, y, size: 9, font: bold, color: GREY });
   y -= 14;
-  [SELLER.name, SELLER.line1, SELLER.line2, SELLER.line3, `GSTIN: ${SELLER.gstin}`, SELLER.email, SELLER.website].forEach((line) => {
-    page.drawText(line, { x: 40, y, size: 10, font: helv, color: BRAND });
+  const sellerLines = [
+    ...seller.addressLines,
+    ...(seller.gstin ? [`GSTIN: ${seller.gstin}`] : []),
+    seller.email,
+    seller.website,
+  ];
+  sellerLines.forEach((line) => {
+    page.drawText(String(line).slice(0, 64), { x: 40, y, size: 10, font: helv, color: BRAND });
     y -= 13;
   });
 
@@ -94,7 +156,7 @@ export async function generateInvoicePdf(order: any): Promise<Buffer> {
     buyer.addressLine,
     `${buyer.city}${buyer.state ? ', ' + buyer.state : ''}${buyer.zipCode ? ' - ' + buyer.zipCode : ''}`,
     buyer.phone ? `Phone: ${buyer.phone}` : '',
-    order.users?.email ? `Email: ${order.users.email}` : '',
+    order.users?.email || order.user_email ? `Email: ${order.users?.email || order.user_email}` : '',
   ].filter(Boolean);
 
   let by = 730;
@@ -163,14 +225,27 @@ export async function generateInvoicePdf(order: any): Promise<Buffer> {
   });
 
   // ---- Totals ----
-  if (y < 220) newPage();
+  // GST is already included in the item prices / order total (the storefront
+  // prints "CGST (Included)"), so the tax rows are informational and TOTAL is
+  // exactly orders.total — no double counting.
+  if (y < 240) newPage();
   y -= 12;
-  const totals: Array<[string, string]> = [
-    ['Subtotal', money(order.subtotal)],
-    [`Discount${order.discount ? '' : ''}`, `- ${money(order.discount)}`],
-    ['Tax (GST)', money(order.tax)],
-    ['Shipping', Number(order.shipping_fee) === 0 ? 'FREE' : money(order.shipping_fee)],
-  ];
+  const taxTotal = Number(order.tax) || 0;
+  const intraState = isRajasthan(ship.state || bill.state || '');
+  const totals: Array<[string, string]> = [['Subtotal', money(order.subtotal)]];
+  if (Number(order.discount) > 0) {
+    totals.push([
+      order.coupon_code ? `Discount (${order.coupon_code})` : 'Discount',
+      `- ${money(order.discount)}`,
+    ]);
+  }
+  totals.push(['Shipping', Number(order.shipping_fee) === 0 ? 'FREE' : money(order.shipping_fee)]);
+  if (intraState) {
+    totals.push(['CGST (included)', money(taxTotal / 2)]);
+    totals.push(['SGST (included)', money(taxTotal / 2)]);
+  } else {
+    totals.push(['IGST (included)', money(taxTotal)]);
+  }
   totals.forEach(([label, value]) => {
     currentPage.drawText(label, { x: 340, y, size: 10, font: helv, color: GREY });
     currentPage.drawText(value, { x: 455, y, size: 10, font: helv, color: BRAND });
@@ -183,8 +258,11 @@ export async function generateInvoicePdf(order: any): Promise<Buffer> {
   currentPage.drawText(money(order.total), { x: 455, y: y, size: 12, font: bold, color: GOLD });
 
   // ---- Payment / footer ----
+  const rawMethod = String(order.payment_method || '');
+  const isCODMethod = /cash|\bcod\b/i.test(rawMethod);
+  const paymentLabel = isCODMethod ? 'COD (Cash on Delivery)' : rawMethod || '-';
   y -= 44;
-  currentPage.drawText(`Payment method: ${order.payment_method || '-'}`, {
+  currentPage.drawText(`Payment method: ${paymentLabel}`, {
     x: 40, y, size: 10, font: helv, color: BRAND,
   });
   y -= 14;
@@ -214,4 +292,6 @@ export async function generateInvoicePdf(order: any): Promise<Buffer> {
 export const invoiceService = {
   getOrderForInvoice,
   generateInvoicePdf,
+  buildInvoiceNumber,
+  getSellerIdentity,
 };

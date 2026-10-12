@@ -72,14 +72,16 @@ export const getCustomers = async (req: Request, res: Response, next: NextFuncti
       const fullName = `${user.first_name || ''} ${user.last_name || ''}`.trim();
       const displayName = fullName || user.email || (user.phone ? `Customer ${user.phone}` : 'Guest Customer');
 
-      // Last activity: maximum of user.created_at, user.last_login (if present), latest order created_at, latest activity log created_at
+      // Last activity: maximum of user.created_at, user.last_login_at (delta 005;
+      // older rows / un-migrated DBs fall back to the legacy `last_login` spelling),
+      // latest order created_at, latest activity log created_at
       const toTime = (v: any) => {
         const t = v ? new Date(v).getTime() : NaN;
         return Number.isFinite(t) ? t : 0;
       };
       const orderDates = userOrders.map((o: any) => toTime(o.created_at)).filter(Boolean);
       const logDates = logs.filter((l: any) => l.user_id === user.id).map((l: any) => toTime(l.created_at)).filter(Boolean);
-      const lastLoginTime = toTime(user.last_login);
+      const lastLoginTime = toTime(user.last_login_at ?? user.last_login);
       const createdAtTime = toTime(user.created_at);
       
       const maxTime = Math.max(0, createdAtTime, lastLoginTime, ...orderDates, ...logDates);

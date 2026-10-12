@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { payuService } from '../services/payuService';
-import { orderService, pushOrderToShiprocket } from '../services/orderService';
-import { orderNotifyService } from '../services/orderNotifyService';
+import { orderService } from '../services/orderService';
+import { postOrderConfirmed } from '../services/postOrderConfirmed';
 import { supabase } from '../database/supabase';
 import { config } from '../config/env';
 
@@ -214,21 +214,14 @@ export const handlePayUCallback = async (req: Request, res: Response, next: Next
 
       await upsertTransaction('success', 'captured');
 
-      // Push the paid order to Shiprocket (adhoc create). Never blocks redirect.
+      // Post-confirmation background work: (1) invoice delivery, (2) Shiprocket
+      // push. Awaited (never fire-and-forget — Vercel kills the function right
+      // after the response) and fully wrapped so a failure here can never break
+      // the payment redirect: the order stays paid either way.
       try {
-        await pushOrderToShiprocket(order.id);
-      } catch (srErr: any) {
-        console.error(`[Shiprocket] auto-push failed for prepaid order ${orderNumber} (${order.id}):`, srErr?.message || srErr);
-        // Retry via POST /orders/:id/push-shiprocket or the failed-push retry endpoint.
-      }
-
-      // Post-purchase WhatsApp automation: order confirmation + PDF invoice to
-      // the customer and to ADMIN_WHATSAPP_NUMBER. Failures are logged inside
-      // the service and must never block the payment redirect.
-      try {
-        await orderNotifyService.sendPostPurchaseMessages(order.id);
-      } catch (notifyErr: any) {
-        console.error('[PayU Callback] Post-purchase WhatsApp messages failed:', notifyErr?.message || notifyErr);
+        await postOrderConfirmed(order.id, { source: 'payu_success' });
+      } catch (postErr: any) {
+        console.error('[PayU Callback] postOrderConfirmed failed:', postErr?.message || postErr);
       }
 
       const successUrl = `${storefrontBaseUrl(req)}/checkout/success/${order.id}`;

@@ -5,6 +5,10 @@
 /** Customer website URL — set VITE_CUSTOMER_WEBSITE_URL env var in production */
 export const CUSTOMER_WEBSITE_URL = import.meta.env.VITE_CUSTOMER_WEBSITE_URL || '/'
 
+/** Vercel Web Analytics dashboard URL for this project (Analytics tab → Open Dashboard).
+ *  No public read API on Hobby, so the admin links out instead of embedding. */
+export const VERCEL_ANALYTICS_URL = import.meta.env.VITE_VERCEL_ANALYTICS_URL || ''
+
 /** Admin app base path */
 export const ADMIN_BASE_PATH = '/admin'
 

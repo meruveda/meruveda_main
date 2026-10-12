@@ -4,6 +4,7 @@ import { shiprocketTrackingService } from './shiprocket/tracking.service';
 import { shiprocketWebhookService } from './shiprocket/webhook.service';
 import { orderNotifyService } from './orderNotifyService';
 import { ShiprocketOrderPayload } from './shiprocket/types';
+import { hasColumn } from './schemaGuard';
 import { config } from '../config/env';
 
 export function isRajasthan(state: string): boolean {
@@ -240,16 +241,17 @@ export const orderService = {
     // orders push from the PayU success callback after payment is confirmed.
     // SHIPROCKET_TEST_MODE=true preserves the old behaviour (push on create
     // for testing) without gating production pushes.
+    // SHIPROCKET_AUTO_PUSH=true moves the COD push into postOrderConfirmed()
+    // so there is exactly one, awaited push point for every source.
     const isCODPlacement =
       order.payment_method === 'Cash On Delivery' || String(order.payment_method).toUpperCase() === 'COD';
-    if (config.shiprocketTestMode || isCODPlacement) {
+    if (config.shiprocketTestMode) {
       // Temporarily mark order as processing for testing (PAID)
       // We avoid 'PAID (TEST)' since it violates the DB CHECK constraint for status.
-      if (config.shiprocketTestMode) {
-        order.status = 'processing';
-        await supabase.from('orders').update({ status: 'processing' }).eq('id', order.id);
-      }
-
+      order.status = 'processing';
+      await supabase.from('orders').update({ status: 'processing' }).eq('id', order.id);
+    }
+    if (!config.shiprocketAutoPush && (config.shiprocketTestMode || isCODPlacement)) {
       try {
         await pushOrderToShiprocket(order.id);
         const { data: refreshed } = await supabase.from('orders').select('shiprocket_order_id, shipment_id').eq('id', order.id).maybeSingle();
@@ -582,14 +584,146 @@ export const orderService = {
     }
 };
 
+/** Mark a push attempt as failed (guarded by delta 010 columns). */
+async function markPushFailed(orderId: string, message: string): Promise<void> {
+  try {
+    const statusOk = await hasColumn('orders', 'shiprocket_push_status');
+    const errorOk = await hasColumn('orders', 'shiprocket_push_error');
+    if (!statusOk && !errorOk) return;
+    await supabase
+      .from('orders')
+      .update({
+        ...(statusOk ? { shiprocket_push_status: 'failed' } : {}),
+        ...(errorOk ? { shiprocket_push_error: String(message).slice(0, 500) } : {}),
+      })
+      .eq('id', orderId);
+  } catch (err: any) {
+    console.error('[Shiprocket] could not persist push failure:', err?.message || err);
+  }
+}
+
+/** Mark a push attempt as successful (guarded by delta 010 columns). */
+async function markPushSucceeded(orderId: string): Promise<void> {
+  try {
+    const statusOk = await hasColumn('orders', 'shiprocket_push_status');
+    const atOk = await hasColumn('orders', 'shiprocket_pushed_at');
+    const errorOk = await hasColumn('orders', 'shiprocket_push_error');
+    if (!statusOk && !atOk) return;
+    await supabase
+      .from('orders')
+      .update({
+        ...(statusOk ? { shiprocket_push_status: 'pushed' } : {}),
+        ...(atOk ? { shiprocket_pushed_at: new Date().toISOString() } : {}),
+        ...(errorOk ? { shiprocket_push_error: null } : {}),
+      })
+      .eq('id', orderId);
+  } catch (err: any) {
+    console.error('[Shiprocket] could not persist push success:', err?.message || err);
+  }
+}
+
+/**
+ * Atomic "who pushes this order" claim.
+ *
+ * Two parallel triggers (double PayU webhook + admin button + cron) must never
+ * create two Shiprocket orders for the same local order. The claim is a single
+ * conditional UPDATE, which Postgres executes atomically:
+ *
+ *   UPDATE orders SET shiprocket_push_status = 'in_progress'
+ *    WHERE id = :id
+ *      AND shiprocket_order_id IS NULL
+ *      AND (shiprocket_push_status IS NULL OR shiprocket_push_status <> 'in_progress')
+ *
+ * A stuck 'in_progress' row (serverless killed mid-request) is reclaimable
+ * after 15 minutes so an order can never be locked forever.
+ *
+ * When delta 010 has not been applied the status columns do not exist; the
+ * claim then degrades to `shiprocket_order_id IS NULL`, which is still atomic
+ * on the final write but cannot serialise the outbound API call itself.
+ * Returns: 'claimed' (go ahead) | 'busy' (someone else is pushing).
+ */
+async function claimShiprocketPush(orderId: string): Promise<'claimed' | 'busy'> {
+  if (!(await hasColumn('orders', 'shiprocket_push_status'))) {
+    return 'claimed';
+  }
+
+  const claimPatch = {
+    shiprocket_push_status: 'in_progress',
+    ...(await hasColumn('orders', 'shiprocket_push_started_at'))
+      ? { shiprocket_push_started_at: new Date().toISOString() }
+      : {},
+    ...(await hasColumn('orders', 'shiprocket_push_error'))
+      ? { shiprocket_push_error: null }
+      : {},
+  };
+
+  try {
+    const { data, error } = await supabase
+      .from('orders')
+      .update(claimPatch)
+      .eq('id', orderId)
+      .is('shiprocket_order_id', null)
+      .or('shiprocket_push_status.is.null,shiprocket_push_status.neq.in_progress')
+      .select('id');
+    if (error) {
+      console.error('[Shiprocket] push claim failed:', error.message);
+      return 'claimed'; // degrade: never block a legitimate push on a probe error
+    }
+    if (data && data.length > 0) return 'claimed';
+
+    // Nobody claimed it => either already pushed, or a push is in flight.
+    const { data: row } = await supabase
+      .from('orders')
+      .select('shiprocket_order_id, shiprocket_push_status, shiprocket_push_started_at')
+      .eq('id', orderId)
+      .maybeSingle();
+    if (row?.shiprocket_order_id) return 'busy';
+
+    const startedAt = row?.shiprocket_push_started_at;
+    const staleCutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    if (row?.shiprocket_push_status === 'in_progress' && startedAt && startedAt < staleCutoff) {
+      const retry = await supabase
+        .from('orders')
+        .update(claimPatch)
+        .eq('id', orderId)
+        .is('shiprocket_order_id', null)
+        .eq('shiprocket_push_status', 'in_progress')
+        .lt('shiprocket_push_started_at', staleCutoff)
+        .select('id');
+      if (!retry.error && retry.data && retry.data.length > 0) return 'claimed';
+    }
+    return 'busy';
+  } catch (err: any) {
+    console.error('[Shiprocket] push claim failed:', err?.message || err);
+    return 'claimed';
+  }
+}
+
 export async function pushOrderToShiprocket(orderId: string) {
   const { data: order, error: fetchErr } = await supabase.from('orders').select('*').eq('id', orderId).single();
   if (fetchErr || !order) throw new Error('Order not found for Shiprocket push');
   if ((order as any).shiprocket_order_id) {
     console.log(`[Shiprocket] order ${order.order_number} already pushed (sr_order_id=${(order as any).shiprocket_order_id}), skipping.`);
+    await markPushSucceeded(order.id);
     return { skipped: true, shiprocket_order_id: (order as any).shiprocket_order_id };
   }
 
+  const claim = await claimShiprocketPush(order.id);
+  if (claim === 'busy') {
+    console.log(`[Shiprocket] order ${order.order_number} push already in progress elsewhere, skipping.`);
+    return { skipped: true, shiprocket_order_id: null };
+  }
+
+  try {
+    return await executeShiprocketPush(order);
+  } catch (err: any) {
+    await markPushFailed(order.id, err?.message || String(err));
+    throw err;
+  }
+}
+
+async function executeShiprocketPush(order: any) {
+  const orderId = order.id;
   const { data: dbItems } = await supabase.from('order_items').select('*').eq('order_id', orderId);
   const items = dbItems || [];
   if (items.length === 0 || !order.shipping_address) {
@@ -644,6 +778,29 @@ export async function pushOrderToShiprocket(orderId: string) {
     console.warn('[Shiprocket] SHIPROCKET_PICKUP_LOCATION is not set — falling back to "Primary". It must match the dashboard name exactly.');
   }
   const isCOD = order.payment_method === 'Cash On Delivery' || String(order.payment_method).toUpperCase() === 'COD';
+
+  // ---- Pre-flight validation with human readable errors --------------
+  // These surface verbatim on the admin Orders page instead of an opaque 502.
+  const missingAddress: string[] = [];
+  if (!String(shipping.addressLine || '').trim()) missingAddress.push('address line');
+  if (!String(shipping.city || '').trim()) missingAddress.push('city');
+  if (!String(shipping.state || '').trim()) missingAddress.push('state');
+  if (!String(shipping.zipCode || '').trim()) missingAddress.push('pincode');
+  if (missingAddress.length > 0) {
+    throw new Error(
+      `Cannot push to Shiprocket: shipping ${missingAddress.join(', ')} missing for order ${order.order_number}.`
+    );
+  }
+  if (!/^[1-9]\d{9}$/.test(normalizePhone10(shipping.phone))) {
+    throw new Error(
+      `Cannot push to Shiprocket: shipping phone "${shipping.phone || '(empty)'}" is not a valid 10-digit Indian mobile number for order ${order.order_number}.`
+    );
+  }
+  if (!/^\d{6}$/.test(String(shipping.zipCode || '').trim())) {
+    throw new Error(
+      `Cannot push to Shiprocket: pincode "${shipping.zipCode}" must be 6 digits for order ${order.order_number}.`
+    );
+  }
 
   const srPayload: ShiprocketOrderPayload = {
     order_id: order.order_number,
@@ -702,6 +859,7 @@ export async function pushOrderToShiprocket(orderId: string) {
       console.log(`[Shiprocket] order ${order.order_number} was already claimed by a concurrent push; keeping existing IDs.`);
       return { skipped: true, shiprocket_order_id: (await supabase.from('orders').select('shiprocket_order_id').eq('id', order.id).maybeSingle()).data?.shiprocket_order_id };
     }
+    await markPushSucceeded(order.id);
     return srResponse;
   }
   throw new Error(`Shiprocket create returned no order_id: ${JSON.stringify(srResponse).slice(0, 500)}`);

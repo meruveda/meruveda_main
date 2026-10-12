@@ -20,23 +20,55 @@ if (resendApiKey) {
 }
 
 export const sendEmail = async (to: string, subject: string, html: string): Promise<boolean> => {
-  try {
-    console.log(`[EmailService] Attempting to send email to: ${to}, From: ${emailFrom}`);
+  return sendEmailWithAttachments({ to, subject, html });
+};
 
+export interface EmailAttachment {
+  filename: string;
+  content: Buffer | string;
+  contentType?: string;
+}
+
+/**
+ * Send an HTML email with optional attachments (used for the PDF invoice).
+ * Returns true only when the provider accepted the message.
+ */
+export const sendEmailWithAttachments = async (options: {
+  to: string;
+  subject: string;
+  html: string;
+  attachments?: EmailAttachment[];
+  headers?: Record<string, string>;
+}): Promise<boolean> => {
+  const { to, subject, html, attachments, headers } = options;
+  try {
     if (!resend) {
       console.warn('[EmailService] Resend is not configured. Email cannot be sent.');
       return false;
     }
 
-    const response = await resend.emails.send({
-      from: emailFrom,
-      to,
-      subject,
-      html,
-    });
+    const response = await resend.emails.send(
+      {
+        from: emailFrom,
+        to,
+        subject,
+        html,
+        ...(attachments && attachments.length
+          ? {
+              attachments: attachments.map((a) => ({
+                filename: a.filename,
+                content: a.content,
+                ...(a.contentType ? { contentType: a.contentType } : {}),
+              })),
+            }
+          : {}),
+        ...(headers ? { headers } : {}),
+      }
+    );
 
     if (response.error) {
-      throw response.error;
+      console.error('[EmailService] Provider rejected the message:', response.error);
+      return false;
     }
 
     console.log(`[EmailService] Email sent successfully: ${response.data?.id}`);
@@ -45,6 +77,56 @@ export const sendEmail = async (to: string, subject: string, html: string): Prom
     console.error('[EmailService] Error sending email:', error);
     return false;
   }
+};
+
+/** True when a Resend API key is present and the client initialised. */
+export const isEmailConfigured = (): boolean => Boolean(resend);
+
+/**
+ * Short, plain invoice email body. The PDF is attached; a 7-day signed link is
+ * included when the invoice PDF was mirrored to Supabase Storage.
+ */
+export const getInvoiceEmailTemplate = (options: {
+  firstName?: string;
+  orderNumber: string;
+  invoiceNumber: string;
+  total: string;
+  signedUrl?: string | null;
+}): string => {
+  const { firstName, orderNumber, invoiceNumber, total, signedUrl } = options;
+  const greeting = firstName ? `Namaste ${firstName}` : 'Namaste';
+  const linkBlock = signedUrl
+    ? `<p style="margin:0 0 10px 0;font-size:14px;color:#4A3E3D;">You can also open it here (link valid for 7 days):<br>
+         <a href="${signedUrl}" style="word-break:break-all;color:#C09E5A;">${signedUrl}</a></p>`
+    : '';
+  return `
+    <!DOCTYPE html><html><body style="margin:0;padding:0;background:#F9F6F0;font-family:Helvetica,Arial,sans-serif;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F9F6F0;padding:24px 0;">
+        <tr><td align="center">
+          <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;background:#FFFFFF;border:1px solid #EFEAE2;">
+            <tr><td style="background:#2B1820;padding:22px 24px;">
+              <div style="color:#C09E5A;font-size:22px;letter-spacing:2px;text-transform:uppercase;font-weight:bold;">MeruVeda</div>
+              <div style="color:#E2D3C1;font-size:11px;letter-spacing:1px;text-transform:uppercase;">Tax invoice attached</div>
+            </td></tr>
+            <tr><td style="padding:24px;">
+              <p style="margin:0 0 14px 0;font-size:16px;color:#2B1820;">${greeting},</p>
+              <p style="margin:0 0 14px 0;font-size:14px;line-height:1.6;color:#4A3E3D;">
+                Thank you for your order. Your tax invoice <strong>${invoiceNumber}</strong>
+                for order <strong>#${orderNumber}</strong> (${total}) is attached as a PDF.
+              </p>
+              ${linkBlock}
+              <p style="margin:16px 0 0 0;font-size:13px;color:#8A7E7D;">
+                Keep this invoice for your records. Questions? Reply to this email or contact
+                customercare@meruvedawellness.com.
+              </p>
+            </td></tr>
+            <tr><td style="background:#F9F6F0;padding:14px 24px;font-size:12px;color:#8A7E7D;">
+              This is an automated message — please do not reply to this notification.
+            </td></tr>
+          </table>
+        </td></tr>
+      </table>
+    </body></html>`;
 };
 
 

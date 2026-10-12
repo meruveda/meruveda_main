@@ -118,6 +118,30 @@ export async function wasSent(purpose: string, referenceId: string): Promise<boo
   }
 }
 
+/**
+ * Exported so the invoice dispatcher can record non-WhatsApp channels (email)
+ * in the same `whatsapp_message_log` table, which is what the dedupe checks read.
+ */
+export const logMessage = logSend;
+
+/** Returns the delivery row for (purpose, referenceId), or null. */
+export async function getLogEntry(
+  purpose: string,
+  referenceId: string
+): Promise<{ status: string; error?: string | null; message_type?: string | null } | null> {
+  try {
+    const { data } = await supabase
+      .from('whatsapp_message_log')
+      .select('status, error, message_type')
+      .eq('purpose', purpose)
+      .eq('reference_id', referenceId)
+      .maybeSingle();
+    return (data as any) || null;
+  } catch {
+    return null;
+  }
+}
+
 /** Plain text session message (only deliverable inside the 24h session window). */
 export async function sendText(to: string, text: string): Promise<boolean> {
   const phone = normalizePhone(to);

@@ -81,6 +81,34 @@ export const config = {
   // ---- Scheduled jobs (7-day review request) ----
   // Shared secret Vercel Cron (or any scheduler) must send as `Authorization: Bearer <secret>`.
   cronSecret: process.env.CRON_SECRET || '',
+
+  // ---- Post-order automation flags ----
+  // BOTH DEFAULT OFF. With a flag off the app behaves exactly as before this
+  // feature existed (legacy WhatsApp invoice / legacy Shiprocket push paths).
+  // INVOICE_AUTO_SEND=true  -> postOrderConfirmed() sends the invoice itself
+  //                            (email attachment + WhatsApp document) with an
+  //                            atomic per-order claim and status bookkeeping.
+  // SHIPROCKET_AUTO_PUSH=true -> postOrderConfirmed() becomes the single push
+  //                            point for both COD placement and PayU success.
+  invoiceAutoSend: process.env.INVOICE_AUTO_SEND === 'true',
+  shiprocketAutoPush: process.env.SHIPROCKET_AUTO_PUSH === 'true',
+
+  // ---- Business identity printed on the tax invoice ----
+  // Read from env only — never commit real values. `GSTIN` is the legacy name
+  // still accepted so existing deployments keep working.
+  businessName: (process.env.BUSINESS_NAME || '').trim(),
+  businessAddress: (process.env.BUSINESS_ADDRESS || '').trim(),
+  businessGstin: (process.env.BUSINESS_GSTIN || process.env.GSTIN || '').trim(),
+
+  // ---- Invoice PDF storage (private bucket + 7-day signed URLs) ----
+  invoiceStorageBucket: (process.env.INVOICE_STORAGE_BUCKET || 'invoices').trim(),
+  invoiceSignedUrlExpirySeconds: Math.max(
+    60,
+    Number(process.env.INVOICE_SIGNED_URL_EXPIRY_SECONDS) || 7 * 24 * 60 * 60
+  ),
+  // WhatsApp OTP checkout flow. Default false — the no-OTP quick-login flow
+  // is active until OTP_ENABLED=true is set (and WhatsApp is configured).
+  otpEnabled: process.env.OTP_ENABLED === 'true',
   // Base URL of this backend — used by the webhook docs helper.
   backendUrl: process.env.BACKEND_URL || '',
 };

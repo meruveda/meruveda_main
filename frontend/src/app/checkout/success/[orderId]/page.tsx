@@ -1,7 +1,7 @@
 "use client";
 
 import { useAuth } from "@/context/AuthContext";
-import { useEffect, useState, use } from "react";
+import { useEffect, useState, use, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import axiosInstance from "@/api/axiosInstance";
 import { useCart } from "@/context/CartContext";
+import { track } from "@vercel/analytics";
 
 interface OrderDetails {
   id: string;
@@ -57,6 +58,7 @@ export default function CheckoutSuccessPage({ params }: { params: Promise<{ orde
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [cartCleared, setCartCleared] = useState(false);
+  const orderTracked = useRef(false);
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -87,6 +89,21 @@ export default function CheckoutSuccessPage({ params }: { params: Promise<{ orde
         if (!cartCleared && isConfirmed) {
           await clearCart();
           setCartCleared(true);
+        }
+        // Vercel Web Analytics — order_placed fires once when payment (or COD)
+        // is confirmed. Polling re-runs this effect, so the ref guards dupes.
+        if (isConfirmed && !orderTracked.current) {
+          orderTracked.current = true;
+          try {
+            track("order_placed", {
+              value: Number(orderData.total) || 0,
+              currency: "INR",
+              order_id: orderData.id,
+              payment_method: String(orderData.payment_method || ""),
+            });
+          } catch {
+            /* analytics must never break the success page */
+          }
         }
         // Payment completed on the phone but the laptop still shows a pending
         // order: keep polling the verified status until PayU's server-side

@@ -122,27 +122,10 @@ export const OrderDetailPage: React.FC = () => {
 
   const handleDownloadInvoice = async () => {
     if (!order) return;
-    // Fixed GST tax invoice (backend pdf-lib template) - same file sent on WhatsApp.
+    // Fixed GST tax invoice (backend pdf-lib template) - same file sent on WhatsApp/email.
     setIsDownloadingInvoice(true);
     try {
-      const token = localStorage.getItem('admin_token') || localStorage.getItem('token') || '';
-      const base = (import.meta as any).env?.VITE_API_URL || '/api';
-      const res = await fetch(base + '/orders/' + order.id + '/invoice', {
-        headers: token ? { Authorization: 'Bearer ' + token } : {},
-      });
-      if (!res.ok) throw new Error('Failed to download invoice');
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      try {
-        const anchor = document.createElement('a');
-        anchor.href = url;
-        anchor.download = `Invoice-${(order as any).order_number || order.id}.pdf`;
-        document.body.appendChild(anchor);
-        anchor.click();
-        anchor.remove();
-      } finally {
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-      }
+      await orderService.downloadInvoice(order.id, (order as any).order_number || order.orderNumber);
       toast.success('Invoice downloaded');
     } catch (err: any) {
       toast.error(err?.message || 'Failed to download invoice');
@@ -155,8 +138,16 @@ export const OrderDetailPage: React.FC = () => {
     if (!order) return;
     setIsResendingInvoice(true);
     try {
-      await orderService.resendInvoice(order.id);
-      toast.success('Invoice resent over WhatsApp');
+      const result: any = await orderService.resendInvoice(order.id);
+      const sentVia: string[] = [];
+      if (result?.email === 'sent') sentVia.push('email');
+      if (result?.whatsapp === 'sent') sentVia.push('WhatsApp');
+      if (sentVia.length > 0) {
+        toast.success(`Invoice ${result?.invoiceNumber || ''} resent via ${sentVia.join(' + ')}`);
+      } else {
+        toast.error(result?.reason || 'Invoice could not be resent — no channel available');
+      }
+      fetchOrderDetail();
     } catch (err: any) {
       toast.error(err?.response?.data?.error?.message || err?.message || 'Failed to resend invoice');
     } finally {
@@ -441,6 +432,65 @@ export const OrderDetailPage: React.FC = () => {
             </div>
           </div>
 
+          {/* Invoice card — always visible, independent of Shiprocket */}
+          <div className="card p-6 space-y-4">
+            <h3 className="section-title flex items-center gap-1.5 font-bold">
+              <FileText className="h-5 w-5 text-slate-400" /> Invoice
+            </h3>
+            <div className="space-y-3 text-sm">
+              <div className="flex justify-between items-center">
+                <span className="text-slate-500">Status</span>
+                {(() => {
+                  const status = order.invoiceStatus || 'not_sent'
+                  const styles: Record<string, string> = {
+                    sent: 'bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-400 dark:border-green-900/50',
+                    failed: 'bg-red-50 text-red-700 border-red-200 dark:bg-red-950/30 dark:text-red-400 dark:border-red-900/50',
+                    not_sent: 'bg-slate-50 text-slate-500 border-slate-200 dark:bg-slate-800/40 dark:text-slate-400 dark:border-slate-700',
+                  }
+                  const label = status === 'sent' ? 'Sent' : status === 'failed' ? 'Failed' : 'Not sent'
+                  return (
+                    <span className={`inline-flex items-center px-2 py-0.5 rounded-lg border text-[11px] font-semibold ${styles[status]}`}>
+                      {label}
+                    </span>
+                  )
+                })()}
+              </div>
+              {order.invoiceSentAt && (
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-500">Sent at</span>
+                  <span className="font-semibold">{formatDateTime(order.invoiceSentAt)}</span>
+                </div>
+              )}
+              {order.invoiceError && (
+                <p className="text-xs text-red-600 bg-red-50 dark:bg-red-950/20 border border-red-100 dark:border-red-900 rounded-lg p-3">
+                  Invoice error: {order.invoiceError}
+                </p>
+              )}
+              {order.invoiceStatus === 'not_sent' && !order.invoiceError && (
+                <p className="text-xs text-slate-400">
+                  The automatic invoice hook is off or has not run yet. Use Resend to send it now.
+                </p>
+              )}
+              <div className="grid grid-cols-2 gap-2 pt-1">
+                <button
+                  disabled={isDownloadingInvoice}
+                  className="btn-outline text-xs py-1.5 justify-center"
+                  onClick={handleDownloadInvoice}
+                >
+                  {isDownloadingInvoice ? 'Downloading…' : 'Download invoice'}
+                </button>
+                <button
+                  disabled={isResendingInvoice}
+                  className="btn-outline text-xs py-1.5 justify-center"
+                  onClick={handleResendInvoice}
+                  title="Send the PDF invoice again by email + WhatsApp (bypasses the once-only guard)"
+                >
+                  {isResendingInvoice ? 'Sending…' : 'Resend invoice'}
+                </button>
+              </div>
+            </div>
+          </div>
+
           {/* Logistics tracking */}
           <div className="card p-6 space-y-4">
             <h3 className="section-title flex items-center gap-1.5">
@@ -468,18 +518,39 @@ export const OrderDetailPage: React.FC = () => {
               <h3 className="section-title flex items-center gap-1.5">
                 <Truck className="h-5 w-5 text-slate-400" /> Shiprocket Logistics
               </h3>
+              <div className="flex justify-between items-center text-xs">
+                <span className="text-slate-500">Push status</span>
+                {(() => {
+                  const failed = !!(order.shiprocketPushError || order.shiprocketPushStatus === 'failed')
+                  return (
+                    <span
+                      className={`inline-flex items-center px-2 py-0.5 rounded-lg border font-semibold ${
+                        failed
+                          ? 'bg-red-50 text-red-700 border-red-200 dark:bg-red-950/30 dark:text-red-400 dark:border-red-900/50'
+                          : 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-400 dark:border-amber-900/50'
+                      }`}
+                    >
+                      {failed ? 'Failed' : order.shiprocketPushStatus === 'in_progress' ? 'In progress' : 'Pending'}
+                    </span>
+                  )
+                })()}
+              </div>
               <p className="text-xs text-slate-500">This order has not been pushed to Shiprocket yet.</p>
-              {shiprocketError && (
+              {(shiprocketError || order.shiprocketPushError) && (
                 <p className="text-xs text-red-600 bg-red-50 dark:bg-red-950/20 border border-red-100 dark:border-red-900 rounded-lg p-3">
-                  Shiprocket error: {shiprocketError}
+                  Shiprocket error: {shiprocketError || order.shiprocketPushError}
                 </p>
               )}
               <button
-                disabled={isPushingShiprocket}
+                disabled={isPushingShiprocket || order.shiprocketPushStatus === 'in_progress'}
                 className="btn-primary text-xs py-2 justify-center w-full"
                 onClick={handlePushToShiprocket}
               >
-                {isPushingShiprocket ? 'Pushing...' : 'Push to Shiprocket'}
+                {isPushingShiprocket
+                  ? 'Pushing...'
+                  : order.shiprocketPushStatus === 'failed' || order.shiprocketPushError
+                    ? 'Retry push to Shiprocket'
+                    : 'Push to Shiprocket'}
               </button>
             </div>
           )}
@@ -550,23 +621,8 @@ export const OrderDetailPage: React.FC = () => {
                     {isDownloadingLabel ? 'Downloading...' : 'Print Label'}
                   </button>
                   <button
-                    disabled={isDownloadingInvoice}
-                    className="btn-outline text-xs py-1.5 justify-center"
-                    onClick={handleDownloadInvoice}
-                  >
-                    {isDownloadingInvoice ? 'Downloading...' : 'Invoice PDF'}
-                  </button>
-                  <button
-                    disabled={isResendingInvoice}
-                    className="btn-outline text-xs py-1.5 justify-center"
-                    onClick={handleResendInvoice}
-                    title="Resend the PDF invoice over WhatsApp"
-                  >
-                    {isResendingInvoice ? 'Sending...' : 'Resend Invoice'}
-                  </button>
-                  <button
                     disabled={!(order as any).awb_code || isRefreshingTracking}
-                    className="btn-outline text-xs py-1.5 col-span-2 justify-center"
+                    className="btn-outline text-xs py-1.5 justify-center"
                     onClick={handleRefreshTracking}
                   >
                     {isRefreshingTracking ? 'Refreshing...' : 'Refresh Tracking'}

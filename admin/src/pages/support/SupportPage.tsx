@@ -15,6 +15,7 @@ export const SupportPage: React.FC = () => {
   const [isReplyOpen, setIsReplyOpen] = useState(false)
   const [selectedTicket, setSelectedTicket] = useState<SupportTicket | null>(null)
   const [replyText, setReplyText] = useState('')
+  const [isSubmittingReply, setIsSubmittingReply] = useState(false)
 
   const fetchTickets = async () => {
     setIsLoading(true)
@@ -52,13 +53,19 @@ export const SupportPage: React.FC = () => {
     e.preventDefault()
     if (!selectedTicket || !replyText) return
 
+    setIsSubmittingReply(true)
     try {
       await supportService.replyToTicket(selectedTicket.id, replyText)
       toast.success('Reply submitted and marked as Resolved!')
       setIsReplyOpen(false)
       fetchTickets()
-    } catch (err) {
-      toast.error('Failed to submit reply')
+    } catch (err: any) {
+      // The backend refuses with an actionable message when the reply column is
+      // not migrated yet — surface that instead of a generic failure toast.
+      const message = err?.response?.data?.error?.message || err?.message || 'Failed to submit reply'
+      toast.error(message)
+    } finally {
+      setIsSubmittingReply(false)
     }
   }
 
@@ -125,7 +132,7 @@ export const SupportPage: React.FC = () => {
                         className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full ${
                           t.priority === 'urgent' || t.priority === 'high'
                             ? 'bg-red-50 text-red-700'
-                            : t.priority === 'medium'
+                            : t.priority === 'normal'
                             ? 'bg-amber-50 text-amber-700'
                             : 'bg-slate-50 text-slate-700'
                         }`}
@@ -180,7 +187,7 @@ export const SupportPage: React.FC = () => {
           </div>
 
           <div>
-            <label className="label">Response message Placeholder</label>
+            <label className="label">Response message</label>
             <textarea
               required
               value={replyText}
@@ -198,8 +205,8 @@ export const SupportPage: React.FC = () => {
             >
               Cancel
             </button>
-            <button type="submit" className="btn-primary px-4 py-2 text-xs">
-              Submit Response
+            <button type="submit" disabled={isSubmittingReply} className="btn-primary px-4 py-2 text-xs">
+              {isSubmittingReply ? 'Submitting…' : 'Submit Response'}
             </button>
           </div>
         </form>

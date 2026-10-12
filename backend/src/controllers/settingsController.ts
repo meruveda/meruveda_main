@@ -8,9 +8,19 @@ export const getSettings = async (req: Request, res: Response, next: NextFunctio
       .select('*');
 
     if (error) throw error;
-    
+
+    // The route is public because the storefront needs store-level config
+    // (logo, store hours, announcement). Per-user notification preferences are
+    // stored in the same table under `notification_preferences_<userId>` and must
+    // never leave through the public endpoint — they are only returned to the
+    // signed-in admin.
+    const isAdmin = req.user?.role === 'admin';
+    const rows = (data || []).filter((row: any) =>
+      isAdmin || !String(row.key || '').startsWith('notification_preferences_')
+    );
+
     // Convert array of key/values to a single object
-    const settingsObject = data.reduce((acc: any, curr: any) => {
+    const settingsObject = rows.reduce((acc: any, curr: any) => {
       acc[curr.key] = curr.value;
       return acc;
     }, {});

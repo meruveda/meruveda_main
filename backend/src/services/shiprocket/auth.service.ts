@@ -14,6 +14,11 @@ import { ShiprocketLoginResponse } from './types';
 let cachedToken: string | null = null;
 let tokenExpiryTime: number | null = null;
 
+// Cached for ~10 days so a normal push never logs in again. Shiprocket can
+// revoke/expire a token earlier than that; every request 401s once, we clear
+// the cache and retry exactly one login round-trip (see utils.ts#shiprocketRequest).
+const TOKEN_TTL_MS = 10 * 24 * 60 * 60 * 1000;
+
 export const shiprocketAuth = {
   async login(): Promise<string> {
     // If token exists and is valid (with a 5-minute buffer)
@@ -43,10 +48,9 @@ export const shiprocketAuth = {
       }
 
       const data = (await response.json()) as ShiprocketLoginResponse;
-      
+
       cachedToken = data.token;
-      // Shiprocket tokens typically expire in 24 hours. We'll set expiry to 23 hours to be safe.
-      tokenExpiryTime = Date.now() + 23 * 60 * 60 * 1000;
+      tokenExpiryTime = Date.now() + TOKEN_TTL_MS;
 
       return cachedToken;
     } catch (error) {

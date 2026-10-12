@@ -16,6 +16,24 @@ import {
   phoneVariants,
   placeholderEmailFor,
 } from '../utils/phone';
+import { verifyToken } from '../utils/jwt';
+
+/**
+ * Registration is public, so `role` in the body can never be trusted on its own:
+ * any visitor could otherwise POST { role: 'admin' } and escalate. The role field is
+ * only honoured when the caller also presents a JWT that belongs to a real admin
+ * account — which is exactly the case for the admin portal's "Add user" flow.
+ */
+const requestedRoleIsAdminTrusted = (req: Request): boolean => {
+  try {
+    const header = req.headers.authorization;
+    if (!header || !header.startsWith('Bearer ')) return false;
+    const payload = verifyToken(header.split(' ')[1]);
+    return payload?.role === 'admin';
+  } catch {
+    return false;
+  }
+};
 
 export const register = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -25,14 +43,21 @@ export const register = async (req: Request, res: Response, next: NextFunction) 
       return res.status(400).json({ error: { message: 'Password must be at least 6 characters long' } });
     }
 
-    // Mobile number is the primary login identifier and is mandatory.
-    if (!isValidPhone10(phone)) {
-      return res.status(400).json({ error: { message: 'Please enter a valid 10-digit mobile number' } });
-    }
-    const phone10 = normalizePhone10(phone);
-    const storedPhone = canonicalPhone(phone10);
+    // Public registrations are always customers. Only an admin token may ask for
+    // another role; unknown values fall back to 'customer'.
+    const trustedAdminCaller = requestedRoleIsAdminTrusted(req);
+    const requestedRole = trustedAdminCaller && (role === 'admin' || role === 'customer') ? role : 'customer';
 
-    // Email is optional — kept for order notifications. Validate only when given.
+    // Mobile number is the primary login identifier for storefront accounts.
+    // Admin-created staff accounts are allowed to be email-only, so the phone is
+    // mandatory only when no email was supplied at all.
+    const hasPhoneInput = isValidPhone10(phone);
+    let phone10: string | null = null;
+    if (hasPhoneInput) {
+      phone10 = normalizePhone10(phone);
+    }
+
+    // Email is optional for storefront signups — kept for order notifications.
     const cleanEmail = typeof email === 'string' ? email.trim() : '';
     if (cleanEmail && !isValidEmail(cleanEmail)) {
       return res.status(400).json({ error: { message: 'Please enter a valid email address' } });
@@ -41,16 +66,29 @@ export const register = async (req: Request, res: Response, next: NextFunction) 
       return res.status(400).json({ error: { message: 'Please enter a valid email address' } });
     }
 
+    if (!phone10 && !cleanEmail) {
+      return res.status(400).json({ error: { message: 'Please enter a 10-digit mobile number' } });
+    }
+    // Phone supplied in an unusable shape: keep the storefront's strict message so
+    // no half-entered number creates a broken account.
+    if (phone !== undefined && phone !== null && String(phone).trim() !== '' && !phone10) {
+      return res.status(400).json({ error: { message: 'Please enter a valid 10-digit mobile number' } });
+    }
+
+    const storedPhone = phone10 ? canonicalPhone(phone10) : null;
+
     // Prevent duplicate accounts for the same normalized mobile number,
     // matching every legacy stored spelling of it.
-    const { data: phoneOwner, error: phoneCheckError } = await supabase
-      .from('users')
-      .select('id')
-      .in('phone', phoneVariants(phone10))
-      .maybeSingle();
-    if (phoneCheckError) throw phoneCheckError;
-    if (phoneOwner) {
-      return res.status(400).json({ error: { message: 'This mobile number is already registered. Please log in instead.' } });
+    if (phone10) {
+      const { data: phoneOwner, error: phoneCheckError } = await supabase
+        .from('users')
+        .select('id')
+        .in('phone', phoneVariants(phone10))
+        .maybeSingle();
+      if (phoneCheckError) throw phoneCheckError;
+      if (phoneOwner) {
+        return res.status(400).json({ error: { message: 'This mobile number is already registered. Please log in instead.' } });
+      }
     }
 
     if (cleanEmail) {
@@ -69,7 +107,7 @@ export const register = async (req: Request, res: Response, next: NextFunction) 
 
     // users.email is NOT NULL + UNIQUE, so phone-only accounts keep the same
     // deterministic placeholder identity the OTP flow already uses.
-    const emailToStore = cleanEmail || placeholderEmailFor(storedPhone);
+    const emailToStore = cleanEmail || placeholderEmailFor(storedPhone as string);
 
     // Create user
     const { data: newUser, error: createError } = await supabase
@@ -80,7 +118,7 @@ export const register = async (req: Request, res: Response, next: NextFunction) 
         first_name: firstName,
         last_name: lastName,
         phone: storedPhone,
-        role: role || 'customer',
+        role: requestedRole,
         active: true
       })
       .select('id, email, first_name, last_name, role, phone')

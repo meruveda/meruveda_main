@@ -23,6 +23,12 @@ interface AuthContextType {
   resendOtp: (phone: string) => Promise<{ expiresInSeconds: number; devOtp?: string }>;
   /** Verify the OTP — registers or logs the customer in and restores the session. */
   verifyOtp: (phone: string, code: string, name?: string) => Promise<void>;
+  /**
+   * No-OTP checkout sign-up / login. Logs the number in when it already
+   * exists, otherwise auto-creates the customer. Session is phone_verified=false
+   * until a real OTP verification.
+   */
+  quickLogin: (phone: string, name: string) => Promise<void>;
   /** Persist name / email / address collected during checkout. */
   saveProfile: (payload: { name?: string; email?: string; address?: any; phone?: string }) => Promise<void>;
 }
@@ -80,6 +86,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(verifiedUser);
   }, []);
 
+  const quickLogin = useCallback(async (phone: string, name: string) => {
+    const { user: quickUser } = await authService.quickLogin(phone, name);
+    setUser(quickUser);
+  }, []);
+
   const saveProfile = useCallback(async (payload: { name?: string; email?: string; address?: any; phone?: string }) => {
     await authService.saveProfile(payload);
     // Refresh the in-memory user so later steps see the saved details.
@@ -102,6 +113,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         sendOtp,
         resendOtp,
         verifyOtp,
+        quickLogin,
         saveProfile,
       }}
     >

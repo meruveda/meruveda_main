@@ -57,6 +57,18 @@ const mapOrder = (o: any): Order => ({
     pincode: o.shipping_address?.pincode || o.shipping_address?.zipCode || '',
     country: o.shipping_address?.country || 'India'
   },
+  billingAddress: o.billing_address
+    ? {
+        fullName: o.billing_address.fullName || '',
+        phone: o.billing_address.phone || '',
+        addressLine1: o.billing_address.addressLine1 || o.billing_address.addressLine || '',
+        addressLine2: o.billing_address.addressLine2 || '',
+        city: o.billing_address.city || '',
+        state: o.billing_address.state || '',
+        pincode: o.billing_address.pincode || o.billing_address.zipCode || '',
+        country: o.billing_address.country || 'India',
+      }
+    : null,
   subtotal: o.subtotal || 0,
   shippingCharge: o.shipping_fee !== undefined ? Number(o.shipping_fee) : (o.shipping_cost !== undefined ? Number(o.shipping_cost) : ((o.subtotal || 0) >= 1000 ? 0 : 50)),
   discount: o.discount || 0,
@@ -74,15 +86,44 @@ const mapOrder = (o: any): Order => ({
   trackingUrl: o.tracking_url,
   trackingStatus: o.tracking_status,
   pickupLocation: o.pickup_location,
+  pickupStatus: o.pickup_status ?? null,
   shippingCost: o.shipping_cost,
   manifestUrl: o.manifest_url,
   labelUrl: o.label_url,
   invoiceUrl: o.invoice_url,
   lastTrackingSync: o.last_tracking_sync,
   notes: o.notes,
+  // --- delta 010 columns (null when that migration has not been applied) ---
+  invoiceSentAt: o.invoice_sent_at ?? null,
+  invoiceError: o.invoice_error ?? null,
+  invoiceStatus: deriveInvoiceStatus(o),
+  shiprocketPushStatus: o.shiprocket_push_status ?? null,
+  shiprocketPushError: o.shiprocket_push_error ?? null,
+  shiprocketPushedAt: o.shiprocket_pushed_at ?? null,
+  orderTrackingHistory: Array.isArray(o.order_tracking_history) ? o.order_tracking_history : [],
   createdAt: o.created_at || new Date().toISOString(),
   updatedAt: o.updated_at || new Date().toISOString()
 });
+
+/**
+ * Mirrors backend/src/services/invoiceDispatchService.ts#deriveInvoiceStatus so
+ * the Orders list can render a badge even when the delta-010 columns are absent
+ * (in which case both are null -> "not_sent").
+ */
+const deriveInvoiceStatus = (o: any): 'sent' | 'failed' | 'not_sent' => {
+  const sentAt = o?.invoice_sent_at || null
+  const error = o?.invoice_error || null
+  if (error) return 'failed'
+  if (sentAt) return 'sent'
+  return 'not_sent'
+}
+
+/** Mirrors the backend push claim so the badge degrades gracefully. */
+export const deriveShiprocketPushStatus = (o: any): 'pushed' | 'failed' | 'pending' => {
+  if (o?.shiprocket_order_id || o?.shiprocketPushStatus === 'pushed') return 'pushed'
+  if (o?.shiprocket_push_error || o?.shiprocketPushStatus === 'failed') return 'failed'
+  return 'pending'
+}
 
 class OrderService {
   async getOrders(params?: OrderListParams): Promise<Order[]> {
@@ -136,8 +177,26 @@ class OrderService {
     await apiClient.delete<any>(`/orders/${id}`);
   }
 
-  async resendInvoice(id: string): Promise<void> {
-    await apiClient.post<any>(`/orders/${id}/resend-invoice`);
+  /** Force-resend the invoice (bypasses the once-only claim). */
+  async resendInvoice(id: string): Promise<{ email?: string; whatsapp?: string; reason?: string; invoiceNumber?: string }> {
+    return apiClient.post<any>(`/orders/${id}/resend-invoice`);
+  }
+
+  /** Download the GST invoice PDF for one order (auth handled by axiosInstance). */
+  async downloadInvoice(id: string, orderNumber: string): Promise<void> {
+    const res = await axiosInstance.get(`/orders/${id}/invoice`, { responseType: 'blob' });
+    const blob = res.data as Blob;
+    const url = URL.createObjectURL(blob);
+    try {
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `Invoice-${orderNumber || id}.pdf`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+    } finally {
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
   }
 }
 

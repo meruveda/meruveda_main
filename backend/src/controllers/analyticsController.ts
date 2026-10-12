@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { supabase } from '../database/supabase';
+import { hasTable } from '../services/schemaGuard';
 
 // Helper to determine if an order qualifies for revenue calculation
 const isOrderQualifying = (order: any) => {
@@ -201,6 +202,127 @@ export const getVisitorStats = async (req: Request, res: Response, next: NextFun
   try {
     res.json({
       data: []
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ---------------------------------------------------------------------------
+// First-party pageview tracking (additive — see database/deltas/009).
+// No PII: path, referrer host, random session id, coarse device type only.
+// ---------------------------------------------------------------------------
+
+const PAGEVIEW_PATH_MAX = 200;
+const PAGEVIEW_REFERRER_MAX = 300;
+const SESSION_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
+const DEVICE_TYPES = new Set(['mobile', 'tablet', 'desktop']);
+
+/** Public, rate-limited — the storefront fires this on every route change. */
+export const recordPageview = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    // Delta 009 not applied yet — accept and drop so the storefront never breaks.
+    if (!(await hasTable('page_views'))) {
+      return res.status(204).end();
+    }
+
+    const rawPath = String(req.body?.path || '');
+    const path = rawPath.startsWith('/') ? rawPath.slice(0, PAGEVIEW_PATH_MAX) : '/';
+
+    const rawReferrer = String(req.body?.referrer || '');
+    let referrer = '';
+    if (rawReferrer) {
+      try {
+        // Store only the host — full URLs can carry query-string PII.
+        referrer = new URL(rawReferrer).host.slice(0, PAGEVIEW_REFERRER_MAX);
+      } catch {
+        referrer = '';
+      }
+    }
+
+    const sessionId = String(req.body?.sessionId || '');
+    if (!SESSION_ID_RE.test(sessionId)) {
+      return res.status(400).json({ error: { message: 'Invalid session id' } });
+    }
+
+    const deviceRaw = String(req.body?.deviceType || 'desktop');
+    const deviceType = DEVICE_TYPES.has(deviceRaw) ? deviceRaw : 'desktop';
+
+    const { error } = await supabase.from('page_views').insert({
+      path,
+      referrer: referrer || null,
+      session_id: sessionId,
+      device_type: deviceType,
+    });
+    if (error) throw error;
+
+    res.status(204).end();
+  } catch (error) {
+    // Fire-and-forget from the client — log but never surface an error body
+    // that could pollute the console or break a navigation.
+    console.error('[Analytics] pageview insert failed:', error);
+    res.status(204).end();
+  }
+};
+
+/** Admin-only traffic summary for the Analytics page. */
+export const getTrafficStats = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const rangeParam = String(req.query.range || '7d');
+    const days = rangeParam === '30d' ? 30 : 7;
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+    if (!(await hasTable('page_views'))) {
+      return res.json({
+        data: { range: `${days}d`, totalViews: 0, uniqueSessions: 0, topPages: [], deviceSplit: {}, daily: [] },
+      });
+    }
+
+    // Cap rows so a high-traffic month cannot OOM the function; 50k is far
+    // beyond realistic Hobby-plan volume and keeps aggregation in JS simple.
+    const { data: rows, error } = await supabase
+      .from('page_views')
+      .select('path, session_id, device_type, created_at')
+      .gte('created_at', since)
+      .order('created_at', { ascending: true })
+      .limit(50_000);
+    if (error) throw error;
+
+    const sessions = new Set<string>();
+    const byPath = new Map<string, number>();
+    const byDevice = new Map<string, number>();
+    const byDay = new Map<string, number>();
+
+    for (const row of rows || []) {
+      if (row.session_id) sessions.add(row.session_id);
+      byPath.set(row.path, (byPath.get(row.path) || 0) + 1);
+      byDevice.set(row.device_type, (byDevice.get(row.device_type) || 0) + 1);
+      const day = String(row.created_at).slice(0, 10);
+      byDay.set(day, (byDay.get(day) || 0) + 1);
+    }
+
+    const topPages = [...byPath.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([path, views]) => ({ path, views }));
+
+    // Zero-filled daily series so the line chart has continuous x-axis.
+    const daily: Array<{ date: string; views: number }> = [];
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+      const key = d.toISOString().slice(0, 10);
+      daily.push({ date: key, views: byDay.get(key) || 0 });
+    }
+
+    res.json({
+      data: {
+        range: `${days}d`,
+        totalViews: rows?.length || 0,
+        uniqueSessions: sessions.size,
+        topPages,
+        deviceSplit: Object.fromEntries(byDevice),
+        daily,
+      },
     });
   } catch (error) {
     next(error);

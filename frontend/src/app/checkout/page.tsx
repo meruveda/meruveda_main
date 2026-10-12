@@ -23,6 +23,12 @@ import {
   Star
 } from "lucide-react";
 import axiosInstance from "@/api/axiosInstance";
+import { track } from "@vercel/analytics";
+
+// OTP feature flag. Default false = the no-OTP Sign up / Login flow below is
+// active. Set NEXT_PUBLIC_OTP_ENABLED=true to bring the WhatsApp OTP UI back.
+// Backend must have OTP_ENABLED=true as well for the OTP endpoints to respond.
+const OTP_ENABLED = process.env.NEXT_PUBLIC_OTP_ENABLED === "true";
 
 const SHIPPING_IS_TAXABLE = false; // TODO: PENDING CLIENT CONFIRMATION. Set to true to tax shipping charges.
 
@@ -314,7 +320,7 @@ function writeStoredAddresses(list: Address[]) {
 
 export default function CheckoutPage() {
   const { cart, cartTotal, removeFromCart, updateQuantity } = useCart();
-  const { user, isAuthenticated, isLoading, sendOtp, resendOtp, verifyOtp, saveProfile } = useAuth();
+  const { user, isAuthenticated, isLoading, sendOtp, resendOtp, verifyOtp, quickLogin, saveProfile } = useAuth();
   const router = useRouter();
 
   // No separate login screen: the checkout form itself is the login.
@@ -343,8 +349,12 @@ export default function CheckoutPage() {
   const [otpError, setOtpError] = useState("");
   const [otpResendIn, setOtpResendIn] = useState(0);
   const [customerEmail, setCustomerEmail] = useState("");
+  // No-OTP Sign up flow (active while OTP_ENABLED is false).
+  const [isSigningUp, setIsSigningUp] = useState(false);
+  const [mobileError, setMobileError] = useState("");
 
   const hydratedFromProfileRef = useRef(false);
+  const beginCheckoutTracked = useRef(false);
 
 
   // Payment method state: strictly "payu" (Pay Online via PayU) or "cod" (Cash on Delivery)
@@ -509,8 +519,49 @@ export default function CheckoutPage() {
     const next = normalizeMobile(value);
     const changed = next !== mobile;
     setMobile(next);
+    setMobileError("");
     if (changed && otpVerified) {
       resetVerification("Mobile number changed — please verify it again.");
+    }
+  };
+
+  /** 10-digit Indian mobile check on the normalized digits. */
+  const isValidIndianMobile = (value: string): boolean => /^[6-9]\d{9}$/.test(normalizePhoneDigits(value));
+
+  /**
+   * No-OTP Sign up / Login (active while OTP_ENABLED is false).
+   * Backend logs the number in when it already exists, otherwise auto-creates
+   * the customer. After success the rest of checkout works exactly as before.
+   */
+  const handleSignUp = async () => {
+    setOtpError("");
+    setMobileError("");
+
+    if (!contactName.trim()) {
+      setOtpError("Please enter your name.");
+      return;
+    }
+    if (!isValidIndianMobile(mobile)) {
+      setMobileError("Enter a valid 10-digit Indian mobile number.");
+      return;
+    }
+
+    setIsSigningUp(true);
+    try {
+      await quickLogin(mobile, contactName.trim());
+      setOtpVerified(true);
+      setOtpMessage("Signed in. You can place your order now.");
+      if (typeof window !== "undefined") {
+        try {
+          window.dispatchEvent(new CustomEvent("meruveda:auth-changed"));
+        } catch {
+          /* noop */
+        }
+      }
+    } catch (err: any) {
+      setOtpError(err?.message || "Could not sign you in. Please try again.");
+    } finally {
+      setIsSigningUp(false);
     }
   };
 
@@ -647,6 +698,21 @@ export default function CheckoutPage() {
         <Loader2 size={40} className="animate-spin text-gold" />
       </div>
     );
+  }
+
+  // Vercel Web Analytics — fire begin_checkout once when the page first
+  // renders with a non-empty cart. Never blocks or re-fires on re-renders.
+  if (cart.length > 0 && !beginCheckoutTracked.current) {
+    beginCheckoutTracked.current = true;
+    try {
+      track("begin_checkout", {
+        value: cartTotal,
+        currency: "INR",
+        items: cart.length,
+      });
+    } catch {
+      /* analytics must never break checkout */
+    }
   }
 
   if (cart.length === 0) {
@@ -1083,32 +1149,51 @@ export default function CheckoutPage() {
                       inputMode="numeric"
                       value={mobile}
                       onChange={(e) => handleMobileChange(e.target.value)}
-                      className={inputClass}
+                      className={`${inputClass} ${mobileError ? "border-red-400" : ""}`}
                       placeholder="98765 43210"
                     />
-                    {/* OTP DISABLED — Send/Resend OTP button commented out (kept
-                        below for re-enable). Verification is unavailable, so the
-                        Pay / Place Order button stays blocked. */}
-                    {/*
-                    {!otpVerified && (
-                      <button
-                        type="submit"
-                        disabled={isSendingOtp || (otpResendIn > 0 && otpSent)}
-                        className="shrink-0 bg-deep-purple text-white px-4 text-xs font-bold rounded-lg hover:bg-deep-purple/90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+                    {/* OTP DISABLED TEMPORARILY - re-enable by setting OTP_ENABLED=true.
+                        When the flag is off, the Sign up button below runs the no-OTP
+                        quick-login flow (login-if-exists / auto-register). */}
+                    {OTP_ENABLED ? (
+                      /*
+                      {!otpVerified && (
+                        <button
+                          type="submit"
+                          disabled={isSendingOtp || (otpResendIn > 0 && otpSent)}
+                          className="shrink-0 bg-deep-purple text-white px-4 text-xs font-bold rounded-lg hover:bg-deep-purple/90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+                        >
+                          {isSendingOtp ? <Loader2 size={14} className="animate-spin" /> : <Smartphone size={14} />}
+                          {otpSent ? "Resend" : "Send OTP"}
+                        </button>
+                      )}
+                      */
+                      <span
+                        title="Verification codes are temporarily unavailable"
+                        className="shrink-0 bg-gray-100 text-gray-400 px-4 py-2 text-xs font-bold rounded-lg flex items-center gap-1.5 cursor-not-allowed"
                       >
-                        {isSendingOtp ? <Loader2 size={14} className="animate-spin" /> : <Smartphone size={14} />}
-                        {otpSent ? "Resend" : "Send OTP"}
+                        <Smartphone size={14} />
+                        Unavailable
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={handleSignUp}
+                        disabled={isSigningUp || otpVerified}
+                        className="shrink-0 bg-deep-purple text-white px-4 py-2 text-xs font-bold rounded-lg hover:bg-deep-purple/90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+                      >
+                        {isSigningUp ? (
+                          <Loader2 size={14} className="animate-spin" />
+                        ) : otpVerified ? (
+                          <CheckCircle2 size={14} />
+                        ) : (
+                          <Smartphone size={14} />
+                        )}
+                        {otpVerified ? "Signed in" : "Sign up"}
                       </button>
                     )}
-                    */}
-                    <span
-                      title="Verification codes are temporarily unavailable"
-                      className="shrink-0 bg-gray-100 text-gray-400 px-4 py-2 text-xs font-bold rounded-lg flex items-center gap-1.5 cursor-not-allowed"
-                    >
-                      <Smartphone size={14} />
-                      Unavailable
-                    </span>
                   </div>
+                  {mobileError && <p className={errorClass}>{mobileError}</p>}
                 </div>
               </div>
 
@@ -1172,7 +1257,7 @@ export default function CheckoutPage() {
               {otpVerified && (
                 <div className="flex flex-wrap items-center justify-between gap-2 border border-green-200 bg-green-50 rounded-xl px-4 py-3">
                   <span className="flex items-center gap-2 text-xs font-bold text-green-700">
-                    <CheckCircle2 size={15} /> Verified ✓
+                    <CheckCircle2 size={15} /> {OTP_ENABLED ? "Verified ✓" : "Signed in ✓"}
                     <span className="font-medium text-green-600">{mobile}</span>
                   </span>
                   <button

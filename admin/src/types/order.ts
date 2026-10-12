@@ -42,6 +42,7 @@ export interface Order {
   customerPhone: string
   items: OrderItem[]
   shippingAddress: ShippingAddress
+  billingAddress?: ShippingAddress | null
   subtotal: number
   shippingCharge: number
   discount: number
@@ -59,12 +60,22 @@ export interface Order {
   trackingUrl?: string
   trackingStatus?: string
   pickupLocation?: string
+  pickupStatus?: string | null
   shippingCost?: number
   manifestUrl?: string
   labelUrl?: string
   invoiceUrl?: string
   lastTrackingSync?: string
   notes?: string
+  /** Delta 010 — null/undefined when that migration has not been applied yet. */
+  invoiceSentAt?: string | null
+  invoiceError?: string | null
+  invoiceStatus?: 'sent' | 'failed' | 'not_sent'
+  /** Delta 010 — 'pushed' | 'failed' | 'in_progress' | null (never attempted). */
+  shiprocketPushStatus?: string | null
+  shiprocketPushError?: string | null
+  shiprocketPushedAt?: string | null
+  orderTrackingHistory?: Array<{ id: string; activity?: string; location?: string; created_at?: string }>
   createdAt: string
   updatedAt: string
 }

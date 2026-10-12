@@ -54,7 +54,9 @@ class ProductService {
     // Strip unique/auto-generated fields to avoid DB conflicts
     const { id: _id, createdAt: _ca, updatedAt: _ua, ...rest } = prod as any;
     const newSku = prod.sku ? `${prod.sku}-COPY` : `COPY-${Date.now()}`;
-    return await this.createProduct({ ...rest, name: prod.name + ' (Copy)', sku: newSku, status: 'inactive' });
+    // products.status only accepts ('active','inactive','draft'); duplicates are kept
+    // unpublished so they cannot go live before someone reviews them.
+    return await this.createProduct({ ...rest, name: prod.name + ' (Copy)', sku: newSku, status: 'draft' });
   }
 }
 

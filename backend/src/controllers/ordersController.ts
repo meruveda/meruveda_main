@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { orderService, pushOrderToShiprocket, retryFailedShiprocketPushes } from '../services/orderService';
-import { orderNotifyService } from '../services/orderNotifyService';
+import { postOrderConfirmed } from '../services/postOrderConfirmed';
+import { invoiceDispatchService } from '../services/invoiceDispatchService';
 import { supabase } from '../database/supabase';
 import { normalizePhone } from '../services/whatsappService';
 import { hasColumn } from '../services/schemaGuard';
@@ -41,12 +42,13 @@ export const getOrderById = async (req: Request, res: Response, next: NextFuncti
 export const createOrder = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const data = await orderService.createOrder(req.body, req.user?.id);
-    // Cash on Delivery has no payment callback, so the post-purchase WhatsApp
-    // automation (confirmation + PDF invoice to customer & admin) runs here.
+    // Cash on Delivery has no payment callback, so the shared post-confirmation
+    // hook (invoice delivery + Shiprocket push) runs here. Awaited inside its
+    // own try/catch — it never rejects, so order creation always succeeds.
     try {
-      await orderNotifyService.sendPostPurchaseMessages(data.id);
-    } catch (notifyErr: any) {
-      console.error('[Orders] Post-purchase WhatsApp messages failed:', notifyErr?.message || notifyErr);
+      await postOrderConfirmed(data.id, { source: 'cod_placement' });
+    } catch (postErr: any) {
+      console.error('[Orders] postOrderConfirmed failed:', postErr?.message || postErr);
     }
     res.status(201).json({ data });
   } catch (error) {
@@ -222,6 +224,9 @@ export const downloadInvoice = async (req: Request, res: Response, next: NextFun
     const pdf = await generateInvoicePdf(order);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="Invoice-${order.order_number}.pdf"`);
+    // Invoices contain PII — never let a shared proxy cache them.
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.send(pdf);
   } catch (error: any) {
     if (error.status === 404) {
@@ -249,8 +254,17 @@ export const resendInvoice = async (req: Request, res: Response, next: NextFunct
       return res.status(403).json({ error: { message: 'Forbidden' } });
     }
 
-    const result = await orderNotifyService.resendInvoice(id as string);
-    res.json({ data: result, message: 'Invoice resent over WhatsApp.' });
+    const result = await invoiceDispatchService.resendInvoiceDispatch(id as string);
+    const channels = [result.email, result.whatsapp]
+      .filter((s) => s === 'sent')
+      .length;
+    res.json({
+      data: result,
+      message:
+        channels > 0
+          ? `Invoice ${result.invoiceNumber} resent (${[result.email === 'sent' && 'email', result.whatsapp === 'sent' && 'WhatsApp'].filter(Boolean).join(' + ')}).`
+          : `Invoice could not be resent: ${result.reason || 'no channel available'}`,
+    });
   } catch (error: any) {
     if (error.status === 404) {
       return res.status(404).json({ error: { message: error.message } });
@@ -313,6 +327,13 @@ export const getMyOrders = async (req: Request, res: Response, next: NextFunctio
     const userId = req.user?.id;
     if (!userId) {
       return res.status(401).json({ error: { message: 'Unauthorized' } });
+    }
+    // Unverified quick-login sessions may place orders but must not browse
+    // order history (which embeds full shipping addresses + phone numbers).
+    if (req.user?.phone_verified === false) {
+      return res.status(403).json({
+        error: { message: 'Please verify your mobile number to view your order history.' },
+      });
     }
     const data = await orderService.getMyOrders(userId);
     res.json({ data });

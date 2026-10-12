@@ -31,3 +31,20 @@ export const requireAdmin = (req: Request, res: Response, next: NextFunction) =>
   }
   next();
 };
+
+/**
+ * For routes that are public by default but need to know *who* is asking when a
+ * token happens to be present (e.g. GET /settings returns a wider payload to
+ * admins). Never rejects: a missing or malformed token simply leaves req.user unset.
+ */
+export const optionalAuth = (req: Request, _res: Response, next: NextFunction) => {
+  try {
+    const header = req.headers.authorization;
+    if (header && header.startsWith('Bearer ')) {
+      req.user = verifyToken(header.split(' ')[1]);
+    }
+  } catch {
+    req.user = undefined;
+  }
+  next();
+};

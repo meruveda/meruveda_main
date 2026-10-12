@@ -1,11 +1,23 @@
 import React, { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { ShoppingCart, Search, Eye, Filter, RefreshCw, ChevronLeft, ChevronRight, Download } from 'lucide-react'
-import { orderService } from '../../services/orderService'
+import { orderService, deriveShiprocketPushStatus } from '../../services/orderService'
 import { Order, OrderStatus } from '../../types'
 import { formatCurrency, formatDateTime } from '@meruveda/shared'
 import { StatusBadge } from '../../components/ui/StatusBadge'
 import toast from 'react-hot-toast'
+
+const INVOICE_BADGE: Record<'sent' | 'failed' | 'not_sent', { label: string; className: string }> = {
+  sent: { label: 'Sent', className: 'bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-400 dark:border-green-900/50' },
+  failed: { label: 'Failed', className: 'bg-red-50 text-red-700 border-red-200 dark:bg-red-950/30 dark:text-red-400 dark:border-red-900/50' },
+  not_sent: { label: 'Not sent', className: 'bg-slate-50 text-slate-500 border-slate-200 dark:bg-slate-800/40 dark:text-slate-400 dark:border-slate-700' },
+}
+
+const PUSH_BADGE: Record<'pushed' | 'failed' | 'pending', { label: string; className: string }> = {
+  pushed: { label: 'Pushed', className: 'bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-400 dark:border-green-900/50' },
+  failed: { label: 'Failed', className: 'bg-red-50 text-red-700 border-red-200 dark:bg-red-950/30 dark:text-red-400 dark:border-red-900/50' },
+  pending: { label: 'Pending', className: 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-400 dark:border-amber-900/50' },
+}
 
 export const OrdersPage: React.FC = () => {
   const [orders, setOrders] = useState<Order[]>([])
@@ -175,20 +187,22 @@ export const OrdersPage: React.FC = () => {
                 <th className="p-4">Total Price</th>
                 <th className="p-4">Payment</th>
                 <th className="p-4">Fulfillment Status</th>
+                <th className="p-4">Invoice</th>
+                <th className="p-4">Shiprocket</th>
                 <th className="p-4 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800 text-sm">
               {isLoading ? (
                 <tr>
-                  <td colSpan={7} className="p-8 text-center text-slate-400">
+                  <td colSpan={9} className="p-8 text-center text-slate-400">
                     <RefreshCw className="h-6 w-6 animate-spin mx-auto mb-2 text-slate-350" />
                     Loading orders...
                   </td>
                 </tr>
               ) : orders.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="p-12 text-center text-slate-400">
+                  <td colSpan={9} className="p-12 text-center text-slate-400">
                     No orders found matching filters.
                   </td>
                 </tr>
@@ -224,6 +238,27 @@ export const OrdersPage: React.FC = () => {
                     </td>
                     <td className="p-4">
                       <StatusBadge status={o.status} />
+                    </td>
+                    <td className="p-4">
+                      <span
+                        title={o.invoiceError || (o.invoiceSentAt ? `Sent ${formatDateTime(o.invoiceSentAt)}` : 'Invoice has not been sent automatically')}
+                        className={`inline-flex items-center px-2 py-0.5 rounded-lg border text-[11px] font-semibold ${INVOICE_BADGE[o.invoiceStatus || 'not_sent'].className}`}
+                      >
+                        {INVOICE_BADGE[o.invoiceStatus || 'not_sent'].label}
+                      </span>
+                    </td>
+                    <td className="p-4">
+                      {(() => {
+                        const push = deriveShiprocketPushStatus(o)
+                        return (
+                          <span
+                            title={o.shiprocketPushError || (o.shiprocketPushedAt ? `Pushed ${formatDateTime(o.shiprocketPushedAt)}` : '')}
+                            className={`inline-flex items-center px-2 py-0.5 rounded-lg border text-[11px] font-semibold ${PUSH_BADGE[push].className}`}
+                          >
+                            {PUSH_BADGE[push].label}
+                          </span>
+                        )
+                      })()}
                     </td>
                     <td className="p-4 text-right">
                       <Link

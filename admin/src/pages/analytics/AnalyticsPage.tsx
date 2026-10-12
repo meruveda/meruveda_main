@@ -1,10 +1,11 @@
 // @ts-nocheck
 import React, { useState, useEffect } from 'react'
-import { BarChart3, TrendingUp, ShoppingBag, Users, Percent, Download, RefreshCw } from 'lucide-react'
-import { analyticsService } from '../../services/analyticsService'
+import { BarChart3, TrendingUp, ShoppingBag, Users, Percent, Download, RefreshCw, ExternalLink, Eye, Monitor, Smartphone, Tablet } from 'lucide-react'
+import { analyticsService, TrafficStats } from '../../services/analyticsService'
 import { orderService } from '../../services/orderService'
 import { AnalyticsSummary } from '../../types'
 import { formatCurrency, formatNumber } from '@meruveda/shared'
+import { VERCEL_ANALYTICS_URL } from '../../constants/config'
 import {
   AreaChart,
   Area,
@@ -25,6 +26,10 @@ export const AnalyticsPage: React.FC = () => {
   const [data, setData] = useState<AnalyticsSummary | null>(null)
   const [visitors, setVisitors] = useState<any[]>([])
   const [isLoading, setIsLoading] = useState(true)
+  // First-party storefront traffic (page_views table, delta 009).
+  const [traffic, setTraffic] = useState<TrafficStats | null>(null)
+  const [trafficRange, setTrafficRange] = useState<'7d' | '30d'>('7d')
+  const [trafficLoading, setTrafficLoading] = useState(true)
 
   useEffect(() => {
     const fetchData = async () => {
@@ -43,6 +48,25 @@ export const AnalyticsPage: React.FC = () => {
     }
     fetchData()
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    setTrafficLoading(true)
+    analyticsService
+      .getTraffic(trafficRange)
+      .then((stats) => {
+        if (!cancelled) setTraffic(stats)
+      })
+      .catch(() => {
+        if (!cancelled) toast.error('Failed to load traffic stats')
+      })
+      .finally(() => {
+        if (!cancelled) setTrafficLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [trafficRange])
 
   const COLORS = ['#7C3AED', '#3B82F6', '#10B981', '#F59E0B']
 
@@ -126,8 +150,8 @@ export const AnalyticsPage: React.FC = () => {
       {/* Title */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 print:hidden">
         <div>
-          <h1 className="page-title">Sales Analytics</h1>
-          <p className="text-sm text-slate-500">Analyze storefront traffic, conversions, and best-selling products.</p>
+          <h1 className="page-title">Analytics</h1>
+          <p className="text-sm text-slate-500">Storefront traffic, conversions, and best-selling products.</p>
         </div>
         <div className="flex gap-2">
           <button
@@ -139,7 +163,144 @@ export const AnalyticsPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Analytics KPI cards */}
+      {/* ---- Storefront Traffic (first-party pageviews, delta 009) ---- */}
+      <div className="space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <h2 className="section-title">Storefront Traffic</h2>
+          <div className="flex items-center gap-2">
+            <div className="inline-flex rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
+              {(['7d', '30d'] as const).map((r) => (
+                <button
+                  key={r}
+                  onClick={() => setTrafficRange(r)}
+                  className={`px-3 py-1.5 text-xs font-semibold transition-colors ${
+                    trafficRange === r
+                      ? 'bg-primary-600 text-white'
+                      : 'bg-white dark:bg-slate-900 text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  {r === '7d' ? '7 days' : '30 days'}
+                </button>
+              ))}
+            </div>
+            {VERCEL_ANALYTICS_URL && (
+              <a
+                href={VERCEL_ANALYTICS_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn-primary inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-xl"
+              >
+                <ExternalLink className="h-4 w-4" /> Open Vercel Analytics
+              </a>
+            )}
+          </div>
+        </div>
+
+        {trafficLoading ? (
+          <div className="flex h-40 items-center justify-center">
+            <RefreshCw className="h-5 w-5 animate-spin text-slate-300" />
+          </div>
+        ) : (
+          <>
+            {/* Traffic KPI cards */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <div className="card p-6 flex items-center justify-between">
+                <div>
+                  <span className="text-xs text-slate-400 font-semibold uppercase">Page Views</span>
+                  <h3 className="text-2xl font-bold text-slate-900 dark:text-white mt-1">
+                    {formatNumber(traffic?.totalViews || 0)}
+                  </h3>
+                  <span className="text-xs text-slate-400">Last {traffic?.range || trafficRange}</span>
+                </div>
+                <div className="p-3 bg-purple-50 dark:bg-purple-950/20 text-primary-600 rounded-2xl">
+                  <Eye className="h-6 w-6" />
+                </div>
+              </div>
+              <div className="card p-6 flex items-center justify-between">
+                <div>
+                  <span className="text-xs text-slate-400 font-semibold uppercase">Unique Sessions</span>
+                  <h3 className="text-2xl font-bold text-slate-900 dark:text-white mt-1">
+                    {formatNumber(traffic?.uniqueSessions || 0)}
+                  </h3>
+                  <span className="text-xs text-slate-400">Distinct visitors</span>
+                </div>
+                <div className="p-3 bg-blue-50 dark:bg-blue-950/20 text-blue-600 rounded-2xl">
+                  <Users className="h-6 w-6" />
+                </div>
+              </div>
+              <div className="card p-6 flex items-center justify-between">
+                <div>
+                  <span className="text-xs text-slate-400 font-semibold uppercase">Device Split</span>
+                  <div className="mt-2 space-y-1">
+                    {Object.entries(traffic?.deviceSplit || {}).map(([device, count]) => (
+                      <div key={device} className="flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300">
+                        {device === 'mobile' ? <Smartphone className="h-3.5 w-3.5" /> : device === 'tablet' ? <Tablet className="h-3.5 w-3.5" /> : <Monitor className="h-3.5 w-3.5" />}
+                        <span className="capitalize">{device}</span>
+                        <span className="font-semibold">{formatNumber(count as number)}</span>
+                      </div>
+                    ))}
+                    {Object.keys(traffic?.deviceSplit || {}).length === 0 && (
+                      <span className="text-xs text-slate-400">No data yet</span>
+                    )}
+                  </div>
+                </div>
+                <div className="p-3 bg-green-50 dark:bg-green-950/20 text-green-600 rounded-2xl">
+                  <Monitor className="h-6 w-6" />
+                </div>
+              </div>
+            </div>
+
+            {/* Daily views line chart + top pages */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="card p-6 lg:col-span-2 space-y-4">
+                <h3 className="section-title">Daily Page Views</h3>
+                <div className="h-[260px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={traffic?.daily || []} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" className="stroke-slate-100 dark:stroke-slate-800" />
+                      <XAxis dataKey="date" className="text-[10px] fill-slate-400" tickFormatter={(d: string) => d.slice(5)} />
+                      <YAxis className="text-[10px] fill-slate-400" allowDecimals={false} />
+                      <Tooltip />
+                      <Area type="monotone" dataKey="views" stroke="#7C3AED" fill="#7C3AED" fillOpacity={0.15} strokeWidth={2} />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+
+              <div className="card p-6 space-y-4">
+                <h3 className="section-title">Top Pages</h3>
+                {(traffic?.topPages || []).length === 0 ? (
+                  <p className="text-sm text-slate-400">No page views recorded yet.</p>
+                ) : (
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-left text-slate-400 border-b border-slate-100 dark:border-slate-800">
+                        <th className="pb-2 font-semibold">Path</th>
+                        <th className="pb-2 font-semibold text-right">Views</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {traffic!.topPages.map((p) => (
+                        <tr key={p.path} className="border-b border-slate-50 dark:border-slate-800/50 last:border-0">
+                          <td className="py-2 pr-2 text-slate-600 dark:text-slate-300 font-mono truncate max-w-[180px]" title={p.path}>
+                            {p.path}
+                          </td>
+                          <td className="py-2 text-right font-semibold text-slate-900 dark:text-white">
+                            {formatNumber(p.views)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* ---- Sales KPI cards ---- */}
+      <h2 className="section-title pt-2">Sales Overview</h2>
       <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
         <div className="card p-6 flex items-center justify-between">
           <div>

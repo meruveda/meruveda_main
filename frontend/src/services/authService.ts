@@ -163,6 +163,22 @@ export const authService = {
     }
   },
 
+  /**
+   * No-OTP checkout sign-up / login. Backend logs the number in if it already
+   * exists, otherwise auto-creates the customer. The session it returns is
+   * marked phone_verified=false until a real OTP verification flips the flag.
+   */
+  quickLogin: async (phone: string, name: string): Promise<AuthResponse> => {
+    try {
+      const response = await axiosInstance.post('/auth/quick-login', { phone, name });
+      const { token, user } = response.data;
+      persistSession(token, user, true);
+      return { user, token, role: user.role };
+    } catch (error: any) {
+      unwrapError(error);
+    }
+  },
+
   /** Persist the name / email / address collected in the checkout form. */
   saveProfile: async (payload: {
     name?: string;
