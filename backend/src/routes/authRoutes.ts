@@ -3,14 +3,21 @@ import { login, register, getMe, forgotPassword, resetPassword, getPreferences, 
 import { sendOtp, verifyOtp, resendOtp, quickLogin } from '../controllers/otpController';
 import { updateCheckoutProfile } from '../controllers/otpController';
 import { requireAuth } from '../middleware/auth';
-import { createRateLimiter } from '../middleware/rateLimit';
+import {
+  createRateLimiter,
+  loginLimiter,
+  signupLimiter,
+  otpSendLimiter,
+  otpVerifyLimiter,
+  passwordResetLimiter,
+} from '../middleware/rateLimit';
 
 const router = Router();
 
-router.post('/register', register as any);
-router.post('/login', login as any);
-router.post('/forgot-password', forgotPassword as any);
-router.post('/reset-password', resetPassword as any);
+router.post('/register', signupLimiter, register as any);
+router.post('/login', loginLimiter, login as any);
+router.post('/forgot-password', passwordResetLimiter, forgotPassword as any);
+router.post('/reset-password', passwordResetLimiter, resetPassword as any);
 
 // No-OTP checkout sign-up/login (feature-flagged alternative to WhatsApp OTP).
 // Strict rate limit: 10 / 10 min per IP+phone, 30 / 10 min per IP alone.
@@ -19,9 +26,9 @@ router.post('/quick-login', quickLoginLimiter, quickLogin as any);
 
 // WhatsApp OTP login/registration used by the checkout form
 // (disabled when OTP_ENABLED != true — see otpController).
-router.post('/otp/send', sendOtp as any);
-router.post('/otp/resend', resendOtp as any);
-router.post('/otp/verify', verifyOtp as any);
+router.post('/otp/send', otpSendLimiter, sendOtp as any);
+router.post('/otp/resend', otpSendLimiter, resendOtp as any);
+router.post('/otp/verify', otpVerifyLimiter, verifyOtp as any);
 router.put('/profile', requireAuth as any, updateCheckoutProfile as any);
 
 router.get('/me', requireAuth as any, getMe as any);

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { getOrders, getOrderById, createOrder, updateOrderStatus, getMyOrders, updateOrder, deleteOrder, trackOrder, trackByAwb, resendInvoice, downloadInvoice, pushToShiprocket, retryShiprocketPushes } from '../controllers/ordersController';
 import { requireAuth, requireAdmin } from '../middleware/auth';
+import { orderCreateLimiter } from '../middleware/rateLimit';
 
 const router = Router();
 
@@ -20,7 +21,7 @@ router.post('/retry-shiprocket-failed', retryShiprocketPushes as any);
 router.use(requireAuth as any);
 
 router.get('/my', getMyOrders as any);
-router.post('/', createOrder as any);
+router.post('/', orderCreateLimiter, createOrder as any);
 
 // Owner or admin may regenerate/resend the WhatsApp invoice.
 router.post('/:id/resend-invoice', resendInvoice as any);

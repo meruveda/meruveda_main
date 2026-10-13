@@ -5,6 +5,7 @@ import os from 'os';
 import path from 'path';
 import { promises as dns } from 'dns';
 import sharp from 'sharp';
+import { imageProxyLimiter } from '../middleware/rateLimit';
 
 /**
  * Image derivative proxy used by the storefront's custom Next.js image loader.
@@ -289,7 +290,7 @@ async function fetchUpstreamImage(source: string): Promise<Buffer> {
   throw err;
 }
 
-router.get('/fetch', async (req: Request, res: Response) => {
+router.get('/fetch', imageProxyLimiter, async (req: Request, res: Response) => {
   // Per-response mutable headers — only image successes get immutable caching
   // (an earlier version stamped Cache-Control: immutable on error JSON too,
   // which let a CDN cache a 502 for a year).

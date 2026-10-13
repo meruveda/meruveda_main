@@ -1,29 +1,39 @@
 import { SHIPROCKET_BASE_URL, ENDPOINTS } from './constants';
 import { ShiprocketLoginResponse } from './types';
+import { kv } from '../kv';
 
-// NOTE — Serverless cold-start limitation:
-// These module-level variables cache the Shiprocket JWT token in memory.
-// In a traditional always-on server this works well (token survives across requests).
-// In a serverless environment (e.g. Vercel Functions), each cold start creates a new
-// module instance, so the cache is lost and every cold-started request triggers a fresh
-// login round-trip to Shiprocket.
-// This is functionally correct but adds latency and could hit Shiprocket's login rate
-// limits under high cold-start frequency. If that becomes an issue post-launch, replace
-// these variables with a short-lived entry in a Supabase table (e.g. `shiprocket_tokens`)
-// so the token persists across function instances.
-let cachedToken: string | null = null;
-let tokenExpiryTime: number | null = null;
+// Shiprocket JWT cache.
+//
+// Fast path: a per-process memo avoids a Redis round-trip on every request
+// while an instance is warm. Slow path: Upstash KV (when configured) shares
+// the token across Vercel serverless instances so cold starts don't each
+// trigger a fresh Shiprocket login. Without Upstash, each cold start logs in
+// once — functionally correct, just an extra round-trip.
+const KV_KEY = 'shiprocket:token';
+const TOKEN_TTL_MS = 10 * 24 * 60 * 60 * 1000; // cached ~10 days
+const BUFFER_MS = 5 * 60 * 1000; // re-login 5 min before recorded expiry
 
-// Cached for ~10 days so a normal push never logs in again. Shiprocket can
-// revoke/expire a token earlier than that; every request 401s once, we clear
-// the cache and retry exactly one login round-trip (see utils.ts#shiprocketRequest).
-const TOKEN_TTL_MS = 10 * 24 * 60 * 60 * 1000;
+let memo: { token: string; exp: number } | null = null;
+
+interface CachedToken { token: string; exp: number }
 
 export const shiprocketAuth = {
   async login(): Promise<string> {
-    // If token exists and is valid (with a 5-minute buffer)
-    if (cachedToken && tokenExpiryTime && Date.now() < tokenExpiryTime - 5 * 60 * 1000) {
-      return cachedToken;
+    if (memo && Date.now() < memo.exp - BUFFER_MS) {
+      return memo.token;
+    }
+
+    try {
+      const stored = await kv.get(KV_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored) as CachedToken;
+        if (parsed?.token && Date.now() < parsed.exp - BUFFER_MS) {
+          memo = parsed;
+          return parsed.token;
+        }
+      }
+    } catch {
+      // KV unavailable — fall through to a fresh login.
     }
 
     const email = process.env.SHIPROCKET_EMAIL;
@@ -49,10 +59,14 @@ export const shiprocketAuth = {
 
       const data = (await response.json()) as ShiprocketLoginResponse;
 
-      cachedToken = data.token;
-      tokenExpiryTime = Date.now() + TOKEN_TTL_MS;
+      memo = { token: data.token, exp: Date.now() + TOKEN_TTL_MS };
+      try {
+        await kv.set(KV_KEY, JSON.stringify(memo), TOKEN_TTL_MS);
+      } catch (kvErr: any) {
+        console.warn('[ShiprocketAuth] KV cache write failed:', kvErr?.message || kvErr);
+      }
 
-      return cachedToken;
+      return memo.token;
     } catch (error) {
       console.error('Shiprocket Login Error:', error);
       throw error;
@@ -60,7 +74,7 @@ export const shiprocketAuth = {
   },
   
   clearToken() {
-    cachedToken = null;
-    tokenExpiryTime = null;
+    memo = null;
+    kv.del(KV_KEY).catch(() => { /* best-effort */ });
   }
 };

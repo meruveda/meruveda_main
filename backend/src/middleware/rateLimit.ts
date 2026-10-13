@@ -1,54 +1,156 @@
 import { Request, Response, NextFunction } from 'express';
+import { Redis } from '@upstash/redis';
+import { config } from '../config/env';
 
 /**
- * Minimal in-memory sliding-window rate limiter.
+ * Pluggable rate limiter for a serverless deployment (Vercel).
  *
- * No external dependency (express-rate-limit is not in package.json and we
- * avoid adding one for two low-traffic endpoints). State is per-process —
- * fine on a single Vercel serverless instance; a multi-instance deployment
- * would need a shared store, which is out of scope here.
+ * Store selection:
+ *   - UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN set  -> Upstash Redis
+ *     (REST-based, safe across serverless instances). This is the ONLY store
+ *     that actually enforces limits across concurrent cold starts.
+ *   - otherwise (dev, or prod misconfiguration)             -> in-process Map.
+ *     A LOUD warning is logged at startup in production because per-instance
+ *     limits are trivially bypassed by retrying until a different instance
+ *     handles the request.
  *
- * Keys combine the caller IP with an optional secondary discriminator
- * (e.g. the mobile number on the request body) so one abusive IP cannot
- * lock out every phone, and one abusive phone cannot exhaust the whole IP.
+ * Algorithm: fixed window per key — `INCR`, then `PEXPIRE` on first hit.
+ * On limit, respond 429 + Retry-After (seconds until window reset).
+ *
+ * Keys combine the caller IP (from X-Forwarded-For via `trust proxy`) with an
+ * optional secondary discriminator (e.g. the phone number in the body) so one
+ * abusive IP cannot lock out every phone, and one abusive phone cannot exhaust
+ * a whole IP's bucket.
  */
+
+export interface RateLimitStore {
+  /** Atomically increment `key`; returns the count after increment and the ms until the window resets. */
+  incr(key: string, windowMs: number): Promise<{ count: number; resetInMs: number }>;
+}
+
+// ---------------------------------------------------------------------------
+// In-memory store (dev fallback only)
+// ---------------------------------------------------------------------------
 type Bucket = { count: number; resetAt: number };
 
-const buckets = new Map<string, Bucket>();
-const MAX_BUCKETS = 50_000;
-
-function sweep(now: number) {
-  if (buckets.size <= MAX_BUCKETS) return;
-  for (const [key, bucket] of buckets) {
-    if (now > bucket.resetAt) buckets.delete(key);
+export class MemoryStore implements RateLimitStore {
+  private buckets = new Map<string, Bucket>();
+  private static readonly MAX_BUCKETS = 50_000;
+  async incr(key: string, windowMs: number): Promise<{ count: number; resetInMs: number }> {
+    const now = Date.now();
+    if (this.buckets.size > MemoryStore.MAX_BUCKETS) {
+      for (const [k, b] of this.buckets) {
+        if (now > b.resetAt) this.buckets.delete(k);
+      }
+    }
+    let bucket = this.buckets.get(key);
+    if (!bucket || now > bucket.resetAt) {
+      bucket = { count: 0, resetAt: now + windowMs };
+      this.buckets.set(key, bucket);
+    }
+    bucket.count += 1;
+    return { count: bucket.count, resetInMs: Math.max(0, bucket.resetAt - now) };
   }
 }
 
-export function createRateLimiter(opts: { windowMs: number; max: number; prefix: string }) {
-  return (req: Request, res: Response, next: NextFunction) => {
-    const now = Date.now();
-    sweep(now);
-
-    const ip = String(req.ip || req.socket?.remoteAddress || 'unknown').slice(0, 45);
-    // Secondary key: last 10 digits of phone when present (quick-login), else ''.
-    const phone = String(req.body?.phone || '')
-      .replace(/\D/g, '')
-      .slice(-10);
-    const key = `${opts.prefix}:${ip}:${phone}`;
-
-    let bucket = buckets.get(key);
-    if (!bucket || now > bucket.resetAt) {
-      bucket = { count: 0, resetAt: now + opts.windowMs };
-      buckets.set(key, bucket);
+// ---------------------------------------------------------------------------
+// Upstash Redis store (production — shared across serverless instances)
+// ---------------------------------------------------------------------------
+export class UpstashStore implements RateLimitStore {
+  private redis: Redis;
+  constructor(url: string, token: string) {
+    this.redis = new Redis({ url, token });
+  }
+  async incr(key: string, windowMs: number): Promise<{ count: number; resetInMs: number }> {
+    const count = await this.redis.incr(key);
+    if (count === 1) {
+      // First hit in this window — set the TTL. A tiny race here (crash
+      // between INCR and PEXPIRE) leaves a key without TTL; the memory
+      // sweep in MemoryStore has no equivalent, so compensate: if PTTL is
+      // -1 (no expiry), re-apply it.
+      await this.redis.pexpire(key, windowMs);
     }
-    bucket.count += 1;
-
-    if (bucket.count > opts.max) {
-      res.setHeader('Retry-After', String(Math.max(1, Math.ceil((bucket.resetAt - now) / 1000))));
-      return res.status(429).json({
-        error: { message: 'Too many attempts. Please try again in a few minutes.' },
-      });
+    let ttl = await this.redis.pttl(key);
+    if (ttl === -1) {
+      await this.redis.pexpire(key, windowMs);
+      ttl = windowMs;
     }
-    next();
+    return { count, resetInMs: Math.max(0, ttl) };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Default store
+// ---------------------------------------------------------------------------
+function buildDefaultStore(): RateLimitStore {
+  const url = config.upstashRedisRestUrl;
+  const token = config.upstashRedisRestToken;
+  if (url && token) {
+    console.log('[rateLimit] using Upstash Redis store (limits enforced across instances).');
+    return new UpstashStore(url, token);
+  }
+  if (config.nodeEnv === 'production') {
+    console.warn(
+      '\n⚠️  [rateLimit] UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN not set.\n' +
+        '   Rate limits are per-instance only and WILL NOT hold across Vercel\n' +
+        '   serverless instances. Set both vars (Upstash console → REST API)\n' +
+        '   before production traffic.\n',
+    );
+  }
+  return new MemoryStore();
+}
+
+const defaultStore: RateLimitStore = buildDefaultStore();
+
+// ---------------------------------------------------------------------------
+// Middleware factory
+// ---------------------------------------------------------------------------
+export function createRateLimiter(opts: {
+  windowMs: number;
+  max: number;
+  prefix: string;
+  store?: RateLimitStore;
+}) {
+  const store = opts.store || defaultStore;
+  return async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      // req.ip honours `trust proxy` (X-Forwarded-For) — on Vercel this is
+      // the real client IP, not the edge proxy's address.
+      const ip = String(req.ip || req.socket?.remoteAddress || 'unknown').slice(0, 45);
+      // Secondary key: last 10 digits of phone when present, else ''.
+      const phone = String(req.body?.phone || '')
+        .replace(/\D/g, '')
+        .slice(-10);
+      const key = `rl:${opts.prefix}:${ip}:${phone}`;
+
+      const { count, resetInMs } = await store.incr(key, opts.windowMs);
+
+      if (count > opts.max) {
+        res.setHeader('Retry-After', String(Math.max(1, Math.ceil(resetInMs / 1000))));
+        return res.status(429).json({
+          error: { message: 'Too many attempts. Please try again in a few minutes.' },
+        });
+      }
+      next();
+    } catch (err) {
+      // Store outage must never take the API down — fail open (allow) but
+      // make the failure visible.
+      console.error('[rateLimit] store error, allowing request:', err);
+      next();
+    }
   };
 }
+
+// ---------------------------------------------------------------------------
+// Pre-configured limiters, mounted in the route files.
+// ---------------------------------------------------------------------------
+export const loginLimiter = createRateLimiter({ windowMs: 15 * 60 * 1000, max: 20, prefix: 'login' });
+export const signupLimiter = createRateLimiter({ windowMs: 10 * 60 * 1000, max: 10, prefix: 'signup' });
+export const otpSendLimiter = createRateLimiter({ windowMs: 10 * 60 * 1000, max: 5, prefix: 'otp-send' });
+export const otpVerifyLimiter = createRateLimiter({ windowMs: 10 * 60 * 1000, max: 10, prefix: 'otp-verify' });
+export const passwordResetLimiter = createRateLimiter({ windowMs: 15 * 60 * 1000, max: 5, prefix: 'pw-reset' });
+export const orderCreateLimiter = createRateLimiter({ windowMs: 10 * 60 * 1000, max: 20, prefix: 'order-create' });
+export const payuInitiateLimiter = createRateLimiter({ windowMs: 10 * 60 * 1000, max: 10, prefix: 'payu-initiate' });
+// Images come in bursts from srcset (one product page = many widths), so this
+// is deliberately more generous than the auth limiters.
+export const imageProxyLimiter = createRateLimiter({ windowMs: 5 * 60 * 1000, max: 120, prefix: 'img-proxy' });

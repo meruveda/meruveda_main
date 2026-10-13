@@ -7,7 +7,7 @@
     "dev": "nodemon src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
-    "test": "node --test --require ts-node/register/transpile-only src/routes/imageRoutes.test.ts src/config/corsOrigins.test.ts"
+    "test": "node --test --require ts-node/register/transpile-only --require ./src/testEnvSetup.ts src/routes/imageRoutes.test.ts src/config/corsOrigins.test.ts src/middleware/rateLimit.test.ts"
   },
   "keywords": [],
   "author": "",
@@ -16,6 +16,7 @@
   "dependencies": {
     "@meruveda/shared": "^1.0.0",
     "@supabase/supabase-js": "^2.110.2",
+    "@upstash/redis": "^1.39.0",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
