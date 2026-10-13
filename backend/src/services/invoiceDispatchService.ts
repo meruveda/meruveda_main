@@ -1,7 +1,7 @@
 import { config } from '../config/env';
 import { supabase } from '../database/supabase';
 import { hasColumn } from './schemaGuard';
-import { buildInvoiceNumber, generateInvoicePdf, getOrderForInvoice } from './invoiceService';
+import { assignInvoiceNumber, generateInvoicePdf, getOrderForInvoice } from './invoiceService';
 import { getInvoiceEmailTemplate, isEmailConfigured, sendEmailWithAttachments } from './emailService';
 import {
   WHATSAPP_TEMPLATES,
@@ -211,7 +211,6 @@ export async function sendInvoiceDispatch(
 ): Promise<InvoiceDispatchResult> {
   const force = options.force === true;
   const order: any = await getOrderForInvoice(orderId);
-  const invoiceNumber = buildInvoiceNumber(order.order_number);
 
   const result: InvoiceDispatchResult = {
     claimed: true,
@@ -219,7 +218,7 @@ export async function sendInvoiceDispatch(
     email: 'disabled',
     whatsapp: 'disabled',
     adminCopy: 'disabled',
-    invoiceNumber,
+    invoiceNumber: order.invoice_number || '',
   };
 
   /* ---- 1. order-level atomic claim ---- */
@@ -252,6 +251,14 @@ export async function sendInvoiceDispatch(
   }
 
   /* ---- 2. PDF ---- */
+  // GST series number (MV/25-26/000123), assigned in Postgres under row
+  // locks — only once the claim is won, so cancelled/failed orders that never
+  // reach dispatch consume nothing. Idempotent per order: a retry reuses the
+  // stored number. (If a PDF later fails permanently, the assigned number is
+  // retained rather than reused — issue a credit note if it was ever printed.)
+  const invoiceNumber = await assignInvoiceNumber(order);
+  result.invoiceNumber = invoiceNumber;
+
   let pdf: Buffer;
   try {
     pdf = await generateInvoicePdf(order);

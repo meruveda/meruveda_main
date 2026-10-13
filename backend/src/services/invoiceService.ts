@@ -47,13 +47,46 @@ export function getSellerIdentity(): SellerIdentity {
   };
 }
 
-/**
- * Invoice number. Derived deterministically from the order number — NO counter
- * table exists, so this is NOT a gap-free sequential invoice series and must not
- * be presented as one for GST filing. See docs/ADMIN_AUDIT.md "Known risks".
- */
+/** Legacy fallback ONLY (pre-migration): deterministic, not a GST series. */
 export function buildInvoiceNumber(orderNumber: string): string {
   return `MW-INV-${orderNumber || 'UNKNOWN'}`;
+}
+
+/**
+ * Invoice number, GST series MV/<FY>/<6 digits> (e.g. MV/25-26/000123).
+ *
+ * Assigned ATOMICALLY in Postgres via the assign_invoice_number() function
+ * (backend/sql/migrations/2026-10-14_invoice_sequence.sql): the order row is
+ * locked, an existing number is returned as-is (idempotent — retries never
+ * consume a second number), otherwise the next per-financial-year counter
+ * value is taken under the counter's row lock.
+ *
+ * When the migration has not been applied yet, falls back to the legacy
+ * deterministic MW-INV-<orderNumber> so invoices keep flowing (schemaGuard
+ * pattern) — but that fallback is NOT a gap-free GST series.
+ */
+export async function assignInvoiceNumber(order: {
+  id: string;
+  invoice_number?: string | null;
+  order_number?: string;
+}): Promise<string> {
+  if (order.invoice_number) return order.invoice_number;
+  try {
+    const { data, error } = await supabase.rpc('assign_invoice_number', {
+      p_order_id: order.id,
+    });
+    if (!error && data) {
+      (order as any).invoice_number = data; // keep the in-memory row consistent
+      return String(data);
+    }
+    console.warn(
+      `[Invoice] assign_invoice_number RPC unavailable (${error?.message || 'no data'}) — ` +
+        'is backend/sql/migrations/2026-10-14_invoice_sequence.sql applied? Falling back to legacy numbering.'
+    );
+  } catch (err: any) {
+    console.warn('[Invoice] assign_invoice_number failed:', err?.message || err);
+  }
+  return buildInvoiceNumber(order.order_number || '');
 }
 
 /** Intra-state (Rajasthan) -> CGST+SGST, otherwise IGST. Mirrors checkout. */
@@ -110,7 +143,7 @@ export async function generateInvoicePdf(order: any): Promise<Buffer> {
   const page = doc.addPage([width, height]);
 
   const orderNumber = order.order_number || 'MV-000000';
-  const invoiceNumber = buildInvoiceNumber(orderNumber);
+  const invoiceNumber = await assignInvoiceNumber(order);
   const createdDate = order.created_at ? new Date(order.created_at) : null;
   const created =
     createdDate && !Number.isNaN(createdDate.getTime())
