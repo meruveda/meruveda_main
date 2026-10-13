@@ -119,16 +119,6 @@ export interface AccountReview {
   status?: string;
 }
 
-export interface SavedCard {
-  id: string;
-  cardHolder: string;
-  masked: string;
-  last4: string;
-  cardType: "Visa" | "Mastercard" | "RuPay" | "Amex" | "UPI" | "NetBanking";
-  expiry?: string;
-  isDefault: boolean;
-}
-
 export interface DashboardStats {
   totalOrders: number;
   activeOrders: number;

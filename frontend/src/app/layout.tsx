@@ -8,6 +8,7 @@ import Header from "@/components/Header";
 import Footer from "@/components/Footer";
 import WhatsAppButton from "@/components/WhatsAppButton";
 import PageViewTracker from "@/components/PageViewTracker";
+import CardVaultCleanup from "@/components/CardVaultCleanup";
 import { Analytics } from "@vercel/analytics/next";
 
 const fraunces = Fraunces({
@@ -57,6 +58,7 @@ export default function RootLayout({
           </WishlistProvider>
         </AuthProvider>
         <PageViewTracker />
+        <CardVaultCleanup />
         <Analytics />
       </body>
     </html>

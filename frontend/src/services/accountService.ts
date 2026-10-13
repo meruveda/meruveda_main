@@ -1,9 +1,10 @@
 // Account service layer — single place where the My Account UI talks to the
 // backend. Uses real endpoints when present (orders, reviews, support,
 // wishlist, auth) and a versioned localStorage fallback for data the backend
-// does not persist yet (address book, payment tokens, return tickets).
-// Every method is scoped to the authenticated user; nothing here ever reads
-// another user's records.
+// does not persist yet (address book, return tickets). Card data is never
+// stored here or anywhere else client-side — payments happen on PayU's
+// hosted page. Every method is scoped to the authenticated user; nothing
+// here ever reads another user's records.
 
 import axiosInstance from "@/api/axiosInstance";
 import type {
@@ -12,12 +13,10 @@ import type {
   AccountReview,
   AddressType,
   LegacyAddress,
-  SavedCard,
 } from "@/types/account";
 
 const LS = {
   addresses: "meruveda_addresses_v2",
-  cards: "meruveda_cards_v2",
   reviews: "meruveda_reviews_local_v1",
 };
 
@@ -313,88 +312,3 @@ export const reviewService = {
   },
 };
 
-// ------------------------------------------------------------------- payments
-
-function detectCardType(digits: string): SavedCard["cardType"] {
-  if (/^4/.test(digits)) return "Visa";
-  if (/^(5[1-5]|2[2-7])/.test(digits)) return "Mastercard";
-  if (/^3[47]/.test(digits)) return "Amex";
-  if (/^(60|65|81|82)/.test(digits)) return "RuPay";
-  return "RuPay";
-}
-
-export const paymentService = {
-  list(): SavedCard[] {
-    const items = readLS<SavedCard[]>(LS.cards, []);
-    if (items.length > 0) return items;
-    if (typeof window !== "undefined") {
-      // Migrate the pre-existing demo key once, then drop it.
-      try {
-        const legacyRaw = localStorage.getItem("meruveda_cards");
-        if (legacyRaw) {
-          const legacy = JSON.parse(legacyRaw) as Array<{ id: string; cardHolder: string; cardNumber: string; cardType: SavedCard["cardType"]; expiry: string; isDefault: boolean }>;
-          const migrated: SavedCard[] = legacy.map((c) => ({
-            id: c.id,
-            cardHolder: c.cardHolder,
-            masked: c.cardNumber,
-            last4: (c.cardNumber.match(/(\d{4})\s*$/)?.[1] || "••••"),
-            cardType: c.cardType,
-            expiry: c.expiry,
-            isDefault: c.isDefault,
-          }));
-          writeLS(LS.cards, migrated);
-          return migrated;
-        }
-      } catch {
-        /* ignore */
-      }
-    }
-    return [];
-  },
-  saveAll(items: SavedCard[]) {
-    writeLS(LS.cards, items);
-  },
-  add(cardHolder: string, number: string, expiry: string): SavedCard {
-    const digits = number.replace(/\D/g, "");
-    const last4 = digits.slice(-4);
-    const items = paymentService.list();
-    const created: SavedCard = {
-      id: uid("card"),
-      cardHolder: cardHolder.trim(),
-      masked: `•••• •••• •••• ${last4}`,
-      last4,
-      cardType: detectCardType(digits),
-      expiry: expiry.trim(),
-      isDefault: items.length === 0,
-    };
-    const next = [...items.map((c) => (created.isDefault ? { ...c, isDefault: false } : c)), created];
-    paymentService.saveAll(next);
-    return created;
-  },
-  remove(id: string): SavedCard[] {
-    const items = paymentService.list().filter((c) => c.id !== id);
-    if (items.length > 0 && !items.some((c) => c.isDefault)) items[0].isDefault = true;
-    paymentService.saveAll(items);
-    return items;
-  },
-  setDefault(id: string): SavedCard[] {
-    const items = paymentService.list().map((c) => ({ ...c, isDefault: c.id === id }));
-    paymentService.saveAll(items);
-    return items;
-  },
-};
-
-export function validateNewCard(cardHolder: string, number: string, expiry: string): string | null {
-  if (cardHolder.trim().length < 2) return "Enter the name on the card.";
-  const digits = number.replace(/\D/g, "");
-  if (!/^\d{15,16}$/.test(digits)) return "Enter a valid 15–16 digit card number.";
-  const m = expiry.trim().match(/^(0[1-9]|1[0-2])\/(\d{2})$/);
-  if (!m) return "Expiry must be MM/YY.";
-  const yy = 2000 + Number(m[2]);
-  const mm = Number(m[1]);
-  const now = new Date();
-  if (yy < now.getFullYear() || (yy === now.getFullYear() && mm < now.getMonth() + 1)) {
-    return "This card has expired.";
-  }
-  return null;
-}
