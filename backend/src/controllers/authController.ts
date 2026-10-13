@@ -1,11 +1,16 @@
 import { Request, Response, NextFunction } from 'express';
 import bcrypt from 'bcrypt';
-import crypto from 'crypto';
 import { supabase } from '../database/supabase';
 import { generateToken } from '../utils/jwt';
 import { config } from '../config/env';
 import { sendEmail, getPasswordResetTemplate } from '../services/emailService';
 import { hasColumn } from '../services/schemaGuard';
+import {
+  buildResetLink,
+  generateResetToken,
+  hashResetToken,
+  RESET_TOKEN_TTL_MS,
+} from '../utils/resetToken';
 import {
   canonicalPhone,
   classifyIdentifier,
@@ -348,15 +353,19 @@ export const forgotPassword = async (req: Request, res: Response, next: NextFunc
       return res.status(200).json({ message: GENERIC_OK });
     }
 
-    // Generate secure random token and 1-hour expiry
-    const token = crypto.randomBytes(32).toString('hex');
-    const expiry = new Date(Date.now() + 3600000).toISOString(); // 1 hour
+    // Random 32-byte token, 30-minute expiry. Only the SHA-256 hash of the
+    // token is stored — the raw value leaves this function inside the email
+    // link and is never persisted (see utils/resetToken).
+    const token = generateResetToken();
+    const tokenHash = hashResetToken(token);
+    const expiry = new Date(Date.now() + RESET_TOKEN_TTL_MS).toISOString();
 
-    // Update user record with token and expiry
+    // Storing the new token replaces any previous one, so at most one reset
+    // link per account is ever valid (older links stop working immediately).
     const { error: updateError } = await supabase
       .from('users')
       .update({
-        reset_password_token: token,
+        reset_password_token: tokenHash,
         reset_password_expires: expiry,
         updated_at: new Date().toISOString()
       })
@@ -367,7 +376,7 @@ export const forgotPassword = async (req: Request, res: Response, next: NextFunc
     }
 
     // Send password reset email
-    const resetLink = `https://meruvedawellness.com/reset-password?token=${token}`;
+    const resetLink = buildResetLink(config.frontendUrl, token);
     const htmlContent = getPasswordResetTemplate(resetLink, user.first_name || 'Customer');
     
     // Asynchronously send email so response is instant, but catch errors
@@ -397,11 +406,12 @@ export const resetPassword = async (req: Request, res: Response, next: NextFunct
       return res.status(400).json({ error: { message: 'Invalid or expired password reset token' } });
     }
 
-    // Find user with valid token and not yet expired
+    // Find the user by the SHA-256 hash of the submitted token (only hashes
+    // are stored) and only while the token is unexpired.
     const { data: user, error: findError } = await supabase
       .from('users')
       .select('id, email')
-      .eq('reset_password_token', token)
+      .eq('reset_password_token', hashResetToken(String(token)))
       .gt('reset_password_expires', new Date().toISOString())
       .maybeSingle();
 

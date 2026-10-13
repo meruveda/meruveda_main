@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { getCustomers, getCustomerById, updateCustomerStatus, updateCustomer, deleteCustomer, resetUserPassword, getCustomerAddresses, getCustomerCart } from '../controllers/customersController';
 import { requireAuth, requireAdmin } from '../middleware/auth';
+import { adminResetPasswordLimiter } from '../middleware/rateLimit';
 
 const router = Router();
 
@@ -12,7 +13,7 @@ router.get('/:id/addresses', getCustomerAddresses as any);
 router.get('/:id/cart', getCustomerCart as any);
 router.patch('/:id/status', updateCustomerStatus as any);
 router.patch('/:id', updateCustomer as any);
-router.post('/:id/reset-password', resetUserPassword as any);
+router.post('/:id/reset-password', adminResetPasswordLimiter, resetUserPassword as any);
 router.delete('/:id', deleteCustomer as any);
 
 export default router;

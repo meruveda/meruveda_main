@@ -7,7 +7,7 @@
     "dev": "nodemon src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
-    "test": "node --test --require ts-node/register/transpile-only --require ./src/testEnvSetup.ts src/routes/imageRoutes.test.ts src/config/corsOrigins.test.ts src/middleware/rateLimit.test.ts src/services/invoiceNumber.test.ts"
+    "test": "node --test --require ts-node/register/transpile-only --require ./src/testEnvSetup.ts src/routes/imageRoutes.test.ts src/config/corsOrigins.test.ts src/middleware/rateLimit.test.ts src/services/invoiceNumber.test.ts src/utils/resetToken.test.ts"
   },
   "keywords": [],
   "author": "",

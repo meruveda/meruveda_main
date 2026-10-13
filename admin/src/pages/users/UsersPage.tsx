@@ -104,7 +104,7 @@ export const UsersPage: React.FC = () => {
     if (!resetId) return
     try {
       await adminService.resetPassword(resetId)
-      toast.success('Password reset instructions generated!')
+      toast.success('Reset link sent to the customer (if they have an email on file)')
     } catch (err) {
       toast.error('Failed to reset password')
     } finally {

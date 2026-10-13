@@ -110,6 +110,14 @@ export function createRateLimiter(opts: {
   max: number;
   prefix: string;
   store?: RateLimitStore;
+  /**
+   * Extra key segment appended to the IP-based key. Default behaviour keys on
+   * the last 10 digits of req.body.phone, which is right for the public auth
+   * endpoints. Endpoints without a phone in the body (e.g. admin-triggered
+   * resets) pass their own segment — the admin user id, say — so one operator
+   * cannot exhaust the limit for everyone else behind the same NAT/proxy.
+   */
+  secondaryKey?: (req: Request) => string;
 }) {
   const store = opts.store || defaultStore;
   return async (req: Request, res: Response, next: NextFunction) => {
@@ -117,10 +125,13 @@ export function createRateLimiter(opts: {
       // req.ip honours `trust proxy` (X-Forwarded-For) — on Vercel this is
       // the real client IP, not the edge proxy's address.
       const ip = String(req.ip || req.socket?.remoteAddress || 'unknown').slice(0, 45);
-      // Secondary key: last 10 digits of phone when present, else ''.
-      const phone = String(req.body?.phone || '')
-        .replace(/\D/g, '')
-        .slice(-10);
+      const phone = opts.secondaryKey
+        ? String(opts.secondaryKey(req) || '')
+            .replace(/\D/g, '')
+            .slice(-10)
+        : String(req.body?.phone || '')
+            .replace(/\D/g, '')
+            .slice(-10);
       const key = `rl:${opts.prefix}:${ip}:${phone}`;
 
       const { count, resetInMs } = await store.incr(key, opts.windowMs);
@@ -154,3 +165,12 @@ export const payuInitiateLimiter = createRateLimiter({ windowMs: 10 * 60 * 1000,
 // Images come in bursts from srcset (one product page = many widths), so this
 // is deliberately more generous than the auth limiters.
 export const imageProxyLimiter = createRateLimiter({ windowMs: 5 * 60 * 1000, max: 120, prefix: 'img-proxy' });
+// Admin-triggered resets: keyed by IP AND admin user id (createRateLimiter adds
+// the phone/id segment when passed), so one support agent cannot spray reset
+// emails at every account.
+export const adminResetPasswordLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  prefix: 'admin-pw-reset',
+  secondaryKey: (req) => String(req.user?.id || 'anon-admin'),
+});

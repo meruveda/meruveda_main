@@ -1,5 +1,15 @@
 import { Request, Response, NextFunction } from 'express';
 import { supabase } from '../database/supabase';
+import { config } from '../config/env';
+import { hasColumn } from '../services/schemaGuard';
+import { sendEmail, getPasswordResetTemplate } from '../services/emailService';
+import { isPlaceholderEmail } from '../utils/phone';
+import {
+  buildResetLink,
+  generateResetToken,
+  hashResetToken,
+  RESET_TOKEN_TTL_MS,
+} from '../utils/resetToken';
 
 export const getCustomers = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -194,15 +204,78 @@ export const deleteCustomer = async (req: Request, res: Response, next: NextFunc
   }
 };
 
+/**
+ * Admin-triggered password reset for a customer.
+ *
+ * Behaviour (see also authController.forgotPassword, which is the customer
+ * self-service path — both share utils/resetToken):
+ *   - 32-byte random token; only its SHA-256 hash is stored, 30-minute expiry.
+ *   - The stored token is single-use and replaces any earlier one, so a link
+ *     issued by support invalidates every previous link for that account.
+ *   - The same generic response is returned whether the customer exists, has a
+ *     real inbox, or is phone-only — so this endpoint cannot be used to probe
+ *     which accounts exist.
+ *   - The raw token is NEVER returned in the response (it would land in the
+ *     admin UI, browser history and logs). It only travels in the email.
+ *   - Rate limited (adminResetPasswordLimiter) on the route.
+ */
 export const resetUserPassword = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
-    
-    // In dev / production mock, we just respond with success.
-    // If you actually want to reset/send email:
-    // const { error } = await supabase.auth.admin.generateLink({ type: 'recovery', email: user.email })
-    
-    res.json({ success: true, message: 'Password reset link generated/sent successfully' });
+
+    const generic = { success: true, message: 'If the account exists, a password reset link has been sent.' };
+
+    // Delta 007 not applied: no columns to store a token in. Fail soft with the
+    // generic reply so the admin UI never reveals schema state.
+    if (!(await hasColumn('users', 'reset_password_token')) || !(await hasColumn('users', 'reset_password_expires'))) {
+      console.error('[resetUserPassword] users.reset_password_token/expires missing — apply database/deltas/007_mobile_auth.sql.');
+      return res.json(generic);
+    }
+
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('id, email, first_name')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (userError) throw userError;
+
+    if (!user) {
+      console.warn(`[resetUserPassword] no user with id ${id} — generic reply sent.`);
+      return res.json(generic);
+    }
+
+    const token = generateResetToken();
+    const { error: updateError } = await supabase
+      .from('users')
+      .update({
+        reset_password_token: hashResetToken(token),
+        reset_password_expires: new Date(Date.now() + RESET_TOKEN_TTL_MS).toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', user.id);
+
+    if (updateError) throw updateError;
+
+    // Phone-only / placeholder-inbox accounts have nowhere to receive the link.
+    // Support still helps them out of band; the reply does not change.
+    if (!user.email || isPlaceholderEmail(user.email)) {
+      console.log(`[adminResetPassword] account ${user.id} has no real inbox on file — link not emailed.`);
+      return res.json(generic);
+    }
+
+    const resetLink = buildResetLink(config.frontendUrl, token);
+    const html = getPasswordResetTemplate(resetLink, user.first_name || 'Customer');
+
+    // Await the send so a delivery failure is visible in the admin UI path,
+    // but never leak the reason to the caller — still the generic reply.
+    try {
+      await sendEmail(user.email, 'Reset Your MeruVeda Password', html);
+    } catch (mailErr) {
+      console.error('[adminResetPassword] failed to send reset email:', mailErr);
+    }
+
+    res.json(generic);
   } catch (error) {
     next(error);
   }
