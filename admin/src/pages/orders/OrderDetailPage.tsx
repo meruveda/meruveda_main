@@ -394,7 +394,7 @@ export const OrderDetailPage: React.FC = () => {
                 <FileText className="h-5 w-5 text-amber-500" /> Customer Order Notes
               </h3>
               <p className="text-sm text-slate-700 dark:text-slate-350 italic whitespace-pre-wrap">
-                "{order.notes}"
+&ldquo;{order.notes}&rdquo;
               </p>
             </div>
           )}
@@ -808,7 +808,7 @@ export const OrderDetailPage: React.FC = () => {
             <div className="border border-slate-200 border-t-0 p-3 min-h-[120px] text-xs text-slate-700 leading-relaxed bg-[#fbfbfc]">
               {order.notes ? (
                 <div className="mb-4 p-2 bg-amber-50 border border-amber-200 rounded text-amber-900 italic font-sans">
-                  <strong>Customer Note:</strong> "{order.notes}"
+                  <strong>Customer Note:</strong> &ldquo;{order.notes}&rdquo;
                 </div>
               ) : null}
               <p>1. Total payment due upon receipt.</p>

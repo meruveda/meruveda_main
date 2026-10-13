@@ -85,8 +85,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setToken(response.token)
       localStorage.setItem('admin_token', response.token)
       localStorage.setItem('admin_user', JSON.stringify(userObj))
-    } catch (error) {
-      throw error
     } finally {
       setIsLoading(false)
     }

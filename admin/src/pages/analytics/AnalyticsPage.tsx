@@ -1,4 +1,3 @@
-// @ts-nocheck
 import React, { useState, useEffect } from 'react'
 import { BarChart3, TrendingUp, ShoppingBag, Users, Percent, Download, RefreshCw, ExternalLink, Eye, Monitor, Smartphone, Tablet } from 'lucide-react'
 import { analyticsService, TrafficStats } from '../../services/analyticsService'

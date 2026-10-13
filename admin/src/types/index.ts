@@ -36,7 +36,7 @@ export interface MediaItem {
   size_bytes: number;
 }
 
-export interface BlogPost extends Blog {}
+export type BlogPost = Blog;
 
 // ===== Category =====
 export interface Category {

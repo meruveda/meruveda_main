@@ -183,7 +183,7 @@ export const SupportPage: React.FC = () => {
           <div className="p-3 bg-slate-50 dark:bg-slate-850/20 rounded-xl text-xs space-y-1">
             <p className="font-bold">Subject: {selectedTicket?.subject}</p>
             <p className="text-slate-500 font-semibold">{selectedTicket?.customerName} wrote:</p>
-            <p className="italic mt-1">"{selectedTicket?.message}"</p>
+            <p className="italic mt-1">&ldquo;{selectedTicket?.message}&rdquo;</p>
           </div>
 
           <div>

@@ -324,7 +324,7 @@ export const ReviewsPage: React.FC = () => {
         <form onSubmit={handleReplySubmit} className="space-y-4">
           <div className="text-xs text-slate-500 bg-slate-50 dark:bg-slate-800 p-3 rounded-xl">
             <p className="font-bold">Original Review:</p>
-            <p className="italic mt-1">"{selectedReview?.body}"</p>
+            <p className="italic mt-1">&ldquo;{selectedReview?.body}&rdquo;</p>
           </div>
 
           <div>
