@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { config } from '../config/env';
+import { timingSafeEqualStr } from '../utils/timingSafe';
 
 export interface PayUInitiateParams {
   key: string;
@@ -90,7 +91,9 @@ export const payuService = {
 
     const calculatedHash = crypto.createHash('sha512').update(hashSequence).digest('hex');
 
-    return calculatedHash.toLowerCase() === String(receivedHash).toLowerCase();
+    // Timing-safe: a plain === leaks a comparison oracle an attacker could
+    // use to grind a valid hash byte by byte.
+    return timingSafeEqualStr(calculatedHash, String(receivedHash).toLowerCase());
   },
 
   buildCheckoutParams(payload: {

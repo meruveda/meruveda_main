@@ -7,6 +7,7 @@ import { normalizePhone } from '../services/whatsappService';
 import { hasColumn } from '../services/schemaGuard';
 import { verifyToken } from '../utils/jwt';
 import { config } from '../config/env';
+import { timingSafeEqualStr } from '../utils/timingSafe';
 import { shiprocketTrackingService } from '../services/shiprocket/tracking.service';
 import { shiprocketWebhookService } from '../services/shiprocket/webhook.service';
 import { getOrderForInvoice, generateInvoicePdf } from '../services/invoiceService';
@@ -290,7 +291,7 @@ export const retryShiprocketPushes = async (req: Request, res: Response, next: N
   try {
     const cronSecret = config.cronSecret;
     const authHeader = String(req.headers.authorization || '');
-    const isCron = !!cronSecret && authHeader === `Bearer ${cronSecret}`;
+    const isCron = !!cronSecret && authHeader.startsWith('Bearer ') && timingSafeEqualStr(authHeader.slice(7), cronSecret);
     // Optional admin JWT: this route sits before requireAuth so cron can pass.
     let isAdmin = req.user?.role === 'admin';
     if (!isAdmin && !isCron && authHeader.startsWith('Bearer ')) {

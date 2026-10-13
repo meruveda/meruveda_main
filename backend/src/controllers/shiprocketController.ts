@@ -9,6 +9,7 @@ import {
 } from '../services/shiprocket';
 import { supabase } from '../database/supabase';
 import { handleTransactionCancellation } from '../services/orderService';
+import { timingSafeEqualStr } from '../utils/timingSafe';
 
 export const shiprocketController = {
   /**
@@ -305,7 +306,7 @@ export const shiprocketController = {
       const token = req.headers['x-api-key'];
       const webhookToken = process.env.SHIPROCKET_WEBHOOK_TOKEN;
       
-      if (!webhookToken || token !== webhookToken) {
+      if (!webhookToken || !token || !timingSafeEqualStr(String(token), webhookToken)) {
         return res.status(401).json({ success: false, message: 'Unauthorized webhook' });
       }
 

@@ -3,26 +3,35 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import { config } from './config/env';
+import { isOriginAllowed } from './config/corsOrigins';
 
 const app = express();
+const allowedOriginSet = new Set(config.allowedOrigins);
 
 // Behind Vercel / reverse proxies the original scheme arrives via
 // X-Forwarded-Proto. Trust it so req.protocol is https in production —
 // otherwise PayU surl/furl are generated as http:// and the customer's
 // browser warns about insecure submission (and callbacks can break).
-app.set('trust proxy', 1);
+// Hop count is env-driven (default 1 = Vercel's edge) so req.ip — which the
+// rate limiter keys on — is the real client IP from X-Forwarded-For.
+app.set('trust proxy', config.trustProxyHops);
 
 // Middleware
 app.use(helmet());
 app.use(cors({
+  // Explicit allowlist — never '*'. Denials send no CORS headers at all
+  // (callback(null,false)); they are not server errors.
   origin: (origin, callback) => {
-    // Return true for any incoming origin (wildcard equivalent for credentials: true)
-    callback(null, true);
+    callback(null, isOriginAllowed(origin, allowedOriginSet, config.nodeEnv));
   },
   credentials: true
 }));
 app.use(morgan('dev'));
-app.use(express.json());
+// Capture the raw body for webhook signature verification (WhatsApp
+// X-Hub-Signature-256 needs the exact bytes Meta signed).
+app.use(express.json({
+  verify: (req: any, _res, buf) => { req.rawBody = buf; },
+}));
 app.use(express.urlencoded({ extended: true }));
 
 import { supabase } from './database/supabase';

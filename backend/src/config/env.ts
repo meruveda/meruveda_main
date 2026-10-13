@@ -24,6 +24,21 @@ if (!process.env.PAYU_SALT) {
   process.exit(1);
 }
 
+import { parseAllowedOrigins } from './corsOrigins';
+
+const nodeEnv = process.env.NODE_ENV || 'development';
+
+// CORS allowlist. In production an empty ALLOWED_ORIGINS is fatal — the
+// storefront would be locked out silently (or, worse, someone ships a
+// wildcard later to "fix" it).
+let allowedOriginsSet: Set<string>;
+try {
+  allowedOriginsSet = parseAllowedOrigins(process.env.ALLOWED_ORIGINS, nodeEnv);
+} catch (err: any) {
+  console.error(`❌ FATAL: ${err.message}`);
+  process.exit(1);
+}
+
 export const config = {
   port: process.env.PORT || 5000,
   nodeEnv: process.env.NODE_ENV || 'development',
@@ -32,13 +47,13 @@ export const config = {
   jwtSecret: process.env.JWT_SECRET,
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '30d',
   shiprocketTestMode: process.env.SHIPROCKET_TEST_MODE === 'true',
-  // Comma-separated list of origins the backend CORS policy allows.
-  // In dev: 'http://localhost:3000,http://localhost:5173,http://localhost:5174'
-  // In prod: set to your production frontend and admin URLs.
-  allowedOrigins: (process.env.ALLOWED_ORIGINS || 'http://localhost:3000,http://localhost:5173,http://localhost:5174')
-    .split(',')
-    .map((o) => o.trim())
-    .filter(Boolean),
+  // Comma-separated list of origins the backend CORS policy allows (trimmed,
+  // trailing slashes stripped, case-insensitive). Required in production.
+  // Dev:  http://localhost:3000,http://localhost:5173,http://localhost:5174
+  //       (plus any http://localhost:* / 127.0.0.1:* is auto-allowed in dev)
+  // Prod: https://meruveda.com,https://admin.meruveda.com + each explicit
+  //       Vercel preview URL you want to allow (never a *.vercel.app wildcard).
+  allowedOrigins: [...allowedOriginsSet],
   // Base URL of the customer-facing frontend — used to construct absolute
   // redirect URLs for payment gateway callbacks.
   // In production plain-http values are upgraded to https so payment
@@ -74,6 +89,11 @@ export const config = {
   whatsappPhoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || '',
   whatsappBusinessAccountId: process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || '',
   whatsappWebhookVerifyToken: process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || '',
+  // Meta App Dashboard > Settings > Basic > App Secret. Used to verify the
+  // X-Hub-Signature-256 header on inbound webhook POSTs.
+  whatsappAppSecret: process.env.WHATSAPP_APP_SECRET || '',
+  // Shiprocket webhook shared token (x-api-key header).
+  shiprocketWebhookToken: process.env.SHIPROCKET_WEBHOOK_TOKEN || '',
   // Store admin's WhatsApp number — receives every invoice + order notification.
   adminWhatsappNumber: process.env.ADMIN_WHATSAPP_NUMBER || '',
   // Meta Graph API version used for WhatsApp Cloud API calls.
@@ -81,6 +101,16 @@ export const config = {
   // ---- Scheduled jobs (7-day review request) ----
   // Shared secret Vercel Cron (or any scheduler) must send as `Authorization: Bearer <secret>`.
   cronSecret: process.env.CRON_SECRET || '',
+
+  // ---- Upstash Redis (serverless-safe shared store) ----
+  // Used by the rate limiter and cross-instance token caches. When unset the
+  // backend falls back to in-process memory (dev only — see rateLimit.ts).
+  upstashRedisRestUrl: process.env.UPSTASH_REDIS_REST_URL || '',
+  upstashRedisRestToken: process.env.UPSTASH_REDIS_REST_TOKEN || '',
+
+  // Hops of reverse proxy in front of the API (Vercel = 1) so req.ip is the
+  // real client IP from X-Forwarded-For, not the proxy's address.
+  trustProxyHops: Number(process.env.TRUST_PROXY_HOPS ?? 1),
 
   // ---- Post-order automation flags ----
   // BOTH DEFAULT OFF. With a flag off the app behaves exactly as before this

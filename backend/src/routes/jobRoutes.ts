@@ -4,6 +4,7 @@ import { config } from '../config/env';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { invoiceDispatchService } from '../services/invoiceDispatchService';
 import { retryFailedShiprocketPushes } from '../services/orderService';
+import { timingSafeEqualStr } from '../utils/timingSafe';
 
 /**
  * Scheduled jobs.
@@ -28,10 +29,10 @@ const authorize = (req: Request, res: Response, next: any) => {
   const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
   const provided = bearer || (req.query.secret as string) || '';
 
-  if (config.cronSecret && provided === config.cronSecret) return next();
+  if (config.cronSecret && timingSafeEqualStr(provided, config.cronSecret)) return next();
 
   // Explicit 401 when a wrong secret was supplied and no admin session exists.
-  if (config.cronSecret && provided && provided !== config.cronSecret) {
+  if (config.cronSecret && provided && !timingSafeEqualStr(provided, config.cronSecret)) {
     return requireAuth(req, res, (err: any) => {
       if (err) return next(err);
       requireAdmin(req, res, next);
