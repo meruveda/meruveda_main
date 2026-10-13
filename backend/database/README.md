@@ -23,9 +23,15 @@ by hand, in the order below.
 | 9 | `deltas/009_page_views.sql` | page_views table, users.phone_verified |
 | 10 | `deltas/010_auto_invoice_shiprocket.sql` | invoice_sent_at/invoice_error, shiprocket_push_* |
 | 11 | `sql/migrations/2026-10-14_invoice_sequence.sql` | orders.invoice_number, invoice_sequences counter, `assign_invoice_number()` |
+| 12 | `sql/migrations/2026-10-14_row_level_security.sql` | RLS enabled + forced on all public tables, all policies dropped (deny-all to anon/authenticated), storage bucket visibility |
 
-**Live database already at delta 010?** Run only step 11 (or the consolidated
-copy below).
+**Live database already at delta 010?** Run only steps 11 and 12 (or the
+consolidated copy below for step 11).
+
+Step 12 is a **security lockdown**: after it runs, the anon key cannot read any
+table. That is intended — the storefront and admin panel go through the backend
+(service-role key), which bypasses RLS. Read the "BEFORE YOU RUN IT" notes in
+that file, and check your existing policies first.
 
 **Consolidated convenience copy:** `PENDING_DELTAS.sql` contains steps 5–11 in
 one script (including the invoice sequence). It does **not** contain steps 1–4
