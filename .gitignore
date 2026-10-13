@@ -49,3 +49,8 @@ next-env.d.ts
 .agents/
 backend/.cache/
 backend/*.log
+
+# dev scratch scripts + accidental supabase CLI --help dumps
+scratch*
+backend/schema.json
+backend/schema.ts

@@ -207,11 +207,19 @@ function snapWidth(value: string | undefined): number {
 // uncached resizes can't each spin up native threads and exhaust RAM.
 sharp.concurrency(1);
 const MAX_PARALLEL_RESIZES = 2;
+// Bounded wait queue: beyond this many queued resizes, shed load with a 503
+// (+ Retry-After) instead of growing memory without limit.
+const MAX_QUEUED_RESIZES = 20;
 let resizesInFlight = 0;
 const resizeWaiters: Array<() => void> = [];
 
 async function withResizeSlot<T>(fn: () => Promise<T>): Promise<T> {
   if (resizesInFlight >= MAX_PARALLEL_RESIZES) {
+    if (resizeWaiters.length >= MAX_QUEUED_RESIZES) {
+      const err: any = new Error('Server is busy processing images. Please retry shortly.');
+      err.status = 503;
+      throw err;
+    }
     await new Promise<void>((resolve) => resizeWaiters.push(resolve));
   }
   resizesInFlight++;
@@ -340,6 +348,7 @@ router.get('/fetch', async (req: Request, res: Response) => {
   } catch (error: any) {
     const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError';
     const status = timedOut ? 504 : (error?.status || 500);
+    if (status === 503) res.setHeader('Retry-After', '2');
     if (status >= 500) {
       console.error('[Images] derivative failed:', error?.message || error);
     }
