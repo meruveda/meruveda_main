@@ -9,7 +9,11 @@ import Footer from "@/components/Footer";
 import WhatsAppButton from "@/components/WhatsAppButton";
 import PageViewTracker from "@/components/PageViewTracker";
 import CardVaultCleanup from "@/components/CardVaultCleanup";
+import AnalyticsScripts from "@/components/AnalyticsScripts";
+import CookieConsentBanner from "@/components/CookieConsentBanner";
+import BeaconProvider from "@/components/BeaconProvider";
 import { Analytics } from "@vercel/analytics/next";
+import { SpeedInsights } from "@vercel/speed-insights/next";
 
 const fraunces = Fraunces({
   variable: "--font-fraunces",
@@ -59,7 +63,13 @@ export default function RootLayout({
         </AuthProvider>
         <PageViewTracker />
         <CardVaultCleanup />
+        <BeaconProvider />
+        {/* Cookieless — no consent gate. */}
         <Analytics />
+        <SpeedInsights />
+        {/* GA4 + Meta Pixel: rendered only after consent is accepted. */}
+        <AnalyticsScripts />
+        <CookieConsentBanner />
       </body>
     </html>
   );
