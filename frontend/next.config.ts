@@ -36,10 +36,10 @@ const nextConfig: NextConfig = {
   async rewrites() {
     // Same-origin /api/* → Express backend. The custom image loader (and the
     // Vercel fallback for axios) request /api/... on the frontend origin; only
-    // Vercel's vercel.json forwards those to the backend service, so `next dev`
-    // (and self-hosted deploys like Render) answered every /api/images/fetch
-    // with a 404 and no product photo rendered anywhere.
-    // On Vercel the platform rewrite already handles /api/* — adding it here
+    // the platform rewrite in vercel.json forwards those to the backend service,
+    // so `next dev` answered every /api/images/fetch with a 404 and no product
+    // photo rendered anywhere.
+    // On Vercel the vercel.json rewrite already handles /api/* — adding it here
     // too would double-proxy, so it is skipped there.
     if (process.env.VERCEL) return [];
 
@@ -47,14 +47,15 @@ const nextConfig: NextConfig = {
       process.env.BACKEND_SERVICE_URL || process.env.NEXT_PUBLIC_API_URL;
 
     if (!backendUrl) {
-      // On Render (or any self-host) a missing backend URL would silently
+      // Without the platform rewrite, a missing backend URL would silently
       // rewrite every /api call to localhost and break the whole storefront —
       // fail the build/startup with an actionable message instead.
       if (process.env.NODE_ENV === 'production') {
         throw new Error(
           '[next.config] BACKEND_SERVICE_URL (or NEXT_PUBLIC_API_URL) must be set when building ' +
-            'for production on a self-hosted platform (e.g. Render). It is the backend service ' +
-            'origin that /api/* is rewritten to — without it every API and image request 404s.'
+            'for production outside Vercel (where vercel.json owns the /api/* rewrite). It is ' +
+            'the backend service origin /api/* is rewritten to — without it every API and ' +
+            'image request 404s.'
         );
       }
       // Local dev convenience default.

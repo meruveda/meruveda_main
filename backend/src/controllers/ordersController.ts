@@ -291,7 +291,11 @@ export const retryShiprocketPushes = async (req: Request, res: Response, next: N
   try {
     const cronSecret = config.cronSecret;
     const authHeader = String(req.headers.authorization || '');
-    const isCron = !!cronSecret && authHeader.startsWith('Bearer ') && timingSafeEqualStr(authHeader.slice(7), cronSecret);
+    // Vercel Cron sends `Authorization: Bearer $CRON_SECRET`; the ?secret=
+    // fallback matches /api/jobs/* and makes manual curl runs possible.
+    const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+    const provided = bearer || String(req.query.secret || '');
+    const isCron = !!cronSecret && provided !== '' && timingSafeEqualStr(provided, cronSecret);
     // Optional admin JWT: this route sits before requireAuth so cron can pass.
     let isAdmin = req.user?.role === 'admin';
     if (!isAdmin && !isCron && authHeader.startsWith('Bearer ')) {

@@ -142,3 +142,108 @@ export const config = {
   // Base URL of this backend — used by the webhook docs helper.
   backendUrl: process.env.BACKEND_URL || '',
 };
+
+// ---------------------------------------------------------------------------
+// Production environment audit.
+//
+// Fail-fast cases (server refuses to boot) are handled above: JWT_SECRET,
+// PAYU_MERCHANT_KEY, PAYU_SALT, ALLOWED_ORIGINS.
+//
+// Everything below is checked once, at boot, and printed as a single report.
+// A missing var here means a feature is silently degraded in production, which
+// is exactly the class of problem that is invisible until a customer complains.
+// ---------------------------------------------------------------------------
+if (nodeEnv === 'production') {
+  const fatal: string[] = [];
+  const warn: string[] = [];
+
+  // Without CRON_SECRET the three scheduled jobs fall back to "admin JWT
+  // required", so every cron invocation 401s. That is fail-closed (good) but
+  // it looks like the jobs are simply broken, so refuse to boot instead.
+  if (!process.env.CRON_SECRET) {
+    fatal.push(
+      'CRON_SECRET — Vercel Cron sends `Authorization: Bearer $CRON_SECRET`; without it all three scheduled jobs 401',
+    );
+  }
+
+  // Rate limits and the Shiprocket token cache are per-instance in memory
+  // without Upstash, so they reset on every cold start and are not shared
+  // across concurrently-running instances.
+  const upstashUrl = process.env.UPSTASH_REDIS_REST_URL;
+  const upstashToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!upstashUrl || !upstashToken) {
+    warn.push(
+      'UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN — rate limits and the Shiprocket token cache are per-instance only (they reset on cold start and are not shared between instances)',
+    );
+  }
+
+  // Database.
+  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY) {
+    fatal.push('SUPABASE_URL + SUPABASE_SERVICE_KEY — every read/write goes through these');
+  }
+
+  // Payment gateway. PAYU_MERCHANT_KEY/PAYU_SALT are already fatal above.
+  if ((process.env.PAYU_MODE || 'live') === 'live' && !process.env.PAYU_BASE_URL) {
+    warn.push('PAYU_BASE_URL — left unset, live checkout points at the PayU test host');
+  }
+
+  // Order fulfilment. COD orders need no Shiprocket credentials, but prepaid
+  // fulfilment stops without them.
+  if (!process.env.SHIPROCKET_EMAIL || !process.env.SHIPROCKET_PASSWORD) {
+    warn.push('SHIPROCKET_EMAIL + SHIPROCKET_PASSWORD — order fulfilment (tracking, labels) is disabled');
+  }
+
+  // Transactional email: password resets and order/invoice mail.
+  if (!process.env.RESEND_API_KEY) {
+    warn.push('RESEND_API_KEY — password reset, order confirmation and invoice emails are not sent');
+  }
+  if (!process.env.EMAIL_FROM) {
+    warn.push('EMAIL_FROM — Resend needs a verified From address');
+  }
+
+  // Absolute links (password reset) must point at the real storefront.
+  if (!process.env.FRONTEND_URL) {
+    warn.push('FRONTEND_URL — password reset links would point at http://localhost:3000');
+  }
+
+  // WhatsApp. Only required when the WhatsApp flows are switched on.
+  if (process.env.INVOICE_AUTO_SEND === 'true' && !process.env.WHATSAPP_API_TOKEN) {
+    warn.push('WHATSAPP_API_TOKEN + WHATSAPP_PHONE_NUMBER_ID — INVOICE_AUTO_SEND=true but WhatsApp is not configured (invoices fall back to email)');
+  }
+  if (process.env.OTP_ENABLED === 'true' && !process.env.WHATSAPP_API_TOKEN) {
+    warn.push('WHATSAPP_API_TOKEN — OTP_ENABLED=true but WhatsApp is not configured');
+  }
+  if (process.env.WHATSAPP_API_TOKEN && !process.env.WHATSAPP_APP_SECRET) {
+    warn.push('WHATSAPP_APP_SECRET — webhook signatures cannot be verified; receiveWebhook then rejects every call in production');
+  }
+
+  // Invoice: GST compliance needs a real GSTIN on the printed invoice.
+  if (!(process.env.BUSINESS_GSTIN || process.env.GSTIN)) {
+    warn.push('BUSINESS_GSTIN (or GSTIN) — invoices print without a GSTIN, which is not GST-compliant');
+  }
+
+  // Invoice numbering: without the sequence migration the backend logs a
+  // warning per invoice and falls back to non-consecutive numbering.
+  if (process.env.INVOICE_AUTO_SEND === 'true') {
+    warn.push(
+      'SQL migration backend/sql/migrations/2026-10-14_invoice_sequence.sql — until it is applied, invoices use the legacy non-sequential number',
+    );
+  }
+
+  if (fatal.length) {
+    console.error(
+      '\n❌ FATAL: required production environment variables are missing:\n' +
+        fatal.map((v) => `     - ${v}`).join('\n') +
+        '\n   Server will not start. See backend/.env.example.\n',
+    );
+    process.exit(1);
+  }
+
+  if (warn.length) {
+    console.warn(
+      '\n⚠️  [env] production configuration is incomplete:\n' +
+        warn.map((v) => `     - ${v}`).join('\n') +
+        '\n   These features will be degraded or disabled. See backend/.env.example.\n',
+    );
+  }
+}
