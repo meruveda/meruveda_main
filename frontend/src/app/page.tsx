@@ -134,9 +134,9 @@ export default async function Home() {
       {/* Hero Slideshow Section */}
       <HeroCarousel initialBanners={banners} />
 
-      {/* Products Section — top padding removed so the hero flows straight into
-          this section instead of leaving an empty cream strip below it. */}
-      <section className="container mx-auto px-6 pt-0 pb-12 md:pb-20 relative z-20">
+      {/* Products Section — top padding gives the hero banner room to breathe
+          before the Best Sellers content starts. */}
+      <section className="container mx-auto px-6 pt-16 md:pt-24 pb-12 md:pb-20 relative z-20">
         <div className="text-center mb-12">
           <h2 className="text-4xl font-playfair font-bold text-deep-purple mb-4">Best Sellers</h2>
           <p className="text-gray-600">Discover our most loved Ayurvedic remedies.</p>
