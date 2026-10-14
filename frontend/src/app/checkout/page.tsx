@@ -23,7 +23,7 @@ import {
   Star
 } from "lucide-react";
 import axiosInstance from "@/api/axiosInstance";
-import { track } from "@vercel/analytics";
+import { track as trackEvent } from "@/lib/analytics";
 
 // OTP feature flag. Default false = the no-OTP Sign up / Login flow below is
 // active. Set NEXT_PUBLIC_OTP_ENABLED=true to bring the WhatsApp OTP UI back.
@@ -354,7 +354,6 @@ export default function CheckoutPage() {
   const [mobileError, setMobileError] = useState("");
 
   const hydratedFromProfileRef = useRef(false);
-  const beginCheckoutTracked = useRef(false);
 
 
   // Payment method state: strictly "payu" (Pay Online via PayU) or "cod" (Cash on Delivery)
@@ -397,6 +396,24 @@ export default function CheckoutPage() {
   const deliveryZip = usesAddressForm
     ? addressForm.pincode.trim()
     : addresses.find((a) => a.id === selectedAddressId)?.zipCode || "";
+
+  // begin_checkout — once per checkout page visit with a non-empty cart.
+  // This is the top of the funnel the admin dashboard reports on.
+  useEffect(() => {
+    if (cart.length === 0) return;
+    trackEvent('begin_checkout', {
+      value: Number(cartTotal) || 0,
+      currency: 'INR',
+      items: cart.map((item: any) => ({
+        item_id: item.id,
+        item_name: item.name,
+        price: Number(item.price) || 0,
+        quantity: Number(item.quantity) || 1,
+      })),
+    });
+    // Intentionally mount-only: a re-render must not inflate the funnel.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Shiprocket Shipping Check
   useEffect(() => {
@@ -700,20 +717,9 @@ export default function CheckoutPage() {
     );
   }
 
-  // Vercel Web Analytics — fire begin_checkout once when the page first
-  // renders with a non-empty cart. Never blocks or re-fires on re-renders.
-  if (cart.length > 0 && !beginCheckoutTracked.current) {
-    beginCheckoutTracked.current = true;
-    try {
-      track("begin_checkout", {
-        value: cartTotal,
-        currency: "INR",
-        items: cart.length,
-      });
-    } catch {
-      /* analytics must never break checkout */
-    }
-  }
+  // begin_checkout is fired from the mount effect above (not from the render
+  // body — a side effect in render re-fires on every re-render and inflates
+  // the funnel).
 
   if (cart.length === 0) {
     return (

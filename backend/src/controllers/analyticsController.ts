@@ -265,6 +265,158 @@ export const recordPageview = async (req: Request, res: Response, next: NextFunc
   }
 };
 
+/**
+ * First-party e-commerce events (see sql/migrations/2026-10-14_analytics_events.sql).
+ *
+ * The storefront scrubs params before sending, and this endpoint re-validates
+ * everything it stores: only the event name, path, the random session id, an
+ * optional product/order UUID and a numeric value. No free text, no PII.
+ */
+const EVENT_NAME_RE = /^[a-z_]{3,40}$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const EVENT_PATH_MAX = 200;
+
+export const recordEvent = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    // Migration not applied yet — accept and drop so the storefront never breaks.
+    if (!(await hasTable('analytics_events'))) {
+      return res.status(204).end();
+    }
+
+    const eventName = String(req.body?.event || '').trim();
+    if (!EVENT_NAME_RE.test(eventName)) {
+      // Not worth a client-visible error for a tracking beacon — drop it.
+      return res.status(204).end();
+    }
+
+    const rawPath = String(req.body?.path || '');
+    const path = rawPath.startsWith('/') ? rawPath.split('?')[0].slice(0, EVENT_PATH_MAX) : null;
+
+    // Same random session id the pageview beacon uses (not a user id).
+    const sessionId = String(req.body?.sessionId || '');
+    if (sessionId && !SESSION_ID_RE.test(sessionId)) {
+      return res.status(400).json({ error: { message: 'Invalid session id' } });
+    }
+
+    const rawProductId = String(req.body?.product_id || req.body?.item_id || '');
+    const rawOrderId = String(req.body?.order_id || req.body?.transaction_id || '');
+
+    const rawValue = Number(req.body?.value);
+    const value = Number.isFinite(rawValue) && rawValue >= 0 ? Math.round(rawValue * 100) / 100 : null;
+
+    const { error } = await supabase.from('analytics_events').insert({
+      event_name: eventName,
+      path: path || null,
+      session_id: sessionId || null,
+      product_id: UUID_RE.test(rawProductId) ? rawProductId : null,
+      order_id: UUID_RE.test(rawOrderId) ? rawOrderId : null,
+      value,
+      currency: 'INR',
+    });
+    if (error) throw error;
+
+    res.status(204).end();
+  } catch (error) {
+    console.error('[Analytics] event insert failed:', error);
+    res.status(204).end();
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Funnel + payment mix for the admin Analytics page.
+//
+// Both parts degrade to zeros when the analytics_events migration has not been
+// applied yet, so the dashboard renders before the migration is run.
+// ---------------------------------------------------------------------------
+const emptyFunnel = () => ({
+  productViews: 0,
+  addToCart: 0,
+  checkoutStarted: 0,
+  purchases: 0,
+  conversionRate: 0,
+  checkoutCompletionRate: 0,
+});
+
+/** Share of checkout starts that became a purchase, as a percentage. */
+const rateOf = (numerator: number, denominator: number) =>
+  denominator > 0 ? Math.round((numerator / denominator) * 1000) / 10 : 0;
+
+async function buildFunnel(since: string, _days: number) {
+  const empty = emptyFunnel();
+
+  if (!(await hasTable('analytics_events'))) {
+    return { funnel: empty, topProducts: [], paymentSplit: { cod: 0, payu: 0 } };
+  }
+
+  // Counts per event name over the window (bounded like the pageviews query).
+  const { data: eventRows } = await supabase
+    .from('analytics_events')
+    .select('event_name, product_id')
+    .gte('created_at', since)
+    .limit(50_000);
+
+  const counts = new Map<string, number>();
+  const productViews = new Map<string, number>();
+  for (const row of eventRows || []) {
+    const name = String(row.event_name || '');
+    counts.set(name, (counts.get(name) || 0) + 1);
+    if ((name === 'view_item' || name === 'add_to_cart') && row.product_id) {
+      productViews.set(row.product_id, (productViews.get(row.product_id) || 0) + 1);
+    }
+  }
+
+  const productViewsCount = counts.get('view_item') || 0;
+  const addToCartCount = counts.get('add_to_cart') || 0;
+  const checkoutStartedCount = counts.get('begin_checkout') || 0;
+  const purchases = counts.get('purchase') || 0;
+
+  // Top products viewed, with names resolved from the products table.
+  let topProducts: Array<{ productId: string; name: string; views: number }> = [];
+  const topIds = [...productViews.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10);
+  if (topIds.length) {
+    const { data: products } = await supabase
+      .from('products')
+      .select('id, name')
+      .in('id', topIds.map(([id]) => id));
+    const names = new Map((products || []).map((p: any) => [p.id, p.name]));
+    topProducts = topIds.map(([productId, views]) => ({
+      productId,
+      name: String(names.get(productId) || 'Unknown product'),
+      views,
+    }));
+  }
+
+  // COD vs PayU from the orders table itself rather than the beacon, so the
+  // split reflects what was actually sold.
+  const { data: orders } = await supabase
+    .from('orders')
+    .select('payment_method, created_at')
+    .gte('created_at', since)
+    .limit(50_000);
+  let cod = 0;
+  let payu = 0;
+  for (const order of orders || []) {
+    const method = String(order.payment_method || '').toLowerCase();
+    if (method.includes('cash') || method === 'cod') cod += 1;
+    else payu += 1;
+  }
+
+  return {
+    funnel: {
+      productViews: productViewsCount,
+      addToCart: addToCartCount,
+      checkoutStarted: checkoutStartedCount,
+      purchases,
+      conversionRate: rateOf(purchases, productViewsCount),
+      checkoutCompletionRate: rateOf(purchases, checkoutStartedCount),
+    },
+    topProducts,
+    paymentSplit: { cod, payu },
+  };
+}
+
 /** Admin-only traffic summary for the Analytics page. */
 export const getTrafficStats = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -274,7 +426,7 @@ export const getTrafficStats = async (req: Request, res: Response, next: NextFun
 
     if (!(await hasTable('page_views'))) {
       return res.json({
-        data: { range: `${days}d`, totalViews: 0, uniqueSessions: 0, topPages: [], deviceSplit: {}, daily: [] },
+        data: { range: `${days}d`, totalViews: 0, uniqueSessions: 0, topPages: [], deviceSplit: {}, daily: [], funnel: emptyFunnel(), topProducts: [], paymentSplit: { cod: 0, payu: 0 } },
       });
     }
 
@@ -322,6 +474,7 @@ export const getTrafficStats = async (req: Request, res: Response, next: NextFun
         topPages,
         deviceSplit: Object.fromEntries(byDevice),
         daily,
+        ...(await buildFunnel(since, days)),
       },
     });
   } catch (error) {

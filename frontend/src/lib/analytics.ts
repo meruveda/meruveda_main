@@ -94,6 +94,28 @@ export function hasThirdPartyConsent(): boolean {
   return getConsent() === "granted";
 }
 
+/**
+ * Stable per-browser-session id, shared by the pageview beacon and the
+ * e-commerce events so a funnel can be joined on session. Deliberately random
+ * and session-scoped — it is not a user id and leaves no trace across visits.
+ */
+export function getSessionId(): string {
+  if (typeof window === "undefined") return "unknown";
+  try {
+    let id = window.sessionStorage.getItem("meruveda_pv_sid");
+    if (!id) {
+      id =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      window.sessionStorage.setItem("meruveda_pv_sid", id);
+    }
+    return id;
+  } catch {
+    return "unknown";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Purchase dedupe (once per order, across refreshes)
 // ---------------------------------------------------------------------------
@@ -253,10 +275,16 @@ function fireFirstParty(event: string, path: string, params: TrackParams): void 
   const body: Record<string, unknown> = {
     event,
     path,
-    // Only the non-identifying ids survive the scrub.
+    sessionId: getSessionId(),
+    // Only the non-identifying values survive the scrub.
     ...sanitizeParams(params),
-    items: sanitizeItems(params.items),
   };
+  const items = sanitizeItems(params.items);
+  if (items.length) {
+    // The beacon stores one row per event; a single representative product id
+    // is enough for "top products viewed" (first item of the list).
+    body.product_id = items[0]?.item_id;
+  }
   // Do not let a tracking failure surface to the caller.
   try {
     beacon("/analytics/event", body);

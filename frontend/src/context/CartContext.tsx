@@ -4,6 +4,7 @@ import React, { createContext, useContext, useState, useEffect, useRef } from 'r
 import axiosInstance from '../api/axiosInstance';
 import { useAuth } from './AuthContext';
 import { track } from '@vercel/analytics';
+import { track as trackEvent } from '@/lib/analytics';
 
 export type CartItem = {
   id: string;
@@ -141,6 +142,10 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
         value: newItem.price,
         quantity: qty,
       });
+      // Fans out to GA4 / Meta Pixel / our own analytics_events table.
+      trackEvent('add_to_cart', {
+        items: [{ item_id: newItem.id, item_name: newItem.name, price: Number(newItem.price) || 0, quantity: qty }],
+      });
     } catch {
       /* analytics must never break shopping */
     }
@@ -181,9 +186,26 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
 
   const removeFromCart = async (id: string) => {
     const originalCart = [...cart];
+    const removed = originalCart.find(item => item.id === id) as any;
     invalidateInFlightFetches();
     // Optimistic Update
     setCart(cart.filter(item => item.id !== id));
+
+    // remove_from_cart — product id/name only, never customer data.
+    try {
+      if (removed) {
+        trackEvent('remove_from_cart', {
+          items: [{
+            item_id: removed.id,
+            item_name: removed.name,
+            price: Number(removed.price) || 0,
+            quantity: Number(removed.quantity) || 1,
+          }],
+        });
+      }
+    } catch {
+      /* analytics must never break shopping */
+    }
 
     if (isAuthenticated) {
       try {

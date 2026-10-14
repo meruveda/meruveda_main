@@ -1,7 +1,7 @@
 "use client";
 
 import { useAuth } from "@/context/AuthContext";
-import { useEffect, useState, use, useRef } from "react";
+import { useEffect, useState, use } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 import axiosInstance from "@/api/axiosInstance";
 import { useCart } from "@/context/CartContext";
-import { track } from "@vercel/analytics";
+import { track, claimPurchaseOnce } from "@/lib/analytics";
 
 interface OrderDetails {
   id: string;
@@ -49,6 +49,15 @@ interface OrderDetails {
   }>;
 }
 
+/**
+ * True for Cash On Delivery orders. Used to tag the purchase event so the admin
+ * dashboard can report a COD vs PayU split, and to decide whether the order is
+ * confirmed at placement (no payment callback to wait for).
+ */
+function isCODOrder(order: { payment_method?: string }): boolean {
+  return String(order.payment_method || "").toLowerCase().includes("cash");
+}
+
 export default function CheckoutSuccessPage({ params }: { params: Promise<{ orderId: string }> }) {
   const { orderId } = use(params);
   const { user, isLoading: authLoading } = useAuth();
@@ -58,7 +67,6 @@ export default function CheckoutSuccessPage({ params }: { params: Promise<{ orde
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [cartCleared, setCartCleared] = useState(false);
-  const orderTracked = useRef(false);
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -90,19 +98,30 @@ export default function CheckoutSuccessPage({ params }: { params: Promise<{ orde
           await clearCart();
           setCartCleared(true);
         }
-        // Vercel Web Analytics — order_placed fires once when payment (or COD)
-        // is confirmed. Polling re-runs this effect, so the ref guards dupes.
-        if (isConfirmed && !orderTracked.current) {
-          orderTracked.current = true;
-          try {
-            track("order_placed", {
-              value: Number(orderData.total) || 0,
-              currency: "INR",
-              order_id: orderData.id,
-              payment_method: String(orderData.payment_method || ""),
-            });
-          } catch {
-            /* analytics must never break the success page */
+        // Purchase — fired once per order, after the order is confirmed.
+        // The pageview polls until PayU confirms, so this block runs several
+        // times; claimPurchaseOnce() persists by order number in localStorage
+        // and lets exactly one of them through — a refresh, the back button or
+        // a second poll cannot double count. GA4 and Meta Pixel only receive it
+        // after consent; our own first-party event always records it.
+        if (isConfirmed) {
+          if (claimPurchaseOnce(orderData.order_number || orderData.id)) {
+            try {
+              track("purchase", {
+                transaction_id: orderData.order_number,
+                value: Number(orderData.total) || 0,
+                currency: "INR",
+                payment_type: isCODOrder(orderData) ? "cod" : "payu",
+                items: (orderData.order_items || []).map((item: any) => ({
+                  item_id: item.product_id,
+                  item_name: item.product_name,
+                  price: Number(item.price) || 0,
+                  quantity: Number(item.quantity) || 1,
+                })),
+              });
+            } catch {
+              /* analytics must never break the success page */
+            }
           }
         }
         // Payment completed on the phone but the laptop still shows a pending

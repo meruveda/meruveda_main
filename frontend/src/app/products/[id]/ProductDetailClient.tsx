@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import { Minus, Plus, ShoppingCart, Sparkles, Droplets, Star, Loader2, ArrowRight } from 'lucide-react';
 import { useCart } from '@/context/CartContext';
 import { useAuth } from '@/context/AuthContext';
+import { track } from '@/lib/analytics';
 import { motion, AnimatePresence } from 'framer-motion';
 
 export default function ProductDetailClient({ product }: { product: any }) {
@@ -19,6 +20,19 @@ export default function ProductDetailClient({ product }: { product: any }) {
   
   const [localQuantity, setLocalQuantity] = useState(1);
   const [activeTab, setActiveTab] = useState('description');
+
+  // view_item — fires once per product mount. GA4/Meta only receive this if the
+  // visitor accepted analytics; our own first-party event always records it.
+  React.useEffect(() => {
+    if (!product?.id) return;
+    track('view_item', {
+      items: [{
+        item_id: product.id,
+        item_name: product.name,
+        price: Number(product.price) || 0,
+      }],
+    });
+  }, [product?.id]);
 
   const [reviews, setReviews] = useState<any[]>([]);
   const [loadingReviews, setLoadingReviews] = useState(true);

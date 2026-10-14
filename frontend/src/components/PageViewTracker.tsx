@@ -3,23 +3,7 @@
 import { useEffect, useRef } from "react";
 import { usePathname } from "next/navigation";
 import axiosInstance from "@/api/axiosInstance";
-
-/** Stable per-browser-session id — no PII, expires with sessionStorage. */
-function getOrCreateSessionId(): string {
-  try {
-    let id = sessionStorage.getItem("meruveda_pv_sid");
-    if (!id) {
-      id =
-        typeof crypto !== "undefined" && "randomUUID" in crypto
-          ? crypto.randomUUID()
-          : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-      sessionStorage.setItem("meruveda_pv_sid", id);
-    }
-    return id;
-  } catch {
-    return "unknown";
-  }
-}
+import { getSessionId } from "@/lib/analytics";
 
 function getDeviceType(): string {
   if (typeof navigator === "undefined") return "desktop";
@@ -48,7 +32,7 @@ export default function PageViewTracker() {
         .post("/analytics/pageview", {
           path: pathname,
           referrer: typeof document !== "undefined" ? document.referrer : "",
-          sessionId: getOrCreateSessionId(),
+          sessionId: getSessionId(),
           deviceType: getDeviceType(),
         })
         .catch(() => {
