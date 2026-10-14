@@ -73,7 +73,6 @@ export default function AnalyticsScripts() {
               const fbq = ((window as any).fbq =
                 (window as any).fbq ||
                 function (...args: unknown[]) {
-                  // eslint-disable-next-line prefer-rest-params
                   ((fbq as any).q = (fbq as any).q || []).push(args);
                 });
               if (!(fbq as any).initialized) {

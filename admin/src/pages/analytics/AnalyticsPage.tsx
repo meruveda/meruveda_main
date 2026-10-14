@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { BarChart3, TrendingUp, ShoppingBag, Users, Percent, Download, RefreshCw, ExternalLink, Eye, Monitor, Smartphone, Tablet } from 'lucide-react'
+import { BarChart3, TrendingUp, ShoppingBag, Users, Percent, Download, RefreshCw, ExternalLink, Eye, Monitor, Smartphone, Tablet, GitBranch, Package, CreditCard } from 'lucide-react'
 import { analyticsService, TrafficStats } from '../../services/analyticsService'
 import { orderService } from '../../services/orderService'
 import { AnalyticsSummary } from '../../types'
@@ -292,6 +292,137 @@ export const AnalyticsPage: React.FC = () => {
                     </tbody>
                   </table>
                 )}
+              </div>
+            </div>
+
+            {/* Storefront funnel, top products and payment mix.
+                These come from analytics_events (first-party beacon) and the
+                orders table. All zero until the analytics_events migration is
+                applied — the cards render rather than break. */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="card p-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="section-title">Storefront Funnel</h3>
+                  <GitBranch className="h-4 w-4 text-slate-300" />
+                </div>
+                <div className="space-y-3">
+                  {([
+                    ['Product views', traffic?.funnel.productViews || 0],
+                    ['Add to cart', traffic?.funnel.addToCart || 0],
+                    ['Checkout started', traffic?.funnel.checkoutStarted || 0],
+                    ['Purchases', traffic?.funnel.purchases || 0],
+                  ] as Array<[string, number]>).map(([label, value]) => {
+                    const top = Math.max(
+                      traffic?.funnel.productViews || 0,
+                      traffic?.funnel.addToCart || 0,
+                      traffic?.funnel.checkoutStarted || 0,
+                      traffic?.funnel.purchases || 0,
+                      1
+                    )
+                    return (
+                      <div key={label}>
+                        <div className="flex items-center justify-between text-xs mb-1">
+                          <span className="text-slate-500 dark:text-slate-400">{label}</span>
+                          <span className="font-semibold text-slate-900 dark:text-white">{formatNumber(value)}</span>
+                        </div>
+                        <div className="h-1.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+                          <div
+                            className="h-full rounded-full bg-primary-600"
+                            style={{ width: `${Math.round((value / top) * 100)}%` }}
+                          />
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+                <div className="flex items-center justify-between pt-3 border-t border-slate-100 dark:border-slate-800 text-xs">
+                  <span className="text-slate-500">View → purchase</span>
+                  <span className="font-semibold text-slate-900 dark:text-white">
+                    {traffic?.funnel.conversionRate || 0}%
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-slate-500">Checkout → paid</span>
+                  <span className="font-semibold text-slate-900 dark:text-white">
+                    {traffic?.funnel.checkoutCompletionRate || 0}%
+                  </span>
+                </div>
+              </div>
+
+              <div className="card p-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="section-title">Top Products Viewed</h3>
+                  <Package className="h-4 w-4 text-slate-300" />
+                </div>
+                {(traffic?.topProducts || []).length === 0 ? (
+                  <p className="text-sm text-slate-400">No product views recorded yet.</p>
+                ) : (
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-left text-slate-400 border-b border-slate-100 dark:border-slate-800">
+                        <th className="pb-2 font-semibold">Product</th>
+                        <th className="pb-2 font-semibold text-right">Views</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {traffic!.topProducts.map((p) => (
+                        <tr key={p.productId} className="border-b border-slate-50 dark:border-slate-800/50 last:border-0">
+                          <td className="py-2 pr-2 text-slate-600 dark:text-slate-300 truncate max-w-[200px]" title={p.name}>
+                            {p.name}
+                          </td>
+                          <td className="py-2 text-right font-semibold text-slate-900 dark:text-white">
+                            {formatNumber(p.views)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+
+              <div className="card p-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="section-title">Payment Mix</h3>
+                  <CreditCard className="h-4 w-4 text-slate-300" />
+                </div>
+                {(() => {
+                  const cod = traffic?.paymentSplit.cod || 0
+                  const payu = traffic?.paymentSplit.payu || 0
+                  const total = cod + payu
+                  if (total === 0) return <p className="text-sm text-slate-400">No orders in this window.</p>
+                  return (
+                    <>
+                      <div className="flex h-3 rounded-full overflow-hidden">
+                        <div
+                          className="bg-amber-500"
+                          style={{ width: `${Math.round((cod / total) * 100)}%` }}
+                        />
+                        <div
+                          className="bg-green-500"
+                          style={{ width: `${Math.round((payu / total) * 100)}%` }}
+                        />
+                      </div>
+                      <div className="space-y-2 text-xs">
+                        <div className="flex items-center justify-between">
+                          <span className="flex items-center gap-1.5 text-slate-600 dark:text-slate-300">
+                            <span className="w-2 h-2 rounded-full bg-amber-500" /> Cash on Delivery
+                          </span>
+                          <span className="font-semibold text-slate-900 dark:text-white">
+                            {formatNumber(cod)} ({Math.round((cod / total) * 100)}%)
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="flex items-center gap-1.5 text-slate-600 dark:text-slate-300">
+                            <span className="w-2 h-2 rounded-full bg-green-500" /> PayU (prepaid)
+                          </span>
+                          <span className="font-semibold text-slate-900 dark:text-white">
+                            {formatNumber(payu)} ({Math.round((payu / total) * 100)}%)
+                          </span>
+                        </div>
+                      </div>
+                    </>
+                  )
+                })()}
               </div>
             </div>
           </>

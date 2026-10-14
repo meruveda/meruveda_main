@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint . --report-unused-disable-directives --no-error-on-unmatched-pattern"
+    "lint": "eslint . --report-unused-disable-directives --no-error-on-unmatched-pattern",
+    "test": "vitest run"
   },
   "dependencies": {
     "@vercel/analytics": "^2.0.1",

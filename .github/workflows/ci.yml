@@ -50,3 +50,6 @@ jobs:
       # --- test --------------------------------------------------------------
       - name: Test backend
         run: npm test -w backend
+
+      - name: Test frontend
+        run: npm test -w meruveda

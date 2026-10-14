@@ -8,6 +8,19 @@ export interface TrafficStats {
   topPages: Array<{ path: string; views: number }>
   deviceSplit: Record<string, number>
   daily: Array<{ date: string; views: number }>
+  /** Storefront funnel from analytics_events (all zero until that migration runs). */
+  funnel: {
+    productViews: number
+    addToCart: number
+    checkoutStarted: number
+    purchases: number
+    conversionRate: number
+    checkoutCompletionRate: number
+  }
+  /** Most-viewed products in the window. */
+  topProducts: Array<{ productId: string; name: string; views: number }>
+  /** Orders placed in the window, split by payment method (from the orders table). */
+  paymentSplit: { cod: number; payu: number }
 }
 
 class AnalyticsService {

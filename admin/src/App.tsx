@@ -6,6 +6,7 @@ import { ThemeProvider } from './context/ThemeContext'
 import { AuthProvider } from './context/AuthContext'
 import { SidebarProvider } from './context/SidebarContext'
 import { ROUTES } from './constants/routes'
+import { AdminRouteAnalytics } from './components/AdminRouteAnalytics'
 
 // Layouts & Route Wrappers
 import { AdminLayout } from './layouts/AdminLayout'
@@ -55,6 +56,8 @@ export const App: React.FC = () => {
         <AuthProvider>
           <SidebarProvider>
             <BrowserRouter basename="/admin">
+              {/* SPA pageviews for Vercel Web Analytics (ids masked). */}
+              <AdminRouteAnalytics />
               <Routes>
                 {/* Public Auth Routes */}
                 <Route

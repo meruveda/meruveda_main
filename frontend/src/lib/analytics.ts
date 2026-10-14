@@ -177,14 +177,16 @@ const PII_KEYS = new Set([
 ]);
 
 const PII_KEY_PATTERNS = [
+  // user_id / customer_id / account_ref and friends. Deliberately NOT a bare
+  // /_id$/ rule: commerce ids we are required to send (item_id, transaction_id,
+  // product_id, order_id) are business references, not customer data.
   /^(user|customer|account)_/,
   /(email|phone|address)$/,
-  /_id$/, // user_id / customer_id / auth_id — our own ids are PII-adjacent;
-]; // session_id is allowed back in below (it is a random, non-identifying id).
+];
 
 function isPiiKey(key: string): boolean {
   const k = key.toLowerCase();
-  if (k === "session_id") return false;
+  if (k === "session_id") return false; // random per-browser-session id
   if (PII_KEYS.has(k)) return true;
   return PII_KEY_PATTERNS.some((re) => re.test(k));
 }
@@ -233,14 +235,17 @@ function globals(): AnalyticsGlobals {
   return window as unknown as AnalyticsGlobals;
 }
 
-/** True when the GA4 snippet is present AND consent was granted. */
+/**
+ * True only when GA4 is fully usable: an id is configured (so the script was
+ * actually rendered), the visitor accepted, and the global has loaded.
+ */
 export function gaEnabled(): boolean {
-  return hasThirdPartyConsent() && typeof globals().gtag === "function";
+  return !!gaId() && hasThirdPartyConsent() && typeof globals().gtag === "function";
 }
 
-/** True when the Meta Pixel snippet is present AND consent was granted. */
+/** Same three conditions for Meta Pixel. */
 export function pixelEnabled(): boolean {
-  return hasThirdPartyConsent() && typeof globals().fbq === "function";
+  return !!pixelId() && hasThirdPartyConsent() && typeof globals().fbq === "function";
 }
 
 /** Vercel Web Analytics is cookieless and consent-free, so it needs no gate. */
