@@ -24,7 +24,7 @@ import { timingSafeEqualStr } from '../utils/timingSafe';
  */
 const router = Router();
 
-const authorize = (req: Request, res: Response, next: any) => {
+export const authorize = (req: Request, res: Response, next: any) => {
   const header = req.headers.authorization || '';
   const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
   const provided = bearer || (req.query.secret as string) || '';

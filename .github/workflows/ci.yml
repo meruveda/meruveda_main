@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, 'hardening-*']
+  pull_request:
+  workflow_dispatch:
+
+# A new push makes an in-flight run obsolete.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: typecheck, lint, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # --- typecheck ---------------------------------------------------------
+      - name: Typecheck shared
+        run: npm run build -w @meruveda/shared
+
+      - name: Typecheck backend
+        run: npx tsc --noEmit -p backend/tsconfig.json
+
+      - name: Typecheck frontend
+        run: npx tsc --noEmit -p frontend/tsconfig.json
+
+      - name: Typecheck admin
+        run: npm run type-check -w meruveda-admin
+
+      # --- lint --------------------------------------------------------------
+      # backend and shared have no ESLint setup yet, so they are skipped by
+      # --if-present rather than silently passing off a missing config.
+      - name: Lint (frontend, admin)
+        run: npm run lint --workspaces --if-present
+
+      # --- test --------------------------------------------------------------
+      - name: Test backend
+        run: npm test -w backend

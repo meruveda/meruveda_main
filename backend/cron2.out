@@ -1,0 +1,7 @@
+◇ injected env (28) from .env // tip: ◈ encrypted .env [www.dotenvx.com]
+
+[EmailService] ⚠️ WARNING: Missing required Resend environment variables! Ensure RESEND_API_KEY is configured in your .env file.
+
+▶ cron auth
+  ✔ valid CRON_SECRET Bearer passes (1.7438ms)
+  ✔ ?secret= query fallback passes (Vercel cron style) (0.2728ms)

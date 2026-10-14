@@ -5,5 +5,9 @@ process.env.JWT_SECRET ||= 'test-jwt-secret-0123456789abcdef0123456789';
 process.env.PAYU_MERCHANT_KEY ||= 'test-merchant-key';
 process.env.PAYU_SALT ||= 'test-salt';
 process.env.ALLOWED_ORIGINS ||= 'http://localhost:3000';
+// COD orders trigger a Shiprocket push inside createOrder unless auto-push is on
+// (which moves the push to postOrderConfirmed). With neither set, the service
+// would attempt a live Shiprocket call during unit tests.
+process.env.SHIPROCKET_AUTO_PUSH ||= 'true';
 
 export {};
