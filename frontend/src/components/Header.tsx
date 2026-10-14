@@ -33,9 +33,13 @@ export default function Header() {
     router.push("/");
   };
 
+  // Full name for the navbar chip — truncated with a tooltip when it is long.
+  const fullName =
+    [user?.firstName, user?.lastName].filter(Boolean).join(" ") || "User";
+
   return (
-    <header className="bg-plum-deep border-b border-gold/15 px-6 py-1.5 md:py-2 flex justify-between items-center z-50 sticky top-0 print:hidden">
-      <Link href="/" className="flex items-center">
+    <header className="bg-plum-deep border-b border-gold/15 px-6 py-1.5 md:py-2 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4 z-50 sticky top-0 print:hidden">
+      <Link href="/" className="flex items-center justify-self-start">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src="/logo_transparent.svg"
@@ -45,7 +49,7 @@ export default function Header() {
       </Link>
 
       {/* Nav */}
-      <nav className="hidden md:flex items-center gap-8 text-[15px] font-medium text-bg-ivory/80">
+      <nav className="hidden md:flex items-center justify-self-center gap-8 text-[15px] font-medium text-bg-ivory/80">
         <Link href="/" className="hover:text-gold-antique transition-colors">Home</Link>
         <Link href="/products" className="hover:text-gold-antique transition-colors">Shop</Link>
         <Link href="/about" className="hover:text-gold-antique transition-colors">About Us</Link>
@@ -54,7 +58,7 @@ export default function Header() {
       </nav>
 
       {/* Right Actions */}
-      <div className="flex items-center gap-4">
+      <div className="flex items-center justify-self-end gap-4 min-w-0">
         {/* Shop Now — compact pill sitting right beside the cart */}
         <Link
           href="/products"
@@ -74,10 +78,10 @@ export default function Header() {
 
         {/* Auth Area — always visible right next to the cart */}
         {isAuthenticated && user ? (
-          <div className="relative" ref={dropdownRef}>
+          <div className="relative shrink-0" ref={dropdownRef}>
             <button
               onClick={() => setDropdownOpen((prev) => !prev)}
-              className="flex items-center gap-2 text-bg-ivory hover:text-gold-antique transition-colors"
+className="flex shrink-0 items-center gap-2 text-bg-ivory hover:text-gold-antique transition-colors"
               aria-haspopup="true"
               aria-expanded={dropdownOpen}
             >
@@ -86,14 +90,19 @@ export default function Header() {
                 <img
                   src={user.avatar}
                   alt={user.firstName}
-                  className="w-7 h-7 rounded-full object-cover border border-gold/40"
+                  className="w-7 h-7 shrink-0 rounded-full object-cover border border-gold/40"
                 />
               ) : (
-                <div className="w-7 h-7 rounded-full bg-gold flex items-center justify-center text-plum-deep text-xs font-bold">
+                <div className="w-7 h-7 shrink-0 rounded-full bg-gold flex items-center justify-center text-plum-deep text-xs font-bold">
                   {user.firstName?.[0] || 'U'}{user.lastName?.[0] || ''}
                 </div>
               )}
-              <span className="hidden md:inline text-sm font-semibold">{user.firstName || 'User'}</span>
+              <span
+                className="hidden lg:inline text-sm font-semibold max-w-[120px] truncate"
+                title={fullName}
+              >
+                {fullName}
+              </span>
               <ChevronDown size={14} className={`transition-transform ${dropdownOpen ? "rotate-180" : ""}`} />
             </button>
 
