@@ -6,6 +6,8 @@
  *                GA4 + Meta Pixel   (CONSENT-GATED: only after the user accepts)
  *
  * Design rules, all enforced here rather than at each call site:
+ *   0. GA4 + Meta Pixel sit behind the ANALYTICS_ENABLED master switch, which
+ *      is OFF by default (see analyticsEnabled). Two gates must both open.
  *   1. Nothing is loaded and nothing fires for GA4/Meta before consent is
  *      granted (DPDP Act). `track()` is a safe no-op for them without it.
  *   2. Missing env ids (NEXT_PUBLIC_GA_ID / NEXT_PUBLIC_META_PIXEL_ID) mean the
@@ -92,6 +94,33 @@ export function setConsent(value: ConsentValue): void {
 /** True only when the user actively accepted. Anything else blocks GA4/Meta. */
 export function hasThirdPartyConsent(): boolean {
   return getConsent() === "granted";
+}
+
+// ---------------------------------------------------------------------------
+// Master switch — Google Analytics + Meta Pixel
+// ---------------------------------------------------------------------------
+
+/**
+ * ANALYTICS_ENABLED — the single kill-switch for the two vendor tags
+ * (Google Analytics 4 and Meta Pixel).
+ *
+ * Both vendors are DISABLED unless NEXT_PUBLIC_ANALYTICS_ENABLED is exactly the
+ * string "true". With it off, no gtag/js and no fbevents.js are ever rendered or
+ * requested, so no third-party cookie is set and nothing reaches either vendor.
+ * The cookieless first-party measurement (our own beacon + Vercel) is NOT behind
+ * this switch and keeps running.
+ *
+ * Read at call time instead of being captured in a module-level const: Next.js
+ * inlines the NEXT_PUBLIC_ literal at build time either way, and per-call
+ * reading keeps the consent contract testable (tests flip env between cases).
+ *
+ * When the ads start: mount CookieConsentBanner again in the root layout AND set
+ * this to "true". Do not enable one without the other — with no banner there is
+ * no way to grant consent, and hasThirdPartyConsent() would correctly keep
+ * every event switched off anyway.
+ */
+export function analyticsEnabled(): boolean {
+  return process.env.NEXT_PUBLIC_ANALYTICS_ENABLED === "true";
 }
 
 /**
@@ -236,16 +265,27 @@ function globals(): AnalyticsGlobals {
 }
 
 /**
- * True only when GA4 is fully usable: an id is configured (so the script was
- * actually rendered), the visitor accepted, and the global has loaded.
+ * True only when GA4 is fully usable: the master switch is on, an id is
+ * configured (so the script was actually rendered), the visitor accepted, and
+ * the global has loaded.
  */
 export function gaEnabled(): boolean {
-  return !!gaId() && hasThirdPartyConsent() && typeof globals().gtag === "function";
+  return (
+    analyticsEnabled() &&
+    !!gaId() &&
+    hasThirdPartyConsent() &&
+    typeof globals().gtag === "function"
+  );
 }
 
-/** Same three conditions for Meta Pixel. */
+/** Same four conditions for Meta Pixel. */
 export function pixelEnabled(): boolean {
-  return !!pixelId() && hasThirdPartyConsent() && typeof globals().fbq === "function";
+  return (
+    analyticsEnabled() &&
+    !!pixelId() &&
+    hasThirdPartyConsent() &&
+    typeof globals().fbq === "function"
+  );
 }
 
 /** Vercel Web Analytics is cookieless and consent-free, so it needs no gate. */

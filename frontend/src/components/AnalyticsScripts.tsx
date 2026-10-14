@@ -2,15 +2,20 @@
 
 import { useEffect, useState } from "react";
 import Script from "next/script";
-import { CONSENT_EVENT, getConsent } from "@/lib/analytics";
+import { CONSENT_EVENT, analyticsEnabled, getConsent } from "@/lib/analytics";
 
 /**
- * GA4 + Meta Pixel loader.
+ * GA4 + Meta Pixel loader — currently DISABLED by the ANALYTICS_ENABLED master
+ * switch. The code below is kept intact for when ads start; it simply never
+ * renders while NEXT_PUBLIC_ANALYTICS_ENABLED is not "true".
  *
- * Both scripts are rendered ONLY after the visitor accepts in the consent
- * banner (DPDP Act). When NEXT_PUBLIC_GA_ID / NEXT_PUBLIC_META_PIXEL_ID are
- * unset, nothing is emitted at all — dev and preview stay completely clean, and
- * a missing id can never leave a half-initialised tag behind.
+ * Two gates must both open before a vendor script is emitted:
+ *   1. analyticsEnabled() — the master switch (off by default).
+ *   2. The visitor accepted in the consent banner (DPDP Act).
+ *
+ * When NEXT_PUBLIC_GA_ID / NEXT_PUBLIC_META_PIXEL_ID are unset, nothing is
+ * emitted at all either — dev and preview stay completely clean, and a missing
+ * id can never leave a half-initialised tag behind.
  *
  * Accepting without a reload: the banner dispatches CONSENT_EVENT, this
  * component listens and swaps `granted` in, and the scripts load then.
@@ -22,6 +27,8 @@ export default function AnalyticsScripts() {
   const [consented, setConsented] = useState(false);
 
   useEffect(() => {
+    // Master switch off: touch no storage and add no listeners.
+    if (!analyticsEnabled()) return;
     const sync = () => setConsented(getConsent() === "granted");
     sync();
     window.addEventListener(CONSENT_EVENT, sync);
@@ -33,6 +40,9 @@ export default function AnalyticsScripts() {
     };
   }, []);
 
+  // Gate 1 — master switch: no vendor script, cookie or request at all.
+  if (!analyticsEnabled()) return null;
+  // Gate 2 — DPDP consent: still required even with the switch on.
   if (!consented) return null;
 
   const gaId = process.env.NEXT_PUBLIC_GA_ID;

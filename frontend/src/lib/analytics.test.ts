@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CONSENT_KEY,
+  analyticsEnabled,
   claimPurchaseOnce,
   getConsent,
   gaEnabled,
@@ -89,6 +90,8 @@ describe("track()", () => {
     // The module reads these at call time, so each test can set them freely.
     delete process.env.NEXT_PUBLIC_GA_ID;
     delete process.env.NEXT_PUBLIC_META_PIXEL_ID;
+    // Master switch defaults OFF; each test opts in explicitly.
+    delete process.env.NEXT_PUBLIC_ANALYTICS_ENABLED;
   });
 
   it("sends the first-party beacon even without consent (it is our own database)", () => {
@@ -148,7 +151,49 @@ describe("track()", () => {
     expect(fbq).not.toHaveBeenCalled();
   });
 
+  it("master switch is OFF unless NEXT_PUBLIC_ANALYTICS_ENABLED is exactly 'true'", () => {
+    expect(analyticsEnabled()).toBe(false);
+
+    process.env.NEXT_PUBLIC_ANALYTICS_ENABLED = "false";
+    expect(analyticsEnabled()).toBe(false);
+
+    process.env.NEXT_PUBLIC_ANALYTICS_ENABLED = "1";
+    expect(analyticsEnabled()).toBe(false);
+
+    process.env.NEXT_PUBLIC_ANALYTICS_ENABLED = "";
+    expect(analyticsEnabled()).toBe(false);
+
+    process.env.NEXT_PUBLIC_ANALYTICS_ENABLED = "true";
+    expect(analyticsEnabled()).toBe(true);
+  });
+
+  it("sends nothing to GA4/Meta while the master switch is OFF, even if consent was granted earlier", () => {
+    // The realistic case after the consent banner is removed: a visitor who
+    // accepted on a previous visit still has meruveda_consent=granted in
+    // localStorage, so consent alone must not switch the vendors back on.
+    process.env.NEXT_PUBLIC_GA_ID = "G-TEST123";
+    process.env.NEXT_PUBLIC_META_PIXEL_ID = "9876543210";
+    const gtag = vi.fn();
+    const fbq = vi.fn();
+    env.win.gtag = gtag;
+    env.win.fbq = fbq;
+    setConsent("granted");
+
+    expect(getConsent()).toBe("granted");
+    expect(analyticsEnabled()).toBe(false);
+    expect(gaEnabled()).toBe(false);
+    expect(pixelEnabled()).toBe(false);
+
+    track("add_to_cart", { items: [{ item_id: "p1", price: 500, quantity: 1 }] });
+
+    expect(gtag).not.toHaveBeenCalled();
+    expect(fbq).not.toHaveBeenCalled();
+    // The cookieless first-party record still happened.
+    expect(beacon).toHaveBeenCalledTimes(1);
+  });
+
   it("fans out to GA4 and Meta Pixel once consent is granted", () => {
+    process.env.NEXT_PUBLIC_ANALYTICS_ENABLED = "true";
     process.env.NEXT_PUBLIC_GA_ID = "G-TEST123";
     process.env.NEXT_PUBLIC_META_PIXEL_ID = "9876543210";
     const gtag = vi.fn();
@@ -170,6 +215,7 @@ describe("track()", () => {
 
   it("strips PII from every destination", () => {
     const gtag = vi.fn();
+    process.env.NEXT_PUBLIC_ANALYTICS_ENABLED = "true";
     process.env.NEXT_PUBLIC_GA_ID = "G-TEST123";
     process.env.NEXT_PUBLIC_META_PIXEL_ID = "9876543210";
     env.win.gtag = gtag;
@@ -206,6 +252,7 @@ describe("track()", () => {
 
   it("fires purchase exactly once per order, even on refresh", () => {
     const gtag = vi.fn();
+    process.env.NEXT_PUBLIC_ANALYTICS_ENABLED = "true";
     process.env.NEXT_PUBLIC_GA_ID = "G-TEST123";
     process.env.NEXT_PUBLIC_META_PIXEL_ID = "9876543210";
     env.win.gtag = gtag;
@@ -230,6 +277,7 @@ describe("track()", () => {
 
   it("counts a different order separately", () => {
     const gtag = vi.fn();
+    process.env.NEXT_PUBLIC_ANALYTICS_ENABLED = "true";
     process.env.NEXT_PUBLIC_GA_ID = "G-TEST123";
     process.env.NEXT_PUBLIC_META_PIXEL_ID = "9876543210";
     env.win.gtag = gtag;

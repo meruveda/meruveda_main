@@ -5,6 +5,13 @@ import Link from "next/link";
 import { CONSENT_KEY, setConsent } from "@/lib/analytics";
 
 /**
+ * Unmounted: re-enable together with ANALYTICS_ENABLED when ads start.
+ *
+ * This component is no longer rendered from the root layout, so the popup does
+ * not appear. The file is kept intact (and lint/type-clean) for when Meta ads
+ * start. To bring it back: re-add the import + <CookieConsentBanner /> in
+ * frontend/src/app/layout.tsx AND set NEXT_PUBLIC_ANALYTICS_ENABLED="true".
+ *
  * Consent banner for non-essential analytics (DPDP Act).
  *
  * Vercel Web Analytics is cookieless and loads regardless; GA4 and Meta Pixel

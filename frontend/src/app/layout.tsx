@@ -10,7 +10,6 @@ import WhatsAppButton from "@/components/WhatsAppButton";
 import PageViewTracker from "@/components/PageViewTracker";
 import CardVaultCleanup from "@/components/CardVaultCleanup";
 import AnalyticsScripts from "@/components/AnalyticsScripts";
-import CookieConsentBanner from "@/components/CookieConsentBanner";
 import BeaconProvider from "@/components/BeaconProvider";
 import { Analytics } from "@vercel/analytics/next";
 import { SpeedInsights } from "@vercel/speed-insights/next";
@@ -67,9 +66,12 @@ export default function RootLayout({
         {/* Cookieless — no consent gate. */}
         <Analytics />
         <SpeedInsights />
-        {/* GA4 + Meta Pixel: rendered only after consent is accepted. */}
+        {/* GA4 + Meta Pixel: gated by the ANALYTICS_ENABLED master switch
+            (analyticsEnabled() in lib/analytics), which is off by default, so
+            no vendor script, request or cookie is loaded. */}
         <AnalyticsScripts />
-        <CookieConsentBanner />
+        {/* CookieConsentBanner intentionally unmounted — re-enable it together
+            with ANALYTICS_ENABLED when ads start. */}
       </body>
     </html>
   );
