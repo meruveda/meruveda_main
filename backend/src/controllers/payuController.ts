@@ -5,6 +5,7 @@ import { postOrderConfirmed } from '../services/postOrderConfirmed';
 import { supabase } from '../database/supabase';
 import { hasColumn } from '../services/schemaGuard';
 import { config } from '../config/env';
+import { keepAlive } from '../utils/keepAlive';
 
 /**
  * Public base URL of this backend for PayU surl/furl.
@@ -232,11 +233,11 @@ export const handlePayUCallback = async (req: Request, res: Response, next: Next
       res.redirect(successUrl);
 
       // Post-confirmation background work: (1) invoice delivery, (2) Shiprocket
-      // push. Fire-and-return — every failure is caught and logged, and the
-      // order stays paid regardless.
-      postOrderConfirmed(order.id, { source: 'payu_success' }).catch((postErr: any) => {
-        console.error('[PayU Callback] postOrderConfirmed failed:', postErr?.message || postErr);
-      });
+      // push. The redirect above has already been sent, so this cannot delay the
+      // customer — but it MUST be registered with waitUntil() via keepAlive(),
+      // otherwise Vercel tears the invocation down when the response flushes and
+      // the invoice is never rendered or delivered.
+      keepAlive(postOrderConfirmed(order.id, { source: 'payu_success' }));
       return;
     } else {
       // Payment failed or cancelled

@@ -78,6 +78,25 @@ CREATE TABLE IF NOT EXISTS public.invoice_sequences (
 );
 
 -- ---------------------------------------------------------------------------
+-- 2b. The private invoice bucket.
+--
+-- Named 'invoice' to match the bucket the RLS migration creates (and the
+-- singular 'product-image' convention). The backend's default for
+-- INVOICE_STORAGE_BUCKET is 'invoice' too, so this needs no env var.
+--
+-- Created here as well so this file is self-contained: the RLS migration is
+-- separately tracked as "not applied", and the earlier code default ('invoices')
+-- matched neither, so storage was skipped in silence and orders.invoice_url
+-- stayed NULL.
+--
+-- private = false => no anon/authenticated reads. The backend serves these files
+-- with the service role and short-lived signed URLs only.
+-- ---------------------------------------------------------------------------
+INSERT INTO storage.buckets (id, name, public, file_size_limit)
+VALUES ('invoice', 'invoice', false, 10485760)
+ON CONFLICT (id) DO UPDATE SET public = EXCLUDED.public;
+
+-- ---------------------------------------------------------------------------
 -- 3. whatsapp_message_log
 --
 -- Required for the once-only guarantee: wasSent()/getLogEntry() read this

@@ -133,7 +133,12 @@ export const config = {
   businessEmail: (process.env.BUSINESS_EMAIL || '').trim(),
 
   // ---- Invoice PDF storage (private bucket + 7-day signed URLs) ----
-  invoiceStorageBucket: (process.env.INVOICE_STORAGE_BUCKET || 'invoices').trim(),
+  // Default MUST equal the bucket name the migrations create, otherwise storage
+  // is silently skipped and orders.invoice_url stays NULL. The RLS migration
+  // creates 'invoice' (private) and the invoice-automation migration creates it
+  // too, so no env var is required. Matches the singular 'product-image'
+  // convention.
+  invoiceStorageBucket: (process.env.INVOICE_STORAGE_BUCKET || 'invoice').trim(),
   invoiceSignedUrlExpirySeconds: Math.max(
     60,
     Number(process.env.INVOICE_SIGNED_URL_EXPIRY_SECONDS) || 7 * 24 * 60 * 60
@@ -143,6 +148,12 @@ export const config = {
   otpEnabled: process.env.OTP_ENABLED === 'true',
   // Base URL of this backend — used by the webhook docs helper.
   backendUrl: process.env.BACKEND_URL || '',
+
+  // WhatsApp invoice template: name + language must match the approved template
+  // in Meta Business Manager exactly. Configurable so operators can swap between
+  // templates without a redeploy.
+  whatsappInvoiceTemplateName: (process.env.WHATSAPP_INVOICE_TEMPLATE_NAME || 'invoice_with_document').trim(),
+  whatsappInvoiceTemplateLang: (process.env.WHATSAPP_INVOICE_TEMPLATE_LANG || 'en').trim(),
 };
 
 // ---------------------------------------------------------------------------
