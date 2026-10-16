@@ -1,3 +1,10 @@
+-- ============================================================
+-- REFERENCE ONLY - NEVER APPLIED, NOT REQUIRED.
+-- The invoice pipeline needs no database change. This file is kept
+-- purely as historical reference for the abandoned RPC-based numbering
+-- design. Do NOT run it. Nothing in the codebase depends on it.
+-- ============================================================
+
 -- =============================================================================
 -- 2026-10-14 — GST invoice number sequence (unique + consecutive per FY)
 --

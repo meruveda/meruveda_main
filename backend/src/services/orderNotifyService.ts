@@ -115,10 +115,11 @@ export const orderNotifyService = {
     }
   },
 
-  /** Manually resend the invoice (admin action / resend-invoice endpoint). */
+  /** Removed: there is no manual resend path. Invoices are issued once, at order
+   *  creation, and re-delivered only by the automatic retry sweep. */
   async resendInvoice(orderId: string): Promise<never> {
     throw new Error(
-      'orderNotifyService.resendInvoice was removed — use invoiceDispatchService.resendInvoiceDispatch() instead.'
+      'Manual invoice resend was removed. Invoices are issued once at order creation; delivery retries happen automatically.'
     );
   },
 };

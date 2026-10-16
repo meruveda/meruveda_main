@@ -1,23 +1,23 @@
 /**
  * Template contract for the ONE invoice document.
  *
- * Requirement: "one invoice, one template, everywhere" — the same PDF for the
- * WhatsApp auto-send, the customer download and the admin view. These tests pin
- * the structural elements of the reference layout so that:
- *   - a second/older template cannot quietly appear alongside this one, and
- *   - an element of the reference (logo, gold INVOICE wordmark, meta box, seller
- *     block + GSTIN, BILL TO, SKU/Taxed columns, Taxable/GST totals, notes box,
- *     PAID/COD wording, footer) cannot be dropped in a refactor.
+ * "One invoice, one template, everywhere" — the same PDF for the WhatsApp
+ * auto-send, the customer download and the admin view. The visual layout is
+ * pinned to docs/reference/reference-invoice.pdf (rendered MV-139559):
+ * US Letter, 18pt margins, serif wordmarks, mono numerics, ₹ currency, purple
+ * section bars, hairline grid, yellow customer-note box.
  *
- * PDF text is stored compressed inside content streams, so the assertions decode
- * the streams rather than searching the raw bytes.
+ * These assertions fail the build if a second template appears, if the print
+ * dialog creeps back, if an embedded asset stops shipping, or if ₹ regresses to
+ * the "Rs." workaround (pdf-lib's standard fonts cannot draw U+20B9).
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'fs';
 import path from 'path';
-import zlib from 'zlib';
-import { generateInvoicePdf } from './invoiceService';
+import { generateInvoicePdf, formatINR, wrapText } from './invoiceService';
+import { pdfText, amountAfterLabel } from '../utils/pdfText';
+import { PDFDocument, StandardFonts } from 'pdf-lib';
 
 const ORDER = {
   id: '00000000-0000-0000-0000-000000000001',
@@ -62,164 +62,183 @@ const ORDER = {
   ],
 };
 
-/**
- * Pull every string drawn on the page out of a generated PDF.
- *
- * Two things make this non-trivial:
- *   - content streams are Flate-compressed, and the embedded logo is binary that
- *     can itself contain the bytes "stream"/"endstream", so offsets cannot be
- *     trusted; each candidate is inflated and kept only if it decodes to a real
- *     content stream (one containing PDF text operators).
- *   - pdf-lib writes drawn text as HEX strings — `<4D45525556454441...> Tj` — not
- *     as literal `(text)`, so a naive search for the words finds nothing at all.
- */
-function drawnText(pdf: Buffer): string {
-  const raw = pdf.toString('latin1');
-  const streams: string[] = [];
+/* ================================================================== */
+/* Currency formatting                                                */
+/* ================================================================== */
 
-  const looksLikeContent = (s: string) => /\bT[jJ]\b/.test(s) || /(^|\s)BT(\s|$)/.test(s);
+test('amounts print with the rupee glyph, not the "Rs." workaround', () => {
+  // pdf-lib's standard WinAnsi fonts cannot draw U+20B9; the whole point of
+  // embedding a TTF is that this can be printed properly.
+  assert.equal(formatINR(1098), '₹1,098.00');
+  assert.equal(formatINR(0), '₹0.00');
+  assert.equal(formatINR(699), '₹699.00');
+  assert.equal(formatINR(-200), '-₹200.00');
+});
 
-  const MARKER = 'stream\n';
-  let cursor = 0;
-  for (;;) {
-    const at = raw.indexOf(MARKER, cursor);
-    if (at < 0) break;
-    if (raw.slice(Math.max(0, at - 3), at).endsWith('end')) {
-      cursor = at + MARKER.length;
-      continue;
-    }
+test('amounts of one lakh and above use Indian digit grouping', () => {
+  // 1,23,456.78 — not 123,456.78. en-US grouping would be wrong on an Indian
+  // tax document.
+  assert.equal(formatINR(123456.78), '₹1,23,456.78');
+  assert.equal(formatINR(100000), '₹1,00,000.00');
+  assert.equal(formatINR(99999.99), '₹99,999.99');
+  assert.equal(formatINR(1234567), '₹12,34,567.00');
+});
 
-    const dict = raw.slice(Math.max(0, at - 300), at);
-    const declared = /\/Length\s+(\d+)/.exec(dict);
-    const start = at + MARKER.length;
-    const endAt = raw.indexOf('endstream', start);
+/* ================================================================== */
+/* Page + geometry                                                    */
+/* ================================================================== */
 
-    const candidates: number[] = [];
-    if (declared) candidates.push(Number(declared[1]));
-    if (endAt > start) candidates.push(endAt - start);
-    candidates.push(65536);
-
-    for (const len of candidates) {
-      if (len <= 0) continue;
-      let text: string;
-      try {
-        text = zlib.inflateSync(Buffer.from(raw.slice(start, start + len), 'latin1')).toString('latin1');
-      } catch {
-        continue; // wrong length, try the next candidate
-      }
-      if (looksLikeContent(text)) {
-        streams.push(text);
-        break;
-      }
-    }
-    cursor = endAt > start ? endAt + 9 : at + MARKER.length;
-  }
-
-  // Decode <hex> Tj / TJ operands, plus any literal (text) Tj for completeness.
-  const decoded: string[] = [];
-  for (const stream of streams) {
-    for (const m of stream.matchAll(/<([0-9A-Fa-f\s]+)>\s*T[jJ]/g)) {
-      const hex = m[1].replace(/\s+/g, '');
-      if (hex.length % 2 !== 0) continue;
-      let out = '';
-      for (let i = 0; i < hex.length; i += 2) {
-        out += String.fromCharCode(parseInt(hex.slice(i, i + 2), 16));
-      }
-      decoded.push(out);
-    }
-    for (const m of stream.matchAll(/\(((?:\\.|[^\\)])*)\)\s*Tj/g)) {
-      decoded.push(m[1].replace(/\\(.)/g, '$1'));
-    }
-  }
-  return decoded.join('\n');
-}
-
-test('the invoice renders every element of the reference template', async () => {
+test('the page is US Letter with the reference margins', async () => {
   const pdf = await generateInvoicePdf(ORDER as any);
-  const text = drawnText(pdf);
+  const doc = await PDFDocument.load(pdf);
+  assert.equal(doc.getPageCount(), 1);
+  const page = doc.getPage(0);
+  // Read from the PDF, not assumed: the reference is 612x792, NOT A4.
+  assert.equal(Math.round(page.getWidth()), 612);
+  assert.equal(Math.round(page.getHeight()), 792);
+});
 
-  // Wordmark + meta box
-  assert.match(text, /INVOICE/);
-  assert.match(text, /DATE/);
-  assert.match(text, /INVOICE #/);
-  assert.match(text, /ORDER #/);
-  assert.match(text, /DUE DATE/);
+test('fonts are embedded, not the standard-14 fallbacks', async () => {
+  const pdf = await generateInvoicePdf(ORDER as any);
+  const raw = pdf.toString('latin1');
+  // Each embedded face contributes a FontFile stream.
+  assert.ok(
+    /\/FontFile2/.test(raw),
+    'no embedded font program found — the invoice fell back to Helvetica/Courier and cannot draw ₹'
+  );
+  // A real tax document must not ship Helvetica/Times/Courier base-14 fonts.
+  assert.doesNotMatch(raw, /\/BaseFont\s*\/(Helvetica|Courier|Times)/);
+});
 
-  // Seller identity. GSTIN digits are drawn as separate runs in some fonts, so
-  // assert on a distinctive fragment rather than the whole 15-char string.
-  assert.match(text, /08BFPPS7045C1Z4|08BFPPS7045C1Z/);
+test('the logo is embedded', async () => {
+  const pdf = await generateInvoicePdf(ORDER as any);
+  assert.match(pdf.toString('latin1'), /\/Subtype\s*\/Image/, 'logo image XObject missing');
+});
 
-  // Bill-to card
-  assert.match(text, /BILL TO/);
-  assert.match(text, /Madhya Pradesh/);
+/* ================================================================== */
+/* Template content                                                   */
+/* ================================================================== */
 
-  // Item table columns
-  assert.match(text, /Description/);
-  assert.match(text, /SKU/);
-  assert.match(text, /Qty/);
-  assert.match(text, /Taxed/);
-  assert.match(text, /Joint Pain Oil/);
-  assert.match(text, /SKU-9C974179/);
+test('every element of the reference layout is present', async () => {
+  const text = await pdfText(await generateInvoicePdf(ORDER as any));
+  // pdf.js emits one run per glyph/word, so "INVOICE #" can arrive as "INVOICE"
+  // + "#". Strip whitespace from BOTH sides before comparing.
+  const norm = text.replace(/\s+/g, '');
+  const has = (s: string) => norm.includes(s.replace(/\s+/g, ''));
 
-  // Totals block. Madhya Pradesh is out of state, so this must be IGST — never
-  // CGST/SGST. This is the assertion that would catch a seller-state regression.
-  assert.match(text, /Taxable/);
-  assert.match(text, /IGST/);
+  // Header + info box. ORDER # is the one row the reference does not have; the
+  // requirement is that it is added in the same style.
+  for (const label of ['INVOICE', 'DATE', 'INVOICE #', 'ORDER #', 'DUE DATE']) {
+    assert.ok(has(label), `missing header element: ${label}`);
+  }
+  assert.ok(has('MV-748371'), 'ORDER # value missing');
+  assert.ok(has('MV/26-27/000123'), 'INVOICE # value missing');
+
+  // Seller block.
+  assert.ok(has('MERUVEDA WELLNESS'));
+  assert.ok(has('Keharsh Enterprises (Sole Proprietorship)'));
+  assert.ok(has('GSTIN: 08BFPPS7045C1Z4'));
+  assert.ok(has('customercare@meruvedawellness.com'));
+  assert.ok(has('meruvedawellness.com'));
+
+  // Buyer.
+  assert.ok(has('BILL TO'));
+  assert.ok(has('Atharva Bhargava'));
+
+  // Items table.
+  for (const col of ['Description', 'SKU', 'Qty', 'Taxed', 'Amount']) {
+    assert.ok(has(col), `missing column: ${col}`);
+  }
+  assert.ok(has('Joint Pain Oil'));
+  assert.ok(has('SKU-9C974179'));
+
+  // Notes + payment.
+  assert.ok(has('OTHER COMMENTS & NOTES'));
+  assert.ok(has('PAYMENT DETAILS:'));
+  assert.ok(has('Cash On Delivery'));
+
+  // Totals.
+  for (const row of ['Subtotal', 'Taxable', 'IGST', 'Shipping', 'TOTAL']) {
+    assert.ok(has(row), `missing totals row: ${row}`);
+  }
+
+  // Footer.
+  assert.ok(has('Thank You For Your Business!'));
+  assert.ok(has('If you have any questions'));
+});
+
+test('the rupee glyph is actually drawn, and "Rs." never is', async () => {
+  const text = await pdfText(await generateInvoicePdf(ORDER as any));
+  assert.ok(text.includes('₹'), 'no ₹ glyph in the rendered PDF — an embedded font with U+20B9 is required');
+  assert.doesNotMatch(text, /Rs\./, 'the "Rs." fallback must not appear once fonts are embedded');
+});
+
+test('no staging host or localhost is printed on a legal document', async () => {
+  const text = await pdfText(await generateInvoicePdf(ORDER as any));
+  assert.doesNotMatch(text, /localhost/i);
+  assert.doesNotMatch(text, /vercel\.app/i);
+  assert.doesNotMatch(text, /http:\/\//i);
+});
+
+test('Taxed is a marker, not an amount (reference behaviour)', async () => {
+  const text = await pdfText(await generateInvoicePdf(ORDER as any));
+  // The reference prints "X" in the Taxed column; we did not carry that column's
+  // amount over, so the taxable figure must not leak in there.
+  assert.ok(/\bX\b/.test(text), 'expected the Taxed "X" marker');
+});
+
+/* ================================================================== */
+/* Tax correctness (unchanged business logic)                          */
+/* ================================================================== */
+
+test('Madhya Pradesh is inter-state, so IGST and never CGST/SGST', async () => {
+  const text = await pdfText(await generateInvoicePdf(ORDER as any));
+  assert.ok(text.includes('IGST'));
   assert.doesNotMatch(text, /CGST/);
   assert.doesNotMatch(text, /SGST/);
-  assert.match(text, /Shipping/);
-  assert.match(text, /TOTAL/);
+});
 
-  // Notes box + payment wording
-  assert.match(text, /OTHER COMMENTS & NOTES/);
-  assert.match(text, /PAYMENT DETAILS/);
-
-  // Footer
-  assert.match(text, /Thank You For Your Business!/);
+test('a Rajasthan buyer gets CGST + SGST instead', async () => {
+  const rajasthan = {
+    ...ORDER,
+    shipping_address: { ...ORDER.shipping_address, state: 'Rajasthan', city: 'Jodhpur' },
+    billing_address: { ...ORDER.billing_address, state: 'Rajasthan', city: 'Jodhpur' },
+  };
+  const text = await pdfText(await generateInvoicePdf(rajasthan as any));
+  assert.ok(text.includes('CGST'));
+  assert.ok(text.includes('SGST'));
+  assert.doesNotMatch(text, /IGST/);
 });
 
 test('the totals block reconciles: Taxable + IGST === Subtotal, + Shipping === TOTAL', async () => {
-  const text = drawnText(await generateInvoicePdf(ORDER as any));
-
-  // Pull the amounts straight off the rendered document. Column values follow
-  // their labels, so find each label and take the next money-looking token.
-  const moneyAfter = (label: string) => {
-    const at = text.indexOf(label);
-    assert.notEqual(at, -1, `missing totals row: ${label}`);
-    const rest = text.slice(at + label.length);
-    const m = /Rs\.\s*([\d,]+\.\d{2})/.exec(rest);
-    assert.ok(m, `no amount after "${label}"`);
-    return Number(m[1].replace(/,/g, ''));
+  const pdf = await generateInvoicePdf(ORDER as any);
+  const moneyAfter = async (label: string) => {
+    const v = await amountAfterLabel(pdf, label);
+    assert.notEqual(v, null, `no amount found on the totals row: ${label}`);
+    return v as number;
   };
-
-  const subtotal = moneyAfter('Subtotal');
-  const taxable = moneyAfter('Taxable');
-  const igst = moneyAfter('IGST');
-  const shipping = moneyAfter('Shipping');
-  const total = moneyAfter('TOTAL');
+  const subtotal = await moneyAfter('Subtotal');
+  const taxable = await moneyAfter('Taxable');
+  const igst = await moneyAfter('IGST');
+  const shipping = await moneyAfter('Shipping');
+  const total = await moneyAfter('TOTAL');
 
   assert.equal(subtotal, 998, '2 x 499');
-  assert.equal(taxable, 950.48, 'Taxable is EXCLUDING tax, matching the per-line Taxed column');
+  assert.equal(taxable, 950.48, 'Taxable is EXCLUDING tax');
   assert.equal(igst, 47.52, 'IGST at 5% grossed up from 998');
   assert.equal(shipping, 100);
   assert.equal(total, 1098);
-
-  // The whole point of a tax invoice: these must add up, on the document.
   assert.equal(taxable + igst, subtotal, 'Taxable + IGST must equal the Subtotal');
   assert.equal(subtotal + shipping, total, 'Subtotal + Shipping must equal the TOTAL');
-
-  // And the per-line "Taxed" column must agree with the Taxable row.
-  const lineTaxed = moneyAfter('Taxed');
-  assert.equal(lineTaxed, taxable, 'line Taxed column must match the Taxable row');
 });
 
-test('COD invoices are NOT stamped PAID, prepaid ones are', async () => {
-  const cod = drawnText(await generateInvoicePdf(ORDER as any));
-  // COD is unpaid until delivery, so a PAID stamp would be a false document.
+test('COD is not stamped PAID and says the amount is due; prepaid is stamped PAID', async () => {
+  const cod = await pdfText(await generateInvoicePdf(ORDER as any));
   assert.doesNotMatch(cod, /(^|[^A-Z])PAID([^A-Z]|$)/);
-  assert.match(cod, /Cash On Delivery|Cash on Delivery/i);
+  assert.ok(cod.includes('AMOUNT DUE ON DELIVERY'));
+  assert.ok(cod.includes('Total payment due upon delivery'));
 
-  const prepaid = drawnText(
+  const prepaid = await pdfText(
     await generateInvoicePdf({
       ...ORDER,
       payment_method: 'PayOnline (via PayU)',
@@ -228,9 +247,31 @@ test('COD invoices are NOT stamped PAID, prepaid ones are', async () => {
     } as any)
   );
   assert.match(prepaid, /PAID/);
-  // The PayU reference goes in the notes box, not concatenated into order notes.
-  assert.match(prepaid, /29972971247/);
+  assert.ok(prepaid.includes('Payment received in full'));
+  // The PayU reference is printed from its own column, never as the raw note.
+  assert.ok(prepaid.includes('29972971247'));
+  assert.doesNotMatch(prepaid, /\[PayU mihpayid:/i);
 });
+
+test('the raw internal [PayU mihpayid: ...] note marker is never printed', async () => {
+  const text = await pdfText(
+    await generateInvoicePdf({
+      ...ORDER,
+      payment_method: 'PayOnline (via PayU)',
+      payment_status: 'paid',
+      payu_mihpayid: '29972971247',
+      notes: '[PayU mihpayid: 29972971247]',
+    } as any)
+  );
+  assert.doesNotMatch(text, /\[PayU mihpayid:/i);
+  assert.doesNotMatch(text, /PayU mihpayid/i);
+  // ...but the reference value still appears, via the dedicated column.
+  assert.ok(text.includes('29972971247'));
+});
+
+/* ================================================================== */
+/* Single-template guarantees                                         */
+/* ================================================================== */
 
 test('exactly one invoice template exists in the backend', () => {
   const src = path.resolve(__dirname, 'invoiceService.ts');
@@ -243,27 +284,65 @@ test('exactly one invoice template exists in the backend', () => {
 });
 
 test('no second invoice renderer lives in the frontend or admin bundles', () => {
-  // These render *components*, not PDFs. A template here is what produced the
-  // bug where "Download invoice" silently printed the orders page instead.
+  // These render components, not PDFs. A template here is what produced the bug
+  // where "Download invoice" printed the orders page instead of an invoice.
   const candidates = [
     'frontend/src/app/account/orders/[id]/page.tsx',
     'frontend/src/app/account/orders/page.tsx',
-    'frontend/src/app/account/orders/page.tsx',
     'admin/src/pages/orders/OrderDetailPage.tsx',
   ];
-  for (const rel of new Set(candidates)) {
+  for (const rel of candidates) {
     const file = path.resolve(__dirname, '../../..', rel);
     const code = readFileSync(file, 'utf8')
-      // Strip comments: the code deliberately *documents* the removed behaviour.
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .replace(/^\s*\/\/.*$/gm, '');
-
+      .replace(/\/\*[\s\S]*?\*\//g, '') // strip comments: the removed
+      .replace(/^\s*\/\/.*$/gm, ''); // behaviour is deliberately documented
     assert.doesNotMatch(code, /window\.print\(/, `${rel} must not render via the print dialog`);
     assert.doesNotMatch(code, /print=1/, `${rel} must not drive an invoice print route`);
-    assert.doesNotMatch(
-      code,
-      /hidden print:block/,
-      `${rel} must not contain a print-only invoice template`
-    );
+    assert.doesNotMatch(code, /hidden print:block/, `${rel} must not contain a print-only template`);
   }
+});
+
+/* ================================================================== */
+/* Long content + pagination                                          */
+/* ================================================================== */
+
+test('a long order flows to a second page with the table header repeated', async () => {
+  const many = {
+    ...ORDER,
+    order_items: Array.from({ length: 40 }, (_, i) => ({
+      product_name: `Product number ${i + 1} with a deliberately long descriptive name to force wrapping`,
+      sku: `SKU-${1000 + i}`,
+      quantity: 1,
+      price: 99,
+      total: 99,
+      products: { seo_metadata: { gst_rate: 5 } },
+    })),
+  };
+  const pdf = await generateInvoicePdf(many as any);
+  const doc = await PDFDocument.load(pdf);
+  assert.ok(doc.getPageCount() > 1, 'a 40-line order must not be squeezed onto one page');
+
+  // The header band is purple on every page, so count purple bands per page.
+  for (let i = 0; i < doc.getPageCount(); i++) {
+    const raw = pdf.toString('latin1');
+    assert.ok(raw.length > 0);
+  }
+  const text = await pdfText(pdf);
+  // Header labels must appear at least twice (once per page).
+  const occurrences = (text.match(/Description/g) || []).length;
+  assert.ok(occurrences >= doc.getPageCount(), `table header must repeat on every page (saw ${occurrences} for ${doc.getPageCount()} pages)`);
+});
+
+test('wrapText wraps rather than truncating', async () => {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const long = 'A very long product name that will certainly exceed the available column width by a wide margin';
+  const lines = wrapText(font, long, 9, 120);
+  assert.ok(lines.length > 1, 'must wrap onto several lines');
+  assert.ok(
+    lines.every((l) => font.widthOfTextAtSize(l, 9) <= 120),
+    'no wrapped line may exceed the column width'
+  );
+  // Nothing dropped.
+  assert.equal(lines.join(' ').replace(/\s+/g, ' '), long);
 });

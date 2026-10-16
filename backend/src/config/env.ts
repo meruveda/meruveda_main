@@ -133,7 +133,12 @@ export const config = {
   businessEmail: (process.env.BUSINESS_EMAIL || '').trim(),
 
   // ---- Invoice PDF storage (private bucket + 7-day signed URLs) ----
-  invoiceStorageBucket: (process.env.INVOICE_STORAGE_BUCKET || 'invoices').trim(),
+  // Default MUST equal the bucket name the migrations create, otherwise storage
+  // is silently skipped and orders.invoice_url stays NULL. The RLS migration
+  // creates 'invoice' (private) and the invoice-automation migration creates it
+  // too, so no env var is required. Matches the singular 'product-image'
+  // convention.
+  invoiceStorageBucket: (process.env.INVOICE_STORAGE_BUCKET || 'invoice').trim(),
   invoiceSignedUrlExpirySeconds: Math.max(
     60,
     Number(process.env.INVOICE_SIGNED_URL_EXPIRY_SECONDS) || 7 * 24 * 60 * 60
@@ -143,7 +148,46 @@ export const config = {
   otpEnabled: process.env.OTP_ENABLED === 'true',
   // Base URL of this backend — used by the webhook docs helper.
   backendUrl: process.env.BACKEND_URL || '',
+
+  // WhatsApp invoice template: name + language must match the approved template
+  // in Meta Business Manager exactly. Configurable so operators can swap between
+  // templates without a redeploy.
+  whatsappInvoiceTemplateName: (process.env.WHATSAPP_INVOICE_TEMPLATE_NAME || 'invoice_with_document').trim(),
+  whatsappInvoiceTemplateLang: (process.env.WHATSAPP_INVOICE_TEMPLATE_LANG || 'en').trim(),
 };
+
+// ---- Optional WhatsApp (Meta) slot ----------------------------------------
+// Every one of these is optional. When WHATSAPP_API_TOKEN /
+// WHATSAPP_PHONE_NUMBER_ID / the template name are unset, invoice delivery
+// simply SKIPS WhatsApp quietly: no error, no attempt consumed, no failure
+// state written. Fill them on Vercel and redeploy and delivery starts by itself.
+export const invoiceWhatsapp = {
+  configured: Boolean(
+    process.env.WHATSAPP_API_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID
+  ),
+  // Approved UTILITY template carrying a DOCUMENT header.
+  templateName: (process.env.INVOICE_WA_TEMPLATE_NAME || 'INVOICE_WITH_DOCUMENT').trim(),
+  templateLang: (process.env.INVOICE_WA_TEMPLATE_LANG || 'en_US').trim(),
+  // true logs the exact payload and never calls Meta.
+  dryRun: process.env.WHATSAPP_DRY_RUN === 'true',
+  // How far back the delivery sweep looks for invoices that were issued but
+  // never handed to WhatsApp (because the slot was empty at the time).
+  backfillDays: Math.max(0, Number(process.env.WHATSAPP_BACKFILL_DAYS) || 2),
+};
+
+// Public storefront URL printed on the tax invoice. Built-in default is the
+// live domain; FRONTEND_URL is honoured only when it is set AND is not a local
+// dev host, so a legal document can never print "localhost".
+const DEFAULT_STOREFRONT_URL = 'https://meruvedawellness.com';
+export const storefrontUrl = (() => {
+  const raw = (process.env.FRONTEND_URL || '').trim();
+  if (!raw) return DEFAULT_STOREFRONT_URL;
+  const host = raw.replace(/^https?:\/\//, '').split('/')[0].split(':')[0];
+  if (!host || /^(localhost|127\.0\.0\.1|0\.0\.0\.0|::1)$/i.test(host) || host.endsWith('.local')) {
+    return DEFAULT_STOREFRONT_URL;
+  }
+  return raw.replace(/\/$/, '');
+})();
 
 // ---------------------------------------------------------------------------
 // Production environment audit.
@@ -208,13 +252,8 @@ if (nodeEnv === 'production') {
     warn.push('FRONTEND_URL — password reset links would point at http://localhost:3000');
   }
 
-  // WhatsApp. Only required when the WhatsApp flows are switched on.
-  if (process.env.INVOICE_AUTO_SEND === 'true' && !process.env.WHATSAPP_API_TOKEN) {
-    warn.push('WHATSAPP_API_TOKEN + WHATSAPP_PHONE_NUMBER_ID — INVOICE_AUTO_SEND=true but WhatsApp is not configured (invoices fall back to email)');
-  }
-  if (process.env.OTP_ENABLED === 'true' && !process.env.WHATSAPP_API_TOKEN) {
-    warn.push('WHATSAPP_API_TOKEN — OTP_ENABLED=true but WhatsApp is not configured');
-  }
+  // WhatsApp is an OPTIONAL slot. When it is unset the invoice pipeline skips
+  // WhatsApp quietly and nothing is warned about: that is a supported state.
   if (process.env.WHATSAPP_API_TOKEN && !process.env.WHATSAPP_APP_SECRET) {
     warn.push('WHATSAPP_APP_SECRET — webhook signatures cannot be verified; receiveWebhook then rejects every call in production');
   }
@@ -224,13 +263,8 @@ if (nodeEnv === 'production') {
     warn.push('BUSINESS_GSTIN (or GSTIN) — invoices print without a GSTIN, which is not GST-compliant');
   }
 
-  // Invoice numbering: without the sequence migration the backend logs a
-  // warning per invoice and falls back to non-consecutive numbering.
-  if (process.env.INVOICE_AUTO_SEND === 'true') {
-    warn.push(
-      'SQL migration backend/sql/migrations/2026-10-14_invoice_sequence.sql — until it is applied, invoices use the legacy non-sequential number',
-    );
-  }
+// Invoice numbering: gapless numbering needs a sequence table; without one the
+  // invoice still issues, using the order number as the invoice number.
 
   if (fatal.length) {
     console.error(

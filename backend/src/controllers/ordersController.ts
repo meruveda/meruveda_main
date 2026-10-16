@@ -7,6 +7,7 @@ import { supabase } from '../database/supabase';
 import { normalizePhone } from '../services/whatsappService';
 import { hasColumn } from '../services/schemaGuard';
 import { verifyToken } from '../utils/jwt';
+import { keepAlive } from '../utils/keepAlive';
 import { config } from '../config/env';
 import { timingSafeEqualStr } from '../utils/timingSafe';
 import { shiprocketTrackingService } from '../services/shiprocket/tracking.service';
@@ -56,12 +57,11 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
         .eq('id', data.id)
         .maybeSingle();
       // Confirmation text is a courtesy; the invoice is the dispatcher's job.
-      sendOrderConfirmationText(confirmationOrder).catch((err: any) =>
-        console.error('[Orders] order confirmation text failed:', err?.message || err)
-      );
-      postOrderConfirmed(data.id, { source: 'cod_placement' }).catch((postErr: any) => {
-        console.error('[Orders] postOrderConfirmed failed:', postErr?.message || postErr);
-      });
+      keepAlive(sendOrderConfirmationText(confirmationOrder));
+      // keepAlive, not a bare .catch(): on Vercel an un-awaited promise is torn
+      // down when the response flushes, which killed invoice dispatch mid-render
+      // with nothing recorded. waitUntil() extends the invocation instead.
+      keepAlive(postOrderConfirmed(data.id, { source: 'cod_placement' }));
     }
 
     res.status(201).json({ data });

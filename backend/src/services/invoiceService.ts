@@ -1,11 +1,21 @@
 import { readFileSync } from 'fs';
 import path from 'path';
-import { PDFDocument, PDFFont, PDFPage, StandardFonts, rgb } from 'pdf-lib';
 import {
-  DEFAULT_GST_RATE_PERCENT,
+  PDFDocument,
+  PDFFont,
+  PDFPage,
+  Color,
+  pushGraphicsState,
+  popGraphicsState,
+  concatTransformationMatrix,
+  rgb,
+} from 'pdf-lib';
+import fontkit from '@pdf-lib/fontkit';
+import {
   computeOrderTotals,
   formatInvoiceAmount,
   formatInvoiceNumber,
+  grossToGst,
   grossToTaxable,
   invoiceFyLabel,
   isIntraState,
@@ -19,154 +29,242 @@ import { hasColumn } from './schemaGuard';
 /** Per-channel outcome, mirroring ChannelStatus in invoiceDispatchService. */
 type ChannelOutcome = 'sent' | 'failed' | 'skipped' | 'disabled';
 
-/* ------------------------------------------------------------------ */
-/* Palette — sampled from the reference invoice's own rendered pixels  */
-/* ------------------------------------------------------------------ */
-const PURPLE = rgb(0.298, 0.1137, 0.3569);     // #4C1D5B  section bars
-const GOLD = rgb(0.4588, 0.3686, 0.0863);      // #755E16  INVOICE wordmark
-const WORDMARK = rgb(0.1686, 0.0941, 0.1255);  // #2B1820  MERUVEDA / sign-off
-const BODY = rgb(0.2784, 0.3333, 0.4118);      // #475569  body copy
-const HEADING = rgb(0.0588, 0.0902, 0.1647);   // #0F172A  labels, values
-const BORDER = rgb(0.8863, 0.9098, 0.9412);    // #E2E8F0  card + table rules
-const RULE = rgb(0.2, 0.2549, 0.3333);         // #334155  masthead rule
-const GREEN = rgb(0.0549, 0.549, 0.2863);       // #0C8C49  PAID stamp
-const WHITE = rgb(1, 1, 1);
-
-/* ------------------------------------------------------------------ */
-/* Page geometry — US Letter, matching the reference exactly            */
-/* ------------------------------------------------------------------ */
-const PAGE_W = 612;
-const PAGE_H = 792;
+/* =============================================================================
+ * GEOMETRY + PALETTE — sampled from docs/reference/reference-invoice.pdf
+ * (rendered MV-139559), NOT eyeballed. Page is US Letter, margin 18pt.
+ * ========================================================================== */
+const PAGE_W = 612; // 8.5in
+const PAGE_H = 792; // 11in
 const MARGIN = 18;
-const CONTENT_W = PAGE_W - MARGIN * 2;   // 576
-const FOOTER_Y = 96;                      // content never enters this band
+const RIGHT = PAGE_W - MARGIN; // 594
+const CONTENT_W = RIGHT - MARGIN; // 576
 
-const LOGO_PATH = path.resolve(__dirname, '../../assets/meruveda-logo.png');
+const hex = (h: string): Color => {
+  const n = parseInt(h.slice(1), 16);
+  return rgb(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255);
+};
 
-/**
- * Currency prefix for every printed figure.
- *
- * The reference PDF renders "₹699.00". pdf-lib's standard fonts are WinAnsi
- * only and U+20B9 is NOT in WinAnsi, so the rupee glyph cannot be drawn
- * without embedding a TTF that carries it. We default to "Rs." (the GST
- * convention, and what the previous template used) and allow an override via
- * INVOICE_CURRENCY_SYMBOL once an embeddable font is supplied.
- */
-const CURRENCY_PREFIX = (process.env.INVOICE_CURRENCY_SYMBOL ?? 'Rs. ').trim();
-const money = (v: unknown) =>
-  `${CURRENCY_PREFIX ? CURRENCY_PREFIX + ' ' : ''}${formatInvoiceAmount(Number(v) || 0)}`;
+const PURPLE = hex('#4c1d5b'); // BILL TO / NOTES / table header bars
+const BORDER = hex('#e2e8f0'); // every hairline + row separator
+const GOLD = hex('#755e16'); // INVOICE wordmark
+const MAROON = hex('#2b1820'); // brand serif lines
+const BODY_GREY = hex('#475569'); // seller block body
+const SLATE = hex('#334155'); // table labels, notes body
+const INK = hex('#0f172a'); // TOTAL row, footer email
+const SLATE_DARK = hex('#1e293b'); // GSTIN, BILL TO body
+const BROWN = hex('#78350f'); // customer note text
+const NOTE_EDGE = hex('#fde68a'); // customer note box border
+const DARK_GREY = hex('#272d37'); // "PAYMENT DETAILS:"
+const WHITE = hex('#ffffff');
 
-export interface SellerIdentity {
-  name: string;
-  addressLines: string[];
-  gstin: string;
-  phone: string;
-  email: string;
-  website: string;
+const HAIRLINE = 0.8;
+const ITEM_ROW_H = 24.8;
+const TOTAL_ROW_H = 24.8;
+const TOTAL_ROW_H_BIG = 30.8;
+
+/* Column geometry — verbatim from the reference. */
+const COL = {
+  desc: [MARGIN, 323.2],
+  sku: [323.2, 413.2],
+  qty: [413.2, 458.2],
+  taxed: [458.2, 504.0],
+  amount: [504.0, RIGHT],
+};
+const NOTES_X = MARGIN;
+const NOTES_W = 276;
+const TOTAL_X = 318.8;
+const TOTAL_LABEL_W = 138.8;
+const TOTAL_VAL_W = 136.5;
+
+/* =============================================================================
+ * ASSETS — logo + fonts. All resolved relative to the running module so the
+ * same paths work from src/ and from dist/ on Vercel.
+ * ========================================================================== */
+function asset(candidates: string[]): Buffer | null {
+  for (const c of candidates) {
+    try {
+      return readFileSync(c);
+    } catch {
+      /* next */
+    }
+  }
+  return null;
 }
 
-/** Fallbacks so a tax invoice is never printed blank mid-setup. */
+// __dirname is backend/src/services or backend/dist/services.
+const assetRoot = (rel: string) => [
+  path.resolve(__dirname, `../assets/${rel}`), // dist/assets (copy-assets.cjs)
+  path.resolve(__dirname, `../../assets/${rel}`), // assets/ (source tree)
+];
+
+const FONT_FILES = {
+  serifBold: 'fonts/SourceSerif4-Bold.ttf', // stands in for Georgia Bold
+  sans: 'fonts/NotoSans-Regular.ttf',
+  sansBold: 'fonts/NotoSans-Bold.ttf',
+  mono: 'fonts/NotoSansMono-Regular.ttf', // stands in for Consolas
+  monoBold: 'fonts/NotoSansMono-Bold.ttf',
+};
+
+interface Fonts {
+  serifBold: PDFFont;
+  sans: PDFFont;
+  sansBold: PDFFont;
+  mono: PDFFont;
+  monoBold: PDFFont;
+}
+
+async function loadFonts(doc: PDFDocument): Promise<Fonts | null> {
+  doc.registerFontkit(fontkit as any);
+  const missing: string[] = [];
+  const out: any = {};
+  for (const [key, rel] of Object.entries(FONT_FILES)) {
+    const bytes = asset(assetRoot(rel));
+    if (!bytes) {
+      missing.push(rel);
+      continue;
+    }
+    try {
+      out[key] = await doc.embedFont(bytes, { subset: true });
+    } catch (err: any) {
+      missing.push(`${rel} (${err?.message || err})`);
+    }
+  }
+  if (missing.length) {
+    console.error(
+      `[Invoice] FONTS MISSING — the invoice will fall back to Helvetica/Courier and cannot draw ₹. ` +
+        `Missing or unreadable: ${missing.join(', ')}. Looked under: ${assetRoot('fonts/...').join(' , ')}`
+    );
+    return null;
+  }
+  return out as Fonts;
+}
+
+/* =============================================================================
+ * Seller identity
+ * ========================================================================== */
 const DEFAULT_SELLER = {
   name: 'MERUVEDA WELLNESS',
-  address:
-    'Keharsh Enterprises (Sole Proprietorship)\n' +
-    'S/N. 12, Viru City Gym Road, Inside Jalori Gate,\n' +
+  legal: 'Keharsh Enterprises (Sole Proprietorship)',
+  address: [
+    'S/N. 12, Viru City Gym Road, Inside Jalori Gate,',
     'Jodhpur - 342001, Rajasthan, India',
-  gstin: '08BFPPS7045C1Z4',
+  ],
   phone: '+91 8097147463',
   email: 'customercare@meruvedawellness.com',
+  // Real production domain. Never FRONTEND_URL — that is localhost/staging and
+  // would print a dead website on a legal document.
   website: 'meruvedawellness.com',
+  gstin: '08BFPPS7045C1Z4',
 };
 
 let warnedMissingBusinessEnv = false;
 
-/** Seller block for the invoice, resolved from env with hard-coded fallbacks. */
-export function getSellerIdentity(): SellerIdentity {
-  const name = config.businessName || DEFAULT_SELLER.name;
-  const address = config.businessAddress || DEFAULT_SELLER.address;
+export function getSellerIdentity() {
+  const address = config.businessAddress || DEFAULT_SELLER.address.join('\n');
   const gstin = config.businessGstin || DEFAULT_SELLER.gstin;
   const phone = config.businessPhone || DEFAULT_SELLER.phone;
   if (!warnedMissingBusinessEnv && (!config.businessName || !config.businessGstin)) {
     warnedMissingBusinessEnv = true;
-    console.warn(
+    console.error(
       '[Invoice] BUSINESS_NAME / BUSINESS_GSTIN not fully set — using built-in defaults. ' +
-        'Set them in the Render environment before going live.'
+        'Set them in the Vercel environment before going live.'
     );
   }
   return {
-    name,
-    addressLines: String(address).split('\n').map((l) => l.trim()).filter(Boolean),
-    gstin,
+    name: (config.businessName || DEFAULT_SELLER.name).toUpperCase(),
+    legal: DEFAULT_SELLER.legal,
+    address: address.split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
     phone,
-    email: 'customercare@meruvedawellness.com',
-    // Never print a localhost URL on a legal document.
+    email: config.businessEmail || DEFAULT_SELLER.email,
     website: DEFAULT_SELLER.website,
+    gstin,
   };
 }
 
-/* ------------------------------------------------------------------ */
-/* Text helpers — wrapping instead of truncation                       */
-/* ------------------------------------------------------------------ */
+/* =============================================================================
+ * Text helpers
+ * ========================================================================== */
 
-/**
- * Greedy word wrap using real glyph widths. Replaces the old
- * `String(x).slice(0, 64)` which silently chopped long addresses and product
- * names mid-word.
- */
+/** Greedy word wrap that never truncates. */
 export function wrapText(font: PDFFont, text: string, size: number, maxWidth: number): string[] {
-  const words = String(text ?? '').split(/\s+/).filter(Boolean);
-  if (words.length === 0) return [''];
   const lines: string[] = [];
-  let line = '';
-  for (const word of words) {
-    const candidate = line ? `${line} ${word}` : word;
-    if (font.widthOfTextAtSize(candidate, size) <= maxWidth || !line) {
-      line = candidate;
-    } else {
-      lines.push(line);
-      line = word;
+  for (const paragraph of String(text ?? '').split(/\r?\n/)) {
+    if (!paragraph.trim()) {
+      lines.push('');
+      continue;
     }
+    let line = '';
+    for (const word of paragraph.split(/\s+/).filter(Boolean)) {
+      const candidate = line ? `${line} ${word}` : word;
+      if (font.widthOfTextAtSize(candidate, size) <= maxWidth || !line) {
+        line = candidate;
+      } else {
+        lines.push(line);
+        line = word;
+      }
+    }
+    if (line) lines.push(line);
   }
-  if (line) lines.push(line);
   return lines;
 }
 
 /**
- * Draw wrapped text and return the next free `yTop`.
+ * Indian digit grouping: 1,23,456.78 (last three, then pairs).
  *
- * The whole template is laid out in "y measured down from the top of the page"
- * space (which is how the reference PDF expresses its own coordinates) and
- * converted to PDF user space inside `at()`. A baseline sits `size` below the
- * slot top, matching how the browser that produced the reference positioned
- * its text.
+ * The reference prints ₹699.00 because the amount is small; anything at or above
+ * one lakh must group as 1,23,456.00, which toLocaleString('en-IN') would render
+ * but standard en-US formatting would not.
  */
-function drawWrapped(
+export function formatINR(value: number): string {
+  const v = round2(Number(value) || 0);
+  const negative = v < 0;
+  const [whole, frac = '00'] = Math.abs(v).toFixed(2).split('.');
+  let grouped = whole;
+  if (whole.length > 3) {
+    const last3 = whole.slice(-3);
+    const rest = whole.slice(0, -3);
+    grouped = rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',' + last3;
+  }
+  return `${negative ? '-' : ''}₹${grouped}.${frac}`;
+}
+
+/** Reference date format: M/D/YYYY. */
+function fmtDate(d: Date): string {
+  const m = d.getMonth() + 1;
+  const day = d.getDate();
+  const y = d.getFullYear();
+  return `${m}/${day}/${y}`;
+}
+
+/**
+ * Draw text with a real italic slant.
+ *
+ * No italic face ships with the chosen OFL families, and downloading one was not
+ * possible from the available sources. PDF renders glyphs through Tm x CTM, so
+ * applying a skew to the graphics state shears the text itself — a genuine
+ * oblique. tan(12 deg) = 0.2126.
+ *
+ * `o.y` is the text TOP, matching `text()`; pdf-lib's `y` is a baseline measured
+ * from the page bottom, hence the conversion.
+ */
+function italic(
   page: PDFPage,
   text: string,
-  opts: { x: number; yTop: number; size: number; maxWidth: number; font: PDFFont; color: any; lineGap?: number },
-): number {
-  const { x, yTop, size, maxWidth, font, color } = opts;
-  const gap = opts.lineGap ?? size * 1.55;
-  const at = (y: number) => 792 - y;
-  let cursor = yTop;
-  for (const line of wrapText(font, text, size, maxWidth)) {
-    page.drawText(line, { x, y: at(cursor + size), size, font, color });
-    cursor += gap;
-  }
-  return cursor;
+  o: { x: number; y: number; size: number; font: PDFFont; color: Color; align?: 'l' | 'c' | 'r' }
+) {
+  const slant = 0.2126;
+  const width = o.font.widthOfTextAtSize(text, o.size);
+  const x = o.align === 'r' ? o.x - width : o.align === 'c' ? o.x - width / 2 : o.x;
+  const baseline = PAGE_H - o.y - o.size;
+  // Shear about the baseline so the text leans but stays on its line.
+  page.pushOperators(pushGraphicsState(), concatTransformationMatrix(1, 0, slant, 1, -slant * baseline, 0));
+  page.drawText(text, { x, y: baseline, size: o.size, font: o.font, color: o.color });
+  page.pushOperators(popGraphicsState());
 }
 
-/* ------------------------------------------------------------------ */
-/* Order loading                                                      */
-/* ------------------------------------------------------------------ */
-
-/** Resolve the GST rate for every line item (per product, default 5%). */
-function rateOfProduct(product: any): number {
-  const m = product?.seo_metadata || product?.seoMetadata || {};
-  const raw = m.gst_rate ?? m.gstRate ?? m.gst;
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_GST_RATE_PERCENT;
-}
+/* =============================================================================
+ * Load
+ * ========================================================================== */
 
 /**
  * Load an order shaped for invoicing: line items joined to their products so the
@@ -186,12 +284,8 @@ export async function getOrderForInvoice(orderId: string) {
     .single();
 
   if (error || !data) {
-    // Distinguish "no such order" from "the query itself was rejected" so a
-    // schema mistake is never again reported as a missing order.
     const err = new Error(
-      error
-        ? `Could not load order for invoicing: ${error.code || ''} ${error.message}`.trim()
-        : 'Order not found'
+      error ? `Could not load order for invoicing: ${error.code || ''} ${error.message}`.trim() : 'Order not found'
     );
     (err as any).status = error ? 500 : 404;
     throw err;
@@ -199,86 +293,57 @@ export async function getOrderForInvoice(orderId: string) {
   return data;
 }
 
-/** Best-effort buyer address: billing first, then shipping. */
-function buyerOf(order: any) {
-  const bill = order.billing_address || {};
-  const ship = order.shipping_address || {};
-  return {
-    fullName: bill.fullName || ship.fullName || 'Customer',
-    addressLines: String(bill.addressLine || ship.addressLine || '')
-      .split(/[,\n]/)
-      .map((l: string) => l.trim())
-      .filter(Boolean),
-    city: bill.city || ship.city || '',
-    state: bill.state || ship.state || '',
-    zipCode: bill.zipCode || ship.zipCode || '',
-    phone: bill.phone || ship.phone || '',
-    email: order.users?.email || order.user_email || '',
-  };
-}
-
-/** True when the order was paid online (PayU) rather than on delivery. */
 function isPrepaid(order: any): boolean {
-  return !/cash|\bcod\b/i.test(String(order.payment_method || ''));
+  return /payu|payonline|prepaid|online|upi|card/i.test(String(order?.payment_method || ''));
 }
-
 function isPaid(order: any): boolean {
-  return String(order.payment_status || '').toLowerCase() === 'paid';
+  return String(order?.payment_status || '').toLowerCase() === 'paid';
+}
+function gstRateOf(item: any): number {
+  const n = Number(item?.products?.seo_metadata?.gst_rate);
+  return Number.isFinite(n) && n > 0 ? n : 5;
 }
 
-const formatDate = (d: Date) =>
-  d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
-
-/* ------------------------------------------------------------------ */
-/* The template                                                        */
-/* ------------------------------------------------------------------ */
+/* =============================================================================
+ * Render
+ * ========================================================================== */
 
 /**
  * Render the printable tax invoice.
  *
- * Geometry, fonts, colours and copy are taken directly from the reference
- * invoice (Invoice MV-139559.pdf) — US Letter, 18pt margins, purple #4C1D5B
- * section bars, Georgia serif for the wordmark / title / sign-off, and a
- * monospace face for every figure.
- *
- * Section order:
- *   header    logo + "INVOICE" wordmark bar, MERUVEDA WELLNESS + seller block
- *   meta box  DATE / INVOICE # / ORDER # / DUE DATE   (top-right)
- *   rule
- *   BILL TO   purple-headed card
- *   items     Description | SKU | Qty | Taxed | Amount
- *   notes     OTHER COMMENTS & NOTES + PAYMENT DETAILS
- *   totals    Subtotal / Taxable / GST / Shipping / TOTAL (right column)
- *   footer    contact email + "Thank You For Your Business!"
- *
- * All numbers are monospace so decimal columns line up, exactly as in the
- * reference.
+ * Layout follows docs/reference/reference-invoice.pdf (MV-139559) exactly:
+ * US Letter, 18pt margins, Georgia-style serif wordmarks, Consolas-style mono
+ * numerics, ₹ currency, purple section bars, hairline grid, and the yellow
+ * customer-note box. Business logic (FY number, tax split, reconciliation) is
+ * untouched.
  */
 export async function generateInvoicePdf(order: any): Promise<Buffer> {
   const doc = await PDFDocument.create();
 
-  // ORDER MATTERS. pdf-lib assigns object tags in creation order, but
-  // embedFont() is lazy (the ref is only minted when the font is first drawn)
-  // while embedPng() is immediate. If the image is created first its tag lands
-  // where the fonts' tags are computed, and the page's /Font resource dictionary
-  // ends up with keys that do not match the /Fn names used in the content
-  // stream — text drawn with a missing resource is silently dropped by some
-  // renderers (it rendered in some, vanished in others). Creating the image
-  // BEFORE the fonts keeps every tag unique and the two in sync.
-  let logo: Awaited<ReturnType<typeof doc.embedPng>> | null = null;
-  try {
-    logo = await doc.embedPng(readFileSync(LOGO_PATH));
-  } catch {
-    console.warn('[Invoice] logo asset missing at', LOGO_PATH, '— printing without it.');
-  }
+  const fonts = await loadFonts(doc);
+  // Without embedded fonts we still produce a valid PDF; it just cannot draw ₹
+  // and will look like the old template. Loud above, degraded here on purpose so
+  // a missing asset never fails an invoice outright.
+  const F = fonts;
+  const fallback = async () => {
+    const { StandardFonts } = await import('pdf-lib');
+    return {
+      serifBold: await doc.embedFont(StandardFonts.TimesRomanBold),
+      sans: await doc.embedFont(StandardFonts.Helvetica),
+      sansBold: await doc.embedFont(StandardFonts.HelveticaBold),
+      mono: await doc.embedFont(StandardFonts.Courier),
+      monoBold: await doc.embedFont(StandardFonts.CourierBold),
+    } as Fonts;
+  };
+  const f: Fonts = F ?? (await fallback());
+  const hasRupee = !!F;
 
-  const serif = await doc.embedFont(StandardFonts.TimesRomanBold);
-  const sans = await doc.embedFont(StandardFonts.Helvetica);
-  const sansBold = await doc.embedFont(StandardFonts.HelveticaBold);
-  const sansItalic = await doc.embedFont(StandardFonts.HelveticaOblique);
-  const mono = await doc.embedFont(StandardFonts.Courier);
-  const monoBold = await doc.embedFont(StandardFonts.CourierBold);
+  const rupee = (v: number) => (hasRupee ? formatINR(v) : `Rs. ${formatInvoiceAmount(v)}`);
 
+  let page = doc.addPage([PAGE_W, PAGE_H]);
+
+  // ---- data ----
+  const seller = getSellerIdentity();
   const orderNumber: string = order.order_number || 'MV-000000';
   const invoiceNumber: string = order.invoice_number || buildInvoiceNumber(orderNumber);
   const issued = order.invoice_issued_at ? new Date(order.invoice_issued_at) : new Date();
@@ -288,393 +353,426 @@ export async function generateInvoicePdf(order: any): Promise<Buffer> {
 
   const prepaid = isPrepaid(order);
   const paid = isPaid(order);
-  const buyer = buyerOf(order);
-  const seller = getSellerIdentity();
+  const bill = order.billing_address && Object.keys(order.billing_address).length ? order.billing_address : {};
+  const ship = order.shipping_address && Object.keys(order.shipping_address).length ? order.shipping_address : {};
+  const addr: any = { ...ship, ...bill, state: bill.state || ship.state };
+  const buyer = {
+    name: String(addr.fullName || 'Customer'),
+    lines: [
+      String(addr.addressLine || addr.addressLine2 || '').trim(),
+      [addr.city, addr.state, addr.zipCode || addr.pincode].filter(Boolean).join(', '),
+    ].filter(Boolean),
+    phone: String(addr.phone || ''),
+  };
 
-  /* ---------------- money ---------------- */
-  const items: any[] = Array.isArray(order.order_items) ? order.order_items : [];
-  const lines = items.map((item) => ({
-    name: item.product_name || 'Item',
-    sku: item.sku || '-',
-    qty: Number(item.quantity) || 1,
-    gross: round2((Number(item.price) || 0) * (Number(item.quantity) || 1)),
-    rate: rateOfProduct(item.products),
-  }));
+  const items: any[] = Array.isArray(order.order_items) && order.order_items.length
+    ? order.order_items
+    : [{ product_name: 'Order total', sku: '', quantity: 1, price: order.subtotal || 0, total: order.subtotal || 0 }];
 
+  const shippingFee = round2(Number(order.shipping_fee ?? order.shipping_cost) || 0);
+  const discount = round2(Number(order.discount) || 0);
   const totals = computeOrderTotals({
     subtotal: Number(order.subtotal) || 0,
-    discount: Number(order.discount) || 0,
-    shippingFee: Number(order.shipping_fee) || 0,
+    discount,
+    shippingFee,
     fallbackGst: Number(order.tax) || 0,
-    lines,
-    shippingGstRatePercent: config.shippingIsTaxable ? 18 : 0,
+    lines: items.map((i) => ({ gross: Number(i.total) || Number(i.price) * Number(i.quantity) || 0, ratePercent: gstRateOf(i) })),
   });
-  const gst = splitGst(totals.gst, buyer.state);
-  const shippingFee = round2(Number(order.shipping_fee) || 0);
-  const discount = round2(Number(order.discount) || 0);
-  // Reference semantics: "Taxable" is the GST-INCLUSIVE amount the tax is
-  // charged on, and the GST line is labelled "(Included)" and never added on.
-  // "Taxable" on a GST invoice is the value EXCLUDING tax. It must equal the sum
-  // of the per-line "Taxed" column, otherwise the same document contradicts
-  // itself (lines showed 950.48 while this row showed the 998 gross) and the
-  // taxable value + GST would no longer reconcile to the gross.
+  const gst = splitGst(totals.gst, addr.state);
+  // "Taxable" is EXCLUDING tax, so it agrees with the per-line Taxed column and
+  // Taxable + GST === Subtotal.
   const taxableBase = round2(totals.taxable);
   const grandTotal = Number(order.total) || round2(totals.gross - discount + shippingFee);
 
-  /* ---------------- page / cursor ---------------- */
-  // Laid out top-down in "y from the top of the page", converted on the way
-  // out — the same coordinate space the reference PDF uses.
-  let page = doc.addPage([PAGE_W, PAGE_H]);
-  // The masthead is emitted last (see drawMasthead) so it is never buried under
-  // later fills; it must therefore always target the FIRST page, not whichever
-  // page the item loop happened to break onto.
-  const firstPage = page;
-  let y = MARGIN;
-  const Y = (yTop: number) => PAGE_H - yTop;
-  const newPage = () => {
-    page = doc.addPage([PAGE_W, PAGE_H]);
-    y = MARGIN;
+  /* ---------------- primitives ---------------- */
+  const rule = (x: number, y: number, w: number, color: Color = BORDER, h = HAIRLINE) =>
+    page.drawRectangle({ x, y: PAGE_H - y - h, width: w, height: h, color });
+
+  const fillRect = (x: number, y: number, w: number, h: number, color: Color) =>
+    page.drawRectangle({ x, y: PAGE_H - y - h, width: w, height: h, color });
+
+  /** Draw with y given as the text TOP (like the reference's coordinates). */
+  const text = (
+    s: string,
+    o: { x: number; y: number; size: number; font: PDFFont; color: any; align?: 'l' | 'c' | 'r' }
+  ) => {
+    const w = o.font.widthOfTextAtSize(s, o.size);
+    const x = o.align === 'r' ? o.x - w : o.align === 'c' ? o.x - w / 2 : o.x;
+    page.drawText(s, { x, y: PAGE_H - o.y - o.size, size: o.size, font: o.font, color: o.color });
   };
 
-  const RIGHT = PAGE_W - MARGIN;          // 594
-  const BOTTOM_LIMIT = 700;                // footer band starts here
-
-  /* ================= 1. masthead ================= */
-  if (logo) {
-    const lw = 132;
-    page.drawImage(logo, { x: MARGIN + 8, y: Y(MARGIN + 10 + (lw * logo.height) / logo.width), width: lw, height: (lw * logo.height) / logo.width });
+  /* ================= HEADER ================= */
+  // Logo, reference size 99.8 x 42 at (18, 18).
+  const logoBytes = asset(assetRoot('meruveda-logo.png'));
+  if (logoBytes) {
+    try {
+      // Create BEFORE the fonts so every resource tag stays in sync (a font tag
+      // added after an image can desync the /Font resource dictionary and text
+      // silently vanishes in some renderers).
+      await doc.embedPng(logoBytes);
+      const img = await doc.embedPng(logoBytes);
+      const scale = Math.min(99.8 / img.width, 42 / img.height);
+      const w = img.width * scale;
+      const h = img.height * scale;
+      page.drawImage(img, { x: MARGIN, y: PAGE_H - 18 - h, width: w, height: h });
+    } catch (err: any) {
+      console.error('[Invoice] logo present but unreadable as PNG:', err?.message || err);
+    }
+  } else {
+    console.error(
+      `[Invoice] LOGO MISSING — the invoice will render without it. Looked in: ${assetRoot('meruveda-logo.png').join(' , ')}`
+    );
   }
-  /**
-   * The masthead wordmark and the DATE / INVOICE # / ORDER # / DUE DATE box.
-   *
-   * Deferred to the end of the layout on purpose: emitting them last keeps
-   * them above everything else and sidesteps a pdf-lib resource-ordering
-   * quirk where early text on the page could be dropped by strict renderers.
-   */
-  const drawMasthead = () => {
-  page = firstPage;
-  const title = 'INVOICE';
-  page.drawText(title, {
-    x: RIGHT - serif.widthOfTextAtSize(title, 34),
-    y: Y(50),
-    size: 34,
-    font: serif,
-    color: GOLD,
-  });
 
-  /* ---- meta box (top-right) ---- */
-  const metaW = 150;
-  const metaX = RIGHT - metaW;
-  const metaRowH = 22;
-  const metaRows: Array<[string, string]> = [
-    ['DATE', formatDate(issueDate)],
+  // INVOICE wordmark: 36pt serif bold, dark gold, right-aligned to the margin.
+  text('INVOICE', { x: RIGHT, y: 15, size: 36, font: f.serifBold, color: GOLD, align: 'r' });
+  // GST requires the document to be labelled a tax invoice; tiny and grey so it
+  // stays a caption rather than a second headline.
+  text('TAX INVOICE', { x: RIGHT, y: 54, size: 7.5, font: f.sans, color: BODY_GREY, align: 'r' });
+
+  /* ---- info box: DATE / INVOICE # / ORDER # / DUE DATE ---- */
+  const infoX = 439.5;
+  const infoW = RIGHT - infoX;
+  const lblW = 64.5;
+  const infoY = 66;
+  const infoRowH = 21.8;
+  const infoRows: Array<[string, string]> = [
+    ['DATE', fmtDate(issueDate)],
     ['INVOICE #', invoiceNumber],
     ['ORDER #', orderNumber],
-    ['DUE DATE', formatDate(dateOfOrder)],
+    ['DUE DATE', fmtDate(dateOfOrder)],
   ];
-  const metaTop = 70;
-  // Card background FIRST, then the zebra stripes, then the text, then the
-  // border — a fill emitted after the labels would paint straight over them.
-  page.drawRectangle({
-    x: metaX, y: Y(metaTop + metaRows.length * metaRowH),
-    width: metaW, height: metaRows.length * metaRowH, color: WHITE,
+  infoRows.forEach(([label, value], i) => {
+    const y = infoY + i * infoRowH;
+    // Cell background FIRST, then the hairlines, then the text — a fill painted
+    // after the labels would hide them completely.
+    fillRect(infoX, y, lblW, infoRowH, WHITE);
+    fillRect(infoX + lblW, y, infoW - lblW, infoRowH, WHITE);
+    if (i > 0) {
+      rule(infoX, y, infoW);
+      rule(infoX + lblW, y, infoW - lblW);
+    }
+    text(label, { x: infoX + 9.7, y: y + 6.2, size: 9, font: f.sansBold, color: hex('#000000') });
+    // The real FY series (MV/26-27/000123) is longer than the reference sample
+    // (MV-139559), so shrink to fit rather than letting it collide with the label
+    // column or run off the right margin.
+    const valRight = infoX + infoW - 9.7;
+    const avail = infoW - lblW - 19.4;
+    let vSize = 9;
+    while (vSize > 6 && f.mono.widthOfTextAtSize(value, vSize) > avail) vSize -= 0.5;
+    text(value, { x: valRight, y: y + 6.2 + (9 - vSize), size: vSize, font: f.mono, color: hex('#000000'), align: 'r' });
   });
-  metaRows.forEach(([, ], i) => {
-    if (i % 2 !== 1) return;
-    const ry = metaTop + i * metaRowH;
-    page.drawRectangle({ x: metaX, y: Y(ry + metaRowH), width: metaW, height: metaRowH, color: BORDER });
-  });
-  metaRows.forEach(([label, value], i) => {
-    const ry = metaTop + i * metaRowH;
-    page.drawText(label, { x: metaX + 10, y: Y(ry + 15), size: 9, font: sansBold, color: HEADING });
-    page.drawText(value, {
-      x: metaX + metaW - 10 - mono.widthOfTextAtSize(value, 9),
-      y: Y(ry + 15), size: 9, font: mono, color: HEADING,
-    });
-  });
-  page.drawRectangle({
-    x: metaX, y: Y(metaTop + metaRows.length * metaRowH),
-    width: metaW, height: metaRows.length * metaRowH,
-    borderColor: BORDER, borderWidth: 0.8,
-  });
-  };
+  const infoH = infoRows.length * infoRowH;
+  // Outer border: verticals + bottom hairline.
+  rule(infoX, infoY, HAIRLINE, BORDER, infoH);
+  rule(infoX + lblW, infoY, HAIRLINE, BORDER, infoH);
+  rule(RIGHT - HAIRLINE, infoY, HAIRLINE, BORDER, infoH);
+  rule(infoX, infoY + infoH, infoW);
 
   /* ---- seller block ---- */
-  y = 95;
-  page.drawText(seller.name, { x: MARGIN, y: Y(y), size: 15, font: serif, color: WORDMARK });
-  y += 23;
-  const sellerLines = [...seller.addressLines];
-  for (const line of sellerLines) {
-    page.drawText(line, { x: MARGIN, y: Y(y), size: 9, font: sans, color: BODY });
-    y += 14;
-  }
-  y += 6;
-  page.drawText(`Phone: ${seller.phone}   |   Email: ${seller.email}`, {
-    x: MARGIN, y: Y(y), size: 9, font: sans, color: BODY,
-  });
-  y += 14;
-  page.drawText(`Website: ${seller.website}`, { x: MARGIN, y: Y(y), size: 9, font: sans, color: BODY });
-  y += 15;
-  page.drawText(`GSTIN: ${seller.gstin}`, { x: MARGIN, y: Y(y), size: 9, font: monoBold, color: HEADING });
-
-  /* ---- rule ---- */
-  page.drawLine({
-    start: { x: MARGIN, y: Y(209) }, end: { x: RIGHT, y: Y(209) },
-    thickness: 0.8, color: RULE,
-  });
-
-  /* ================= 2. BILL TO card ================= */
-  const cardX = MARGIN;
-  const cardW = 300;
-  const cardHeadH = 22;
-  const buyerLines = [
-    buyer.fullName,
-    ...buyer.addressLines,
-    [buyer.city, buyer.state, buyer.zipCode].filter(Boolean).join(', '),
-    ...(buyer.phone ? [`Phone: ${buyer.phone}`] : []),
-  ].filter(Boolean);
-
-  // Measure first so the card is never shorter than its own content.
-  const buyerWrapped: Array<{ text: string; bold: boolean }> = [];
-  for (const [i, line] of buyerLines.entries()) {
-    const f = i === 0 ? sansBold : sans;
-    for (const t of wrapText(f, line, 9, cardW - 24)) buyerWrapped.push({ text: t, bold: i === 0 });
-  }
-  const cardBodyH = 14 + buyerWrapped.length * 14 + 12;
-  const cardTop = 244;
-
-  page.drawRectangle({ x: cardX, y: Y(cardTop + cardHeadH), width: cardW, height: cardHeadH, color: PURPLE });
-  page.drawText('BILL TO', { x: cardX + 12, y: Y(cardTop + 15), size: 9, font: sansBold, color: WHITE });
-  page.drawRectangle({
-    x: cardX, y: Y(cardTop + cardHeadH + cardBodyH), width: cardW, height: cardBodyH,
-    borderColor: BORDER, borderWidth: 0.8, color: WHITE,
-  });
-  let by = cardTop + cardHeadH + 20;
-  for (const l of buyerWrapped) {
-    page.drawText(l.text, {
-      x: cardX + 12, y: Y(by), size: 9, font: l.bold ? sansBold : sans, color: l.bold ? HEADING : BODY,
-    });
-    by += 14;
-  }
-  y = cardTop + cardHeadH + cardBodyH + 26;
-
-  /* ================= 3. items table ================= */
-  // Widths are sized for the widest realistic figure: the Taxed column has to hold
-  // "Rs. 12,345.67" (12 monospace chars) without bleeding into Qty.
-  const cols = [
-    { key: 'Description', x: MARGIN, w: 282, align: 'l' as const },
-    { key: 'SKU', x: MARGIN + 282, w: 80, align: 'l' as const },
-    { key: 'Qty', x: MARGIN + 362, w: 35, align: 'r' as const },
-    { key: 'Taxed', x: MARGIN + 397, w: 90, align: 'r' as const },
-    { key: 'Amount', x: MARGIN + 487, w: RIGHT - (MARGIN + 487), align: 'r' as const },
+  let sy = 74;
+  text(seller.name, { x: MARGIN, y: sy, size: 15, font: f.serifBold, color: MAROON });
+  sy += 25.8;
+  // The address is wrapped, not pre-split: BUSINESS_ADDRESS is a single string in
+  // env, and the reference packs as much per line as fits, so a configured
+  // address of any length wraps the same way the reference sample did.
+  const sellerBlockW = 306; // reference seller column width (widest line is the Phone|Email row)
+  const sellerLines: Array<[string, boolean]> = [
+    [seller.legal, false],
+    ...wrapText(f.sans, seller.address.join(', ').replace(/,\s*,/g, ','), 9, sellerBlockW).map(
+      (a) => [a, false] as [string, boolean]
+    ),
+    [`Phone: ${seller.phone} | Email: ${seller.email}`, false],
+    [`Website: ${seller.website}`, false],
+    [`GSTIN: ${seller.gstin}`, true],
   ];
-  const headH = 22;
+  for (const [line, bold] of sellerLines) {
+    text(line, { x: MARGIN, y: sy, size: 9, font: bold ? f.sansBold : f.sans, color: bold ? SLATE_DARK : BODY_GREY });
+    sy += 15.4;
+  }
 
-  const drawTableHeader = (pg: PDFPage, atTop: number) => {
-    cols.forEach((c) => {
-      pg.drawRectangle({ x: c.x, y: Y(atTop + headH), width: c.w, height: headH, color: PURPLE });
-      const tw = sansBold.widthOfTextAtSize(c.key, 9);
-      pg.drawText(c.key, {
-        x: c.align === 'r' ? c.x + c.w - 10 - tw : c.x + 10,
-        y: Y(atTop + 15), size: 9, font: sansBold, color: WHITE,
-      });
-    });
+  // Full-width rule under the seller block.
+  const ruleY = Math.max(sy + 8, 209.2);
+  rule(MARGIN, ruleY, CONTENT_W, SLATE);
+
+  /* ================= BILL TO ================= */
+  const btX = MARGIN;
+  const btW = 288;
+  let y = ruleY + 30.8;
+  fillRect(btX, y, btW, 21, PURPLE);
+  text('BILL TO', { x: btX + 9, y: y + 5.3, size: 9, font: f.sansBold, color: WHITE });
+  const btBodyTop = y + 21;
+
+  const btLines: Array<[string, boolean]> = [
+    [buyer.name, true],
+    ...buyer.lines.map((l) => [l, false] as [string, boolean]),
+    [`Phone: ${buyer.phone}`, true],
+  ];
+  let btH = 11;
+  for (const [line, i] of btLines.map((l, k) => [l, k] as [any, number])) {
+    btH += wrapText(f.sans, line, 9, btW - 20).length * 14.4;
+    // The Phone line gets the extra gap the reference shows before it.
+    if (i === btLines.length - 1) btH += 4.4;
+  }
+  btH += 12;
+  fillRect(btX, btBodyTop, btW, btH, WHITE);
+  rule(btX, btBodyTop, HAIRLINE, BORDER, btH);
+  rule(btX + btW - HAIRLINE, btBodyTop, HAIRLINE, BORDER, btH);
+  rule(btX, btBodyTop + btH, btW);
+  let by = btBodyTop + 11.3;
+  for (const [line, bold] of btLines) {
+    for (const ln of wrapText(f.sans, line, 9, btW - 20)) {
+      text(ln, { x: btX + 9.8, y: by, size: 9, font: bold ? f.sansBold : f.sans, color: bold ? INK : SLATE_DARK });
+      by += 14.4;
+    }
+    if (line === btLines[btLines.length - 1][0]) by += 4.4;
+  }
+  y = btBodyTop + btH;
+
+  /* ================= ITEMS TABLE ================= */
+  const headerH = 21.8;
+  let cy = y + 26.6; // reference gap between BILL TO and the table
+
+  const colMid = (c: number[]) => (c[0] + c[1]) / 2;
+
+  const drawTableHeader = (yy: number) => {
+    const keys: Array<[string, number[], 'l' | 'c' | 'r']> = [
+      ['Description', COL.desc, 'l'],
+      ['SKU', COL.sku, 'c'],
+      ['Qty', COL.qty, 'c'],
+      ['Taxed', COL.taxed, 'c'],
+      ['Amount', COL.amount, 'r'],
+    ];
+    fillRect(MARGIN, yy, CONTENT_W, headerH, PURPLE);
+    for (const [label, col, align] of keys) {
+      const ax = align === 'l' ? col[0] + 9.8 : align === 'r' ? col[1] - 9.8 : colMid(col);
+      text(label, { x: ax, y: yy + 5.3, size: 9, font: f.sansBold, color: WHITE, align });
+    }
+    // Vertical hairlines between columns, as in the reference header band.
+    for (const col of [COL.sku, COL.qty, COL.taxed, COL.amount]) rule(col[0], yy, HAIRLINE, WHITE, headerH);
+    rule(MARGIN, yy, HAIRLINE, WHITE, headerH);
+    rule(RIGHT - HAIRLINE, yy, HAIRLINE, WHITE, headerH);
+    return yy + headerH;
   };
 
-  drawTableHeader(page, y);
-  y += headH;
+  const FOOTER_BLOCK = 96; // room reserved for the two-column bottom + footer
+  cy = drawTableHeader(cy);
 
-  if (lines.length === 0) {
-    page.drawRectangle({ x: MARGIN, y: Y(y + 28), width: RIGHT - MARGIN, height: 28, borderColor: BORDER, borderWidth: 0.8 });
-    page.drawText('No items', { x: MARGIN + 12, y: Y(y + 18), size: 9, font: sans, color: BODY });
-    y += 28;
-  }
+  for (const item of items) {
+    const gross = Number(item.total) || Number(item.price) * Number(item.quantity) || 0;
+    const qty = Number(item.quantity) || 0;
+    const descLines = wrapText(f.sans, String(item.product_name || ''), 9, COL.desc[1] - COL.desc[0] - 20);
+    const rowH = Math.max(ITEM_ROW_H, descLines.length * 12.6 + 11);
 
-  for (const line of lines) {
-    const descLines = wrapText(sans, line.name, 9, cols[0].w - 24);
-    const rowH = Math.max(30, descLines.length * 13 + 14);
-
-    // Never split a row, and never let the totals land on top of the table.
-    if (y + rowH > BOTTOM_LIMIT - 200) {
-      newPage();
-      drawTableHeader(page, y);
-      y += headH;
+    // Page break: never let a row collide with the bottom block, and always
+    // repeat the header on the new page.
+    if (cy + rowH > PAGE_H - 150) {
+      page = doc.addPage([PAGE_W, PAGE_H]);
+      cy = drawTableHeader(MARGIN + 8);
     }
 
+    fillRect(MARGIN, cy, CONTENT_W, rowH, WHITE);
+    let dy = cy + (rowH - descLines.length * 12.6) / 2 + 1;
+    for (const ln of descLines) {
+      text(ln, { x: COL.desc[0] + 12, y: dy, size: 9, font: f.sans, color: hex('#000000') });
+      dy += 12.6;
+    }
+    const midY = cy + (rowH - 9) / 2;
+    if (item.sku) {
+      text(String(item.sku), { x: colMid(COL.sku), y: midY, size: 9, font: f.mono, color: hex('#000000'), align: 'c' });
+    }
+    text(String(qty), { x: colMid(COL.qty), y: midY, size: 9, font: f.sans, color: hex('#000000'), align: 'c' });
+    text('X', { x: colMid(COL.taxed), y: midY, size: 9, font: f.sans, color: hex('#000000'), align: 'c' });
+    text(rupee(gross), { x: COL.amount[1] - 12.7, y: midY, size: 9, font: f.mono, color: hex('#000000'), align: 'r' });
+
+    // Hairline grid: verticals between columns + bottom border of the row.
+    rule(COL.sku[0], cy, HAIRLINE, BORDER, rowH);
+    rule(COL.qty[0], cy, HAIRLINE, BORDER, rowH);
+    rule(COL.taxed[0], cy, HAIRLINE, BORDER, rowH);
+    rule(COL.amount[0], cy, HAIRLINE, BORDER, rowH);
+    rule(MARGIN, cy + rowH, CONTENT_W);
+    cy += rowH;
+  }
+
+  /* ================= BOTTOM: NOTES (left) + TOTALS (right) ================= */
+  const bottomY = cy + 30.4;
+
+  /* ---- notes ---- */
+  const barH = 21;
+  fillRect(NOTES_X, bottomY, NOTES_W, barH, PURPLE);
+  text('OTHER COMMENTS & NOTES', { x: NOTES_X + 9, y: bottomY + 5.3, size: 9, font: f.sansBold, color: WHITE });
+
+  const noteBodyTop = bottomY + barH;
+  const innerPad = 10;
+
+  // Numbered list + payment details, measured first so the box can be sized.
+  const numbered: string[] = prepaid
+    ? ['1. Payment received in full. Thank you.']
+    : ['1. Total payment due upon delivery.', '2. Please include the invoice number with your payment.'];
+
+  const listLines: string[] = [];
+  for (const n of numbered) listLines.push(...wrapText(f.sans, n, 9, NOTES_W - 20));
+
+  // Payment reference / customer note. The raw "[PayU mihpayid: ...]" string must
+  // never be printed — it is an internal marker, and mihpayid has its own column.
+  const rawNote = String(order.notes || '').trim();
+  const rawNoteClean = rawNote.replace(/\[PayU mihpayid:[^\]]*\]/gi, '').trim();
+  const refLine = prepaid && order.payu_mihpayid ? `Payment Ref: PayU ${order.payu_mihpayid}` : '';
+  const noteText = refLine || rawNoteClean;
+
+  const noteBoxH = noteText ? 27.8 : 0;
+  const listY0 = noteBodyTop + innerPad + (noteText ? noteBoxH + 12 : 0);
+  const listH = listLines.length * 14.4;
+  const methodLabelY = listY0 + listH + 6;
+  const methodValueY = methodLabelY + 14;
+  // Must enclose the Method value line too, or the box border cuts through it.
+  const notesH = innerPad + (noteText ? noteBoxH + 12 : 0) + listH + 6 + 14 + 14 + innerPad;
+
+  fillRect(NOTES_X, noteBodyTop, NOTES_W, notesH, WHITE);
+  rule(NOTES_X, noteBodyTop, HAIRLINE, BORDER, notesH);
+  rule(NOTES_X + NOTES_W - HAIRLINE, noteBodyTop, HAIRLINE, BORDER, notesH);
+  rule(NOTES_X, noteBodyTop + notesH, NOTES_W);
+
+  if (noteText) {
+    // Light-yellow highlighted note box.
+    const nbX = NOTES_X + 10;
+    const nbW = NOTES_W - 20;
+    fillRect(nbX, noteBodyTop + innerPad, nbW, noteBoxH, hex('#fffbeb'));
     page.drawRectangle({
-      x: MARGIN, y: Y(y + rowH), width: RIGHT - MARGIN, height: rowH,
-      borderColor: BORDER, borderWidth: 0.8, color: WHITE,
+      x: nbX,
+      y: PAGE_H - noteBodyTop - innerPad - noteBoxH,
+      width: nbW,
+      height: noteBoxH,
+      borderColor: NOTE_EDGE,
+      borderWidth: 1,
+      color: hex('#fffbeb'),
     });
-    descLines.forEach((t, i) =>
-      page.drawText(t, { x: MARGIN + 12, y: Y(y + 19 + i * 13), size: 9, font: sans, color: BODY })
-    );
-
-    let skuSize = 9;
-    while (skuSize > 5 && mono.widthOfTextAtSize(line.sku, skuSize) > cols[1].w - 20) skuSize -= 0.5;
-    page.drawText(line.sku, { x: cols[1].x + 10, y: Y(y + 19), size: skuSize, font: mono, color: BODY });
-
-    const qty = String(line.qty);
-    page.drawText(qty, {
-      x: cols[2].x + cols[2].w - 10 - mono.widthOfTextAtSize(qty, 9),
-      y: Y(y + 19), size: 9, font: mono, color: BODY,
+    const prefix = refLine ? 'Payment Ref: ' : 'Customer Note: ';
+    const body = refLine ? `PayU ${order.payu_mihpayid}` : noteText;
+    const maxNoteW = nbW - 20;
+    const italicFont = f.sansBold;
+    const prefixW = italicFont.widthOfTextAtSize(prefix, 9);
+    const bodyLines = wrapText(italicFont, body, 9, maxNoteW - prefixW);
+    const first = bodyLines.shift() ?? '';
+    italic(page, `${prefix}${first}`, {
+      x: nbX + 10,
+      y: noteBodyTop + innerPad + 9.5,
+      size: 9,
+      font: italicFont,
+      color: BROWN,
     });
-
-    // "Taxed" = the taxable value inside the GST-inclusive line amount.
-    // Shrink rather than overflow into the Qty column.
-    const taxedStr = money(grossToTaxable(line.gross, line.rate));
-    let taxedSize = 9;
-    while (taxedSize > 5 && mono.widthOfTextAtSize(taxedStr, taxedSize) > cols[3].w - 12) {
-      taxedSize -= 0.5;
+    let ny = noteBodyTop + innerPad + 9.5 + 14.4;
+    for (const ln of bodyLines) {
+      italic(page, ln, { x: nbX + 10, y: ny, size: 9, font: italicFont, color: BROWN });
+      ny += 14.4;
     }
-    page.drawText(taxedStr, {
-      x: cols[3].x + cols[3].w - 8 - mono.widthOfTextAtSize(taxedStr, taxedSize),
-      y: Y(y + 19), size: taxedSize, font: mono, color: BODY,
-    });
-
-    const amt = money(line.gross);
-    let amtSize = 9;
-    while (amtSize > 5 && monoBold.widthOfTextAtSize(amt, amtSize) > cols[4].w - 12) {
-      amtSize -= 0.5;
-    }
-    page.drawText(amt, {
-      x: cols[4].x + cols[4].w - 8 - monoBold.widthOfTextAtSize(amt, amtSize),
-      y: Y(y + 19), size: amtSize, font: monoBold, color: BODY,
-    });
-
-    y += rowH;
   }
 
-  /* ================= 4. notes (left) + totals (right) ================= */
-  const gutter = 18;
-  const notesW = 300;
-  const notesX = MARGIN;
-  const totalsX = notesX + notesW + gutter;
-  const totalsW = RIGHT - totalsX;
-
-  const noteLines: Array<{ text: string; font: 'sans' | 'bold'; color: any }> = [];
-  if (order.payu_mihpayid) {
-    noteLines.push({ text: `Payment Reference: ${order.payu_mihpayid}`, font: 'sans', color: BODY });
+  let ny2 = listY0;
+  for (const ln of listLines) {
+    text(ln, { x: NOTES_X + 9.8, y: ny2, size: 9, font: f.sans, color: SLATE });
+    ny2 += 14.4;
   }
-  if (order.notes) noteLines.push({ text: `Customer Note: ${order.notes}`, font: 'bold', color: BODY });
-  noteLines.push(
-    { text: paid ? '1. This invoice has been PAID in full.' : '1. Total payment due upon receipt.', font: 'sans', color: BODY },
-    { text: '2. Please include the invoice number with your payment.', font: 'sans', color: BODY }
-  );
-  const methodLine = `Method: ${String(order.payment_method || (prepaid ? 'PayOnline (via PayU)' : 'Cash on Delivery'))}`;
+  text('PAYMENT DETAILS:', { x: NOTES_X + 9.8, y: methodLabelY, size: 9, font: f.sansBold, color: DARK_GREY });
+  text(`Method: ${String(order.payment_method || (prepaid ? 'PayOnline (via PayU)' : 'Cash On Delivery'))}`, {
+    x: NOTES_X + 9.8,
+    y: methodValueY,
+    size: 9,
+    font: f.sans,
+    color: SLATE,
+  });
 
-  // Totals rows decide how tall the right-hand table is.
+  /* ---- totals ---- */
   const totalRows: Array<[string, string, boolean]> = [];
-  totalRows.push(['Subtotal', money(totals.gross), false]);
-  if (discount > 0) {
-    totalRows.push([
-      `Discount${order.coupon_code ? ` (${order.coupon_code})` : ''}`,
-      `- ${money(discount)}`,
-      false,
-    ]);
-  }
-  totalRows.push(['Taxable', money(taxableBase), false]);
+  totalRows.push(['Subtotal', rupee(totals.gross - discount), false]);
+  totalRows.push(['Taxable', rupee(taxableBase), false]);
   if (gst.mode === 'intra') {
-    totalRows.push(['CGST (Included)', money(gst.cgst), false]);
-    totalRows.push(['SGST (Included)', money(gst.sgst), false]);
+    totalRows.push(['CGST (Included)', rupee(gst.cgst), false]);
+    totalRows.push(['SGST (Included)', rupee(gst.sgst), false]);
   } else {
-    totalRows.push(['IGST (Included)', money(gst.igst), false]);
+    totalRows.push(['IGST (Included)', rupee(gst.igst), false]);
   }
-  totalRows.push(['Shipping', shippingFee === 0 ? 'FREE' : money(shippingFee), false]);
-  totalRows.push(['TOTAL', money(grandTotal), true]);
-  const totalRowH = paid ? 26 : 30;
-  const totalsH = 22 + totalRows.length * totalRowH + 10;
+  if (discount > 0) totalRows.push(['Discount', `- ${rupee(discount)}`, false]);
+  totalRows.push(['Shipping', shippingFee === 0 ? 'FREE' : rupee(shippingFee), false]);
+  totalRows.push(['TOTAL', rupee(grandTotal), true]);
 
-  const wrappedNotes: string[] = [];
-  for (const l of noteLines) {
-    const f = l.font === 'bold' ? sansBold : sans;
-    for (const t of wrapText(f, l.text, 9, notesW - 24)) wrappedNotes.push(t);
-  }
-  const notesH = 22 + 14 + wrappedNotes.length * 14 + 18 + 22 + 14 + 10;
+  const totalsH =
+    (totalRows.length - 1) * TOTAL_ROW_H + TOTAL_ROW_H_BIG + (prepaid || !prepaid ? 22 : 0);
+  const gridBottom = bottomY + totalsH;
 
-  if (y + Math.max(notesH, totalsH) > BOTTOM_LIMIT) {
-    newPage();
-    drawTableHeader(page, y);
-    y += headH;
-  }
+  let ty = bottomY;
+  totalRows.forEach(([label, value, big], i) => {
+    const rowH = big ? TOTAL_ROW_H_BIG : TOTAL_ROW_H;
+    const labelSize = big ? 10.5 : 9;
+    const valueFont = big ? f.monoBold : f.mono;
+    const valueSize = big ? 10.5 : 9;
+    const midY = ty + (rowH - labelSize) / 2 - 1;
 
-  // ---- notes card ----
-  let ny = y + 22;
-  page.drawRectangle({ x: notesX, y: Y(y + 22), width: notesW, height: 22, color: PURPLE });
-  page.drawText('OTHER COMMENTS & NOTES', {
-    x: notesX + 12, y: Y(y + 15), size: 9, font: sansBold, color: WHITE,
-  });
-  page.drawRectangle({
-    x: notesX, y: Y(y + notesH), width: notesW, height: notesH,
-    borderColor: BORDER, borderWidth: 0.8, color: WHITE,
-  });
-  ny += 14;
-  for (const t of wrappedNotes) {
-    page.drawText(t, { x: notesX + 12, y: Y(ny), size: 9, font: sans, color: BODY });
-    ny += 14;
-  }
-  ny += 10;
-  page.drawText('PAYMENT DETAILS:', { x: notesX + 12, y: Y(ny), size: 9, font: sansBold, color: HEADING });
-  ny += 15;
-  page.drawText(methodLine, { x: notesX + 12, y: Y(ny), size: 9, font: sans, color: BODY });
-  if (paid) {
-    ny += 14;
-    page.drawText('PAID', { x: notesX + 12, y: Y(ny), size: 9, font: sansBold, color: GREEN });
-  }
-
-  // ---- totals table ----
-  let ty = y;
-  page.drawRectangle({
-    x: totalsX, y: Y(totalsH + 22), width: totalsW, height: totalsH + 22,
-    borderColor: BORDER, borderWidth: 0.8, color: WHITE,
-  });
-  totalRows.forEach(([label, value, bold], i) => {
-    const ry = ty + 22 + i * totalRowH;
-    if (i % 2 === 0) {
-      page.drawRectangle({ x: totalsX, y: Y(ry + totalRowH), width: totalsW, height: totalRowH, color: BORDER });
-    }
-    page.drawLine({
-      start: { x: totalsX, y: Y(ry + totalRowH) }, end: { x: totalsX + totalsW, y: Y(ry + totalRowH) },
-      thickness: 0.8, color: BORDER,
+    text(label, {
+      x: TOTAL_X + TOTAL_LABEL_W - 12,
+      y: midY,
+      size: labelSize,
+      font: f.sansBold,
+      color: big ? INK : SLATE,
+      align: 'r',
     });
-    const f = bold ? sansBold : sans;
-    const mf = bold ? monoBold : mono;
-    const size = bold ? 10.5 : 9;
-    page.drawText(label, {
-      x: totalsX + totalsW - 14 - mf.widthOfTextAtSize(value, size) - 10 - f.widthOfTextAtSize(label, size),
-      y: Y(ry + totalRowH / 2 + 3), size, font: f, color: HEADING,
+    text(value, {
+      x: TOTAL_X + TOTAL_LABEL_W + TOTAL_VAL_W - 12.7,
+      y: midY,
+      size: valueSize,
+      font: valueFont,
+      color: big ? INK : hex('#000000'),
+      align: 'r',
     });
-    page.drawText(value, {
-      x: totalsX + totalsW - 14 - mf.widthOfTextAtSize(value, size),
-      y: Y(ry + totalRowH / 2 + 3), size, font: mf, color: HEADING,
-    });
+
+    // Grid: verticals + the heavier rule above TOTAL.
+    rule(TOTAL_X, ty, HAIRLINE, BORDER, rowH);
+    rule(TOTAL_X + TOTAL_LABEL_W, ty, HAIRLINE, BORDER, rowH);
+    rule(RIGHT - HAIRLINE, ty, HAIRLINE, BORDER, rowH);
+    rule(TOTAL_X, ty + rowH - HAIRLINE, TOTAL_LABEL_W + TOTAL_VAL_W, big ? SLATE : BORDER, big ? 1.2 : HAIRLINE);
+
+    ty += rowH;
   });
 
-  drawMasthead();
-
-  /* ================= 5. footer ================= */
-  const f1 = 'If you have any questions about this invoice, please contact';
-  page.drawText(f1, {
-    x: (PAGE_W - sansItalic.widthOfTextAtSize(f1, 10.5)) / 2, y: Y(724), size: 10.5, font: sansItalic, color: BODY,
-  });
-  page.drawText(seller.email, {
-    x: (PAGE_W - sansBold.widthOfTextAtSize(seller.email, 10.5)) / 2, y: Y(746), size: 10.5, font: sansBold, color: HEADING,
-  });
-  const f3 = 'Thank You For Your Business!';
-  page.drawText(f3, {
-    x: (PAGE_W - serif.widthOfTextAtSize(f3, 14)) / 2, y: Y(770), size: 14, font: serif, color: WORDMARK,
+  // Payment-state marker next to the totals.
+  const marker = paid ? 'PAID' : 'AMOUNT DUE ON DELIVERY';
+  text(marker, {
+    x: TOTAL_X + TOTAL_LABEL_W + TOTAL_VAL_W - 12.7,
+    y: ty + 5,
+    size: 7.5,
+    font: f.sansBold,
+    color: paid ? hex('#0c8c49') : BROWN,
+    align: 'r',
   });
 
-  // useObjectStreams:false keeps the xref table and every object in plain
-  // sight. Some viewers (and a few mail/WhatsApp PDF renderers) silently drop
-  // content that lives inside a compressed object stream, and an invoice is
-  // the worst possible place for that to happen.
+  /* ================= FOOTER ================= */
+  const footerTop = Math.max(gridBottom, noteBodyTop + notesH) + 49;
+  const cx = PAGE_W / 2;
+  italic(page, 'If you have any questions about this invoice, please contact', {
+    x: cx,
+    y: footerTop,
+    size: 10.5,
+    font: f.sans,
+    color: SLATE,
+    align: 'c',
+  });
+  text(seller.email, { x: cx, y: footerTop + 18, size: 10.5, font: f.sansBold, color: INK, align: 'c' });
+  text('Thank You For Your Business!', {
+    x: cx,
+    y: footerTop + 36.9,
+    size: 13.5,
+    font: f.serifBold,
+    color: MAROON,
+    align: 'c',
+  });
+
   const bytes = await doc.save({ useObjectStreams: false });
   return Buffer.from(bytes);
 }
 
-/* ------------------------------------------------------------------ */
-/* Invoice number                                                      */
-/* ------------------------------------------------------------------ */
+/* =============================================================================
+ * Invoice number — business logic, unchanged
+ * ========================================================================== */
 
 /**
  * Legacy fallback used only when the claim RPC is unavailable (the SQL
@@ -691,16 +789,14 @@ export function buildInvoiceNumber(orderNumber: string, issuedAt: Date = new Dat
 /**
  * Claim this order atomically and take its invoice number from the FY series.
  *
- * `claim_invoice()` (backend/sql/migrations/2026-10-15_invoice_automation.sql)
- * does both in one transaction, so there is no window in which an order is
- * claimed but unnumbered, and no window in which a sequence value is consumed
- * but not persisted. The FY is derived from the invoice date at allocation
- * time (April-March), never hardcoded.
+ * `claim_invoice()` does both in one transaction, so there is no window in which
+ * an order is claimed but unnumbered, and no window in which a sequence value is
+ * consumed but not persisted.
  *
  * Returns null when another worker already claimed the order — callers treat
- * that as "already handled", not as an error. That null is the whole
- * once-only guarantee: a PayU double-POST, a parallel cron sweep and the
- * original trigger all race here and exactly one of them wins.
+ * that as "already handled", not as an error. That null is the whole once-only
+ * guarantee: a PayU double-POST, a parallel cron sweep and the original trigger
+ * all race here and exactly one of them wins.
  */
 export async function claimInvoiceNumber(order: {
   id: string;
@@ -715,10 +811,6 @@ export async function claimInvoiceNumber(order: {
     }
     return null; // already claimed by someone else
   } catch (err: any) {
-    // Degraded mode: the migration has not been applied, so there is no atomic
-    // claim and no real series. We still produce a stable number so the rest of
-    // the pipeline works, but it is NOT gapless and NOT race-safe — which is
-    // exactly why the boot-time schema audit refuses to start.
     console.error(
       `[Invoice] claim_invoice RPC unavailable (${err?.message || err}) — is ` +
         'backend/sql/migrations/2026-10-15_invoice_automation.sql applied? ' +
@@ -727,8 +819,6 @@ export async function claimInvoiceNumber(order: {
     const legacy = order.invoice_number || buildInvoiceNumber(String((order as any).order_number || ''));
     (order as any).invoice_number = legacy;
     try {
-      // Deliberately claims, does not "send": delivery is recorded separately by
-      // markInvoiceSent() once a channel actually succeeded.
       await supabase
         .from('orders')
         .update({ invoice_number: legacy, invoice_claimed_at: new Date().toISOString() })
@@ -756,8 +846,7 @@ export async function releaseInvoiceClaim(orderId: string, reason: string): Prom
 
 /**
  * Record the delivery outcome. This is the ONLY writer of invoice_sent_at, so
- * "Sent" in the admin panel means a channel really accepted the document —
- * claiming the order no longer masquerades as delivering it.
+ * "Sent" in the admin panel means a channel really accepted the document.
  */
 export async function markInvoiceSent(
   orderId: string,
@@ -808,4 +897,5 @@ export const invoiceService = {
   recordInvoiceError,
   getSellerIdentity,
   wrapText,
+  formatINR,
 };

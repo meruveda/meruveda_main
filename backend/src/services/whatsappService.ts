@@ -302,8 +302,8 @@ export async function sendDocumentTemplate(options: {
       to: phone,
       type: 'template',
       template: {
-        name: options.templateName || WHATSAPP_TEMPLATES.INVOICE_WITH_DOCUMENT,
-        language: { code: 'en' },
+        name: options.templateName || config.whatsappInvoiceTemplateName || WHATSAPP_TEMPLATES.INVOICE_WITH_DOCUMENT,
+        language: { code: options.templateName ? 'en' : config.whatsappInvoiceTemplateLang || 'en' },
         components: [
           // Header component MUST come before the body component.
           { type: 'header', parameters: [{ type: 'document', document: { id: mediaId } }] },
