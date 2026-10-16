@@ -1,9 +1,15 @@
 "use client";
 
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
+import {
+  reviewsForProduct,
+  sortReviews,
+  summarize,
+  type ReviewSort,
+} from '@/data/reviews';
 import Image from 'next/image';
 import { useRouter } from 'next/navigation';
-import { Minus, Plus, ShoppingCart, Sparkles, Droplets, Star, Loader2, ArrowRight } from 'lucide-react';
+import { Minus, Plus, ShoppingCart, Sparkles, Droplets, Star, Loader2, ArrowRight, BadgeCheck } from 'lucide-react';
 import { useCart } from '@/context/CartContext';
 import { useAuth } from '@/context/AuthContext';
 import { track } from '@/lib/analytics';
@@ -34,72 +40,23 @@ export default function ProductDetailClient({ product }: { product: any }) {
     });
   }, [product?.id]);
 
-  const [reviews, setReviews] = useState<any[]>([]);
-  const [loadingReviews, setLoadingReviews] = useState(true);
-  const [hasPurchased, setHasPurchased] = useState(false);
-  const [newRating, setNewRating] = useState(5);
-  const [newComment, setNewComment] = useState('');
-  const [submittingReview, setSubmittingReview] = useState(false);
-  const [reviewError, setReviewError] = useState<string | null>(null);
-  const [reviewSuccess, setReviewSuccess] = useState(false);
+  /**
+ * Reviews are a static, human-curated list (src/data/reviews.ts) — real reviews
+ * from customers who gave permission, never generated rows and never a submit
+ * form. There is no review POST and no moderation queue: a review gets added to
+ * that file by a human, or it does not exist.
+ *
+ * The list currently ships empty, which is why there is no loading state and no
+ * empty-state spinner: there is nothing to wait for.
+ */
+const [sort, setSort] = useState<ReviewSort>('newest');
+  const reviews = useMemo(() => {
+  const list = reviewsForProduct(product.slug || product.name || '');
+  return sortReviews(list, sort);
+}, [product.slug, product.name, sort]);
 
-  React.useEffect(() => {
-    const fetchReviews = async () => {
-      try {
-        const { default: axiosInstance } = await import('@/api/axiosInstance');
-        const res = await axiosInstance.get(`/reviews?productId=${product.id}&status=approved`);
-        if (res.data?.data) {
-          setReviews(res.data.data);
-        }
-      } catch (err) {
-        console.error("Failed to fetch reviews", err);
-      } finally {
-        setLoadingReviews(false);
-      }
-    };
-    fetchReviews();
-  }, [product.id, reviewSuccess]);
+const ratingSummary = useMemo(() => summarize(reviewsForProduct(product.slug || product.name || '')), [product.slug, product.name]);
 
-  React.useEffect(() => {
-    if (!isAuthenticated) return;
-    const checkPurchase = async () => {
-      try {
-        const { default: axiosInstance } = await import('@/api/axiosInstance');
-        const res = await axiosInstance.get('/orders/my');
-        const orders = res.data?.data || [];
-        const bought = orders.some((order: any) => 
-          (order.order_items || []).some((item: any) => item.product_id === product.id)
-        );
-        setHasPurchased(bought);
-      } catch (err) {
-        console.error("Failed to verify purchase history", err);
-      }
-    };
-    checkPurchase();
-  }, [isAuthenticated, product.id]);
-
-  const handleReviewSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setReviewError(null);
-    setReviewSuccess(false);
-    setSubmittingReview(true);
-
-    try {
-      const { default: axiosInstance } = await import('@/api/axiosInstance');
-      await axiosInstance.post('/reviews', {
-        product_id: product.id,
-        rating: newRating,
-        comment: newComment
-      });
-      setReviewSuccess(true);
-      setNewComment('');
-      setNewRating(5);
-    } catch (err: any) {
-      setReviewError(err.response?.data?.error?.message || err.message || "Failed to submit review");
-    } finally {
-      setSubmittingReview(false);
-    }
-  };
 
   const cartItem = cart.find((item: any) => item.id === product.id);
 
@@ -494,195 +451,135 @@ export default function ProductDetailClient({ product }: { product: any }) {
           </div>
         </div>
 
-        {/* Ratings & Reviews Section */}
+{/* Reviews — a static, curated list of real customer reviews.
+            No submit form and no moderation: a review exists because a human
+            added it to src/data/reviews.ts. */}
         <div className="mt-20 pt-16 border-t border-stone-200">
-          <h3 className="text-3xl font-fraunces font-medium text-plum-deep mb-8">Ratings & Reviews</h3>
-          
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-12 items-start">
-            {/* Left: Summary */}
-            <div className="bg-white p-6 rounded-2xl border border-stone-100 space-y-4">
-              <h4 className="text-lg font-bold text-plum-deep uppercase tracking-wider text-xs">Customer Sentiment</h4>
-              {reviews.length > 0 ? (
-                <>
-                  <div className="flex items-center gap-3">
-                    <span className="text-5xl font-fraunces font-bold text-plum-deep">
-                      {(reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length).toFixed(1)}
-                    </span>
-                    <div>
-                      <div className="flex gap-0.5">
-                        {Array.from({ length: 5 }).map((_, i) => {
-                          const avg = reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length;
-                          return (
-                            <Star
-                              key={i}
-                              size={16}
-                              className={`${
-                                i < Math.round(avg) ? 'text-gold-antique fill-gold-antique' : 'text-stone-200'
-                              }`}
-                            />
-                          );
-                        })}
-                      </div>
-                      <p className="text-xs text-gray-500 mt-1">Based on {reviews.length} reviews</p>
-                    </div>
-                  </div>
-                  
-                  {/* Rating bars */}
-                  <div className="space-y-2 pt-2">
-                    {[5, 4, 3, 2, 1].map((stars) => {
-                      const count = reviews.filter(r => r.rating === stars).length;
-                      const percent = reviews.length > 0 ? (count / reviews.length) * 100 : 0;
-                      return (
-                        <div key={stars} className="flex items-center gap-3 text-xs text-plum-deep/80">
-                          <span className="w-3 text-right font-medium">{stars}</span>
-                          <Star size={12} className="text-gold-antique fill-gold-antique" />
-                          <div className="flex-1 h-2 bg-stone-100 rounded-full overflow-hidden">
-                            <div className="h-full bg-gold-antique rounded-full" style={{ width: `${percent}%` }} />
-                          </div>
-                          <span className="w-8 text-right text-gray-400">{count}</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </>
-              ) : (
-                <p className="text-sm text-gray-500">No reviews yet for this product. Be the first to share your thoughts!</p>
-              )}
+          <h3 className="text-3xl font-fraunces font-medium text-plum-deep mb-8">Ratings &amp; Reviews</h3>
+
+          {ratingSummary.total === 0 ? (
+            <div className="bg-white p-10 rounded-2xl border border-stone-100 text-center">
+              <p className="text-lg text-stone-600 mb-1">Be the first to review</p>
+              <p className="text-sm text-stone-400">
+                No customer has reviewed this product yet.
+              </p>
             </div>
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-12 items-start">
+              {/* Left: summary + 5-to-1 breakdown */}
+              <div className="bg-white p-6 rounded-2xl border border-stone-100 space-y-4">
+                <div className="flex items-baseline gap-2">
+                  <span className="text-5xl font-fraunces font-bold text-plum-deep">
+                    {ratingSummary.average.toFixed(1)}
+                  </span>
+                  <span className="text-stone-400">out of 5</span>
+                </div>
+                <div className="flex text-gold-antique">
+                  {[1, 2, 3, 4, 5].map((s) => (
+                    <Star
+                      key={s}
+                      size={16}
+                      className={s <= Math.round(ratingSummary.average) ? 'fill-gold-antique' : ''}
+                    />
+                  ))}
+                </div>
+                <p className="text-xs text-stone-500">
+                  Based on {ratingSummary.total} review{ratingSummary.total === 1 ? '' : 's'}
+                </p>
 
-            {/* Right/Middle: Reviews List & Write Form */}
-            <div className="lg:col-span-2 space-y-10">
-              {/* Write a Review Card */}
-              <div className="bg-white p-6 rounded-2xl border border-stone-100">
-                <h4 className="text-lg font-fraunces font-medium text-plum-deep mb-4">Write a Customer Review</h4>
-                {!isAuthenticated ? (
-                  <p className="text-sm text-gray-500">
-                    Please{' '}
-                    <button 
-                      onClick={() => router.push(`/login?returnUrl=/products/${product.id}`)}
-                      className="text-gold-antique font-semibold hover:underline"
-                    >
-                      log in
-                    </button>{' '}
-                    to leave a review.
-                  </p>
-                ) : !hasPurchased ? (
-                  <div className="p-4 bg-amber-50 border border-amber-100 rounded-xl text-xs text-amber-800 leading-relaxed">
-                    🛡️ <strong>Verified Buyer Check:</strong> You can only review products you have purchased. If you bought this product recently, please make sure your order status is updated.
-                  </div>
-                ) : reviewSuccess ? (
-                  <div className="p-4 bg-emerald-50 border border-emerald-100 rounded-xl text-xs text-emerald-800">
-                    🎉 Thank you! Your review has been submitted and is awaiting approval.
-                  </div>
-                ) : (
-                  <form onSubmit={handleReviewSubmit} className="space-y-4">
-                    {reviewError && (
-                      <div className="p-3 bg-rose-50 border border-rose-100 text-xs text-rose-700 rounded-lg">
-                        {reviewError}
+                {/* Every rating is shown. Nothing is filtered out, because a
+                    distribution that hides the 1-star column is not a
+                    distribution. */}
+                <div className="space-y-1.5 pt-2">
+                  {[5, 4, 3, 2, 1].map((stars) => {
+                    const count = ratingSummary.breakdown[stars as 1 | 2 | 3 | 4 | 5];
+                    const percent = ratingSummary.total
+                      ? (count / ratingSummary.total) * 100
+                      : 0;
+                    return (
+                      <div key={stars} className="flex items-center gap-2 text-xs">
+                        <span className="w-8 text-stone-500">{stars} star</span>
+                        <div className="flex-1 h-2 bg-stone-100 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-gold-antique rounded-full"
+                            style={{ width: `${percent}%` }}
+                          />
+                        </div>
+                        <span className="w-6 text-right text-stone-400">{count}</span>
                       </div>
-                    )}
-                    <div>
-                      <label className="block text-xs font-semibold uppercase tracking-wider text-gray-500 mb-1.5">Rating</label>
-                      <div className="flex gap-1.5">
-                        {[1, 2, 3, 4, 5].map((num) => (
-                          <button
-                            key={num}
-                            type="button"
-                            onClick={() => setNewRating(num)}
-                            className="hover:scale-115 transition-transform"
-                          >
-                            <Star
-                              size={28}
-                              className={`${
-                                num <= newRating ? 'text-gold-antique fill-gold-antique' : 'text-stone-200'
-                              }`}
-                            />
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold uppercase tracking-wider text-gray-500 mb-1.5">Review Comment</label>
-                      <textarea
-                        required
-                        value={newComment}
-                        onChange={(e) => setNewComment(e.target.value)}
-                        placeholder="Share your experience using this product. What did you like or dislike?"
-                        className="w-full min-h-[100px] border border-stone-200 rounded-xl p-3 text-sm focus:border-gold-antique focus:ring-1 focus:ring-gold-antique outline-none transition-all"
-                      />
-                    </div>
-
-                    <button
-                      type="submit"
-                      disabled={submittingReview}
-                      className="px-6 h-[44px] bg-gold-antique hover:bg-[#A37E33] disabled:opacity-50 text-white rounded-lg text-xs font-bold uppercase tracking-wider flex items-center justify-center gap-2 transition-colors"
-                    >
-                      {submittingReview && <Loader2 size={14} className="animate-spin" />}
-                      Submit Review
-                    </button>
-                  </form>
-                )}
+                    );
+                  })}
+                </div>
               </div>
 
-              {/* Reviews List */}
-              <div className="space-y-6">
-                <h4 className="text-lg font-fraunces font-medium text-plum-deep border-b border-stone-100 pb-3">
-                  Reviews ({reviews.length})
-                </h4>
-                {loadingReviews ? (
-                  <div className="flex items-center gap-2 text-stone-400 text-sm">
-                    <Loader2 size={16} className="animate-spin" /> Loading reviews...
-                  </div>
-                ) : reviews.length === 0 ? (
-                  <p className="text-sm text-gray-400 italic">No approved reviews yet.</p>
-                ) : (
-                  <div className="space-y-6 divide-y divide-stone-100">
-                    {reviews.map((rev) => (
-                      <div key={rev.id} className="pt-6 first:pt-0 space-y-2">
-                        <div className="flex items-center justify-between">
-                          <p className="font-semibold text-sm text-plum-deep">
-                            {rev.users ? `${rev.users.first_name || ''} ${rev.users.last_name || ''}`.trim() || 'Verified Customer' : 'Verified Customer'}
-                          </p>
-                          <span className="text-xs text-gray-400">
-                            {new Date(rev.created_at).toLocaleDateString("en-IN", {
-                              day: "numeric",
-                              month: "short",
-                              year: "numeric"
-                            })}
-                          </span>
+              {/* Right: the full list, every rating visible, sortable */}
+              <div className="lg:col-span-2 space-y-6">
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <h4 className="text-lg font-fraunces font-medium text-plum-deep">
+                    All {ratingSummary.total} review{ratingSummary.total === 1 ? '' : 's'}
+                  </h4>
+                  <label className="flex items-center gap-2 text-xs text-stone-500">
+                    Sort
+                    <select
+                      value={sort}
+                      onChange={(e) => setSort(e.target.value as ReviewSort)}
+                      className="border border-stone-200 rounded-lg px-2 py-1 text-xs bg-white"
+                    >
+                      <option value="newest">Newest</option>
+                      <option value="highest">Highest rated</option>
+                      <option value="lowest">Lowest rated</option>
+                    </select>
+                  </label>
+                </div>
+
+                {reviews.map((rev) => (
+                  <article
+                    key={rev.id}
+                    className="bg-white p-6 rounded-2xl border border-stone-100 space-y-2"
+                  >
+                    <div className="flex items-start justify-between gap-3 flex-wrap">
+                      <div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-bold text-plum-deep">{rev.name}</span>
+                          {rev.city && <span className="text-xs text-stone-400">{rev.city}</span>}
+                          {/* Only when the review really is verified. */}
+                          {rev.verified && (
+                            <span className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-green-700 bg-green-50 border border-green-200 rounded-full px-2 py-0.5">
+                              <BadgeCheck size={11} /> Verified
+                            </span>
+                          )}
                         </div>
-                        
-                        <div className="flex gap-0.5">
-                          {Array.from({ length: 5 }).map((_, i) => (
+                        {/* Renders all five slots so a 3-star review visibly shows
+                            two empty stars — a hidden half-rating is misleading. */}
+                        <div className="flex text-gold-antique mt-1">
+                          {[1, 2, 3, 4, 5].map((s) => (
                             <Star
-                              key={i}
-                              size={12}
-                              className={`${
-                                i < rev.rating ? 'text-gold-antique fill-gold-antique' : 'text-stone-200'
-                              }`}
+                              key={s}
+                              size={13}
+                              className={s <= rev.rating ? 'fill-gold-antique' : ''}
                             />
                           ))}
                         </div>
-                        
-                        <p className="text-sm text-plum-deep/80 leading-relaxed italic">"{rev.comment || rev.body}"</p>
-                        
-                        {rev.reply && (
-                          <div className="ml-6 mt-3 bg-stone-50 border border-stone-100 p-4 rounded-xl text-xs space-y-1">
-                            <p className="font-bold text-[#C09E5A]">🛡️ Response from MeruVeda Wellness</p>
-                            <p className="text-plum-deep/80 leading-relaxed">{rev.reply}</p>
-                          </div>
-                        )}
                       </div>
-                    ))}
-                  </div>
-                )}
+                      <time dateTime={rev.date} className="text-xs text-stone-400">
+                        {new Date(rev.date).toLocaleDateString('en-IN', {
+                          day: 'numeric',
+                          month: 'short',
+                          year: 'numeric',
+                        })}
+                      </time>
+                    </div>
+                    {rev.title && (
+                      <h5 className="font-semibold text-plum-deep">{rev.title}</h5>
+                    )}
+                    <p className="text-sm text-stone-600 leading-relaxed">{rev.text}</p>
+                  </article>
+                ))}
               </div>
             </div>
-          </div>
+          )}
         </div>
       </div>
     </div>
   );
 }
-

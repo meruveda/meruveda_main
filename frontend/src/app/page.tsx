@@ -3,6 +3,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { Search, Leaf, ShieldCheck, Heart, Wind, Sparkles, Droplet, Star, ArrowRight } from "lucide-react";
 import FeaturedProducts from "@/components/FeaturedProducts";
+import { reviews } from "@/data/reviews";
 import HeroCarousel from "@/components/HeroCarousel";
 import WhyChooseUs from "@/components/WhyChooseUs";
 import { API_BASE_URL } from "@/utils/apiUrl";
@@ -79,20 +80,28 @@ async function getFeaturedProducts() {
   }
 }
 
-async function getFeaturedReviews() {
-  try {
-    const res = await fetch(`${API_BASE_URL}/reviews/featured`, { cache: 'no-store' });
-    if (!res.ok) return [];
-    const json = await res.json();
-    return (json.data || []).map((r: any) => ({
-      text: r.comment || r.body || '',
-      author: r.users ? `${r.users.first_name || ''} ${(r.users.last_name || '')[0] || ''}.`.trim() : (r.customerName || 'Customer'),
-      product: r.products?.name || r.productName || '',
-      rating: r.rating || 5,
+/**
+ * "What customers say" reads from the static, human-curated list, not the
+ * database.
+ *
+ * The old version called /reviews/featured and mapped rows into review cards. It
+ * had two problems: it depended on a database feature that may not exist, and
+ * it surfaced whatever the database happened to contain. Curated real reviews
+ * are safer and honest by construction, and the section hides itself entirely
+ * while the list is empty rather than showing filler.
+ */
+function getHomepageReviews() {
+  return reviews
+    .slice()
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .slice(0, 6)
+    .map((r) => ({
+      text: r.text,
+      author: r.name,
+      product: r.productSlug === 'all' ? '' : r.productSlug,
+      rating: r.rating,
+      verified: r.verified === true,
     }));
-  } catch {
-    return [];
-  }
 }
 
 async function getBlogPosts() {
@@ -111,18 +120,20 @@ async function getBlogPosts() {
   }
 }
 
+/** The card shape the "What customers say" section renders. */
 interface Review {
   text: string;
   author: string;
   product: string;
   rating: number;
+  verified: boolean;
 }
 
 export default async function Home() {
   const [products, banners, featuredReviews, blogPosts] = await Promise.all([
     getFeaturedProducts(),
     getBanners(),
-    getFeaturedReviews(),
+    Promise.resolve(getHomepageReviews()),
     getBlogPosts(),
   ]);
 
@@ -222,11 +233,10 @@ export default async function Home() {
         <section className="py-24 bg-white">
           <div className="container mx-auto px-6">
             <div className="text-center mb-16">
-              <h2 className="text-4xl font-playfair font-bold text-deep-purple mb-4">What Our Community Says</h2>
-              <div className="flex justify-center gap-1 mb-4">
-                {[1, 2, 3, 4, 5].map(i => <Star key={i} className="text-gold fill-gold" size={24} />)}
-              </div>
-              <p className="text-gray-600">Trusted by thousands on their wellness journey.</p>
+              <h2 className="text-4xl font-playfair font-bold text-deep-purple mb-4">What customers say</h2>
+              <p className="text-gray-600">
+                Real reviews from customers who gave permission to publish them.
+              </p>
             </div>
 
             <div className="grid md:grid-cols-3 gap-8">
@@ -241,12 +251,19 @@ export default async function Home() {
                     <div>
                       <div className="flex items-center gap-1.5 mb-0.5">
                         <h5 className="font-bold text-deep-purple">{review.author}</h5>
-                        <ShieldCheck size={14} className="text-green-600" />
+                        {/* Only claim "verified" when the review actually is. */}
+                        {review.verified && (
+                          <span title="Verified customer">
+                            <ShieldCheck size={14} className="text-green-600" />
+                          </span>
+                        )}
                       </div>
                       <div className="flex text-gold mb-1">
                         {[1, 2, 3, 4, 5].map(star => <Star key={star} size={12} className={star <= (review.rating || 5) ? "fill-gold" : ""} />)}
                       </div>
-                      <div className="text-xs text-gray-500 font-medium">Purchased: <span className="text-deep-purple">{review.product}</span></div>
+                      {review.product && (
+                        <div className="text-xs text-gray-500 font-medium">Purchased: <span className="text-deep-purple">{review.product}</span></div>
+                      )}
                     </div>
                   </div>
                 </div>

@@ -67,6 +67,17 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
     // with nothing recorded. waitUntil() extends the invocation instead.
     keepAlive(postOrderConfirmed(data.id, { source: 'order_placement' }));
 
+    // Opportunistic delivery sweep. When the WhatsApp slot was empty at issue
+    // time (Meta is not active yet) those invoices are simply waiting; once the
+    // slot is filled in, the next order placed picks them up. This runs inside
+    // waitUntil so it never touches the response, and it no-ops immediately when
+    // the slot is still empty — so the daily cron can stay fail-closed.
+    keepAlive(
+      invoiceDispatchService
+        .retryPendingInvoices(5)
+        .catch((err: any) => console.error('[Invoice] backfill sweep failed:', err?.message || err))
+    );
+
     res.status(201).json({ data });
   } catch (error) {
     next(error);
