@@ -6,7 +6,6 @@ import Link from "next/link";
 import { Download, Eye, Package, Search, Truck } from "lucide-react";
 import { orderService } from "@/services/accountService";
 import { downloadInvoicePdf } from "@/services/invoiceDownload";
-import { isInvoiceAvailable } from "@/lib/invoiceAvailability";
 import type { AccountOrder } from "@/types/account";
 import { EmptyState, ErrorBox, SectionHeader, SkeletonCard, StatusBadge } from "@/components/account/ui";
 import { Toast, useToast } from "@/components/ui/Toast";
@@ -194,21 +193,14 @@ export default function OrdersPage() {
                         <Truck size={14} /> Track Order
                       </Link>
                     )}
-                    {isInvoiceAvailable(order) ? (
-                      <button
-                        onClick={() => invoice(order)}
-                        className="flex items-center gap-1.5 px-3.5 py-2 border border-gray-200 hover:bg-gray-50 rounded-lg text-xs font-semibold text-gray-700 transition-colors"
-                      >
-                        <Download size={14} /> Invoice
-                      </button>
-                    ) : (
-                      <span
-                        title="The invoice is issued once payment is verified"
-                        className="flex items-center gap-1.5 px-3.5 py-2 border border-gray-100 bg-gray-50 rounded-lg text-xs font-semibold text-gray-400 cursor-not-allowed"
-                      >
-                        <Download size={14} /> Invoice
-                      </span>
-                    )}
+                    {/* The invoice is issued at order creation for every order, so this is
+                        always available — never a disabled placeholder. */}
+                    <button
+                      onClick={() => invoice(order)}
+                      className="flex items-center gap-1.5 px-3.5 py-2 border border-gray-200 hover:bg-gray-50 rounded-lg text-xs font-semibold text-gray-700 transition-colors"
+                    >
+                      <Download size={14} /> Invoice
+                    </button>
                     <Link
                       href={`/account/orders/${encodeURIComponent(order.id)}`}
                       className="flex items-center gap-1.5 px-3.5 py-2 bg-deep-purple text-white hover:bg-deep-purple/90 rounded-lg text-xs font-bold transition-colors"

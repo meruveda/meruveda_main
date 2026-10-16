@@ -17,7 +17,6 @@ import {
 } from "lucide-react";
 import { orderService } from "@/services/accountService";
 import { downloadInvoicePdf } from "@/services/invoiceDownload";
-import { isInvoiceAvailable, invoiceUnavailableNote } from "@/lib/invoiceAvailability";
 import type { AccountOrder } from "@/types/account";
 import { Toast, useToast } from "@/components/ui/Toast";
 import {
@@ -109,10 +108,6 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
 
   const trackingCode = order.awbCode || order.trackingNumber;
   const canReview = order.normalizedStatus === "delivered";
-  // Cash on Delivery is invoiced at placement; prepaid only once PayU has
-  // verified payment. Offering a download before that would 409.
-  const invoiceReady = isInvoiceAvailable(order);
-  const invoiceNote = invoiceUnavailableNote(order);
 
   return (
     <div className="space-y-6">
@@ -122,27 +117,24 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
           <ArrowLeft size={14} /> All orders
         </button>
         <div className="flex gap-2">
-          {invoiceReady ? (
-            <button
-              onClick={handleDownloadInvoice}
-              disabled={downloadingInvoice}
-              className="flex items-center gap-1.5 px-3.5 py-2 border border-gray-200 hover:bg-gray-50 rounded-lg text-xs font-semibold text-gray-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
-            >
-              {downloadingInvoice ? (
-                <>
-                  <Loader2 size={14} className="animate-spin" /> Preparing…
-                </>
-              ) : (
-                <>
-                  <Download size={14} /> Download invoice
-                </>
-              )}
-            </button>
-          ) : (
-            <span className="px-3.5 py-2 text-xs font-semibold text-gray-400 bg-gray-50 rounded-lg border border-gray-100">
-              {invoiceNote}
-            </span>
-          )}
+          {/* Always available: the invoice is issued at order creation for
+              every order, COD and prepaid alike. The only disabled state is the
+              in-flight spinner while the file is fetched. */}
+          <button
+            onClick={handleDownloadInvoice}
+            disabled={downloadingInvoice}
+            className="flex items-center gap-1.5 px-3.5 py-2 border border-gray-200 hover:bg-gray-50 rounded-lg text-xs font-semibold text-gray-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            {downloadingInvoice ? (
+              <>
+                <Loader2 size={14} className="animate-spin" /> Preparing…
+              </>
+            ) : (
+              <>
+                <Download size={14} /> Download invoice
+              </>
+            )}
+          </button>
         </div>
       </div>
 

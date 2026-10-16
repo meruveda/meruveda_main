@@ -289,7 +289,7 @@ test('a verified-paid prepaid order is stamped PAID with its PayU reference', ()
   const w = paymentWordingFor({
     payment_method: 'PayU',
     payment_status: 'paid',
-    payu_mihpayid: 'PAY123456789',
+    notes: 'Leave at reception [PayU mihpayid: PAY123456789]',
   });
   assert.equal(w.wording, 'PAID');
   assert.equal(w.paid, true);
@@ -300,7 +300,7 @@ test('an unpaid prepaid order stays neutral: no PAID stamp, no reference', () =>
   const w = paymentWordingFor({
     payment_method: 'PayU',
     payment_status: 'pending',
-    payu_mihpayid: 'PAY123456789',
+    notes: 'Leave at reception [PayU mihpayid: PAY123456789]',
   });
   assert.equal(w.wording, 'Payment: Online (via PayU)');
   assert.equal(w.paid, false);

@@ -69,8 +69,8 @@ export interface Order {
   notes?: string
   /** GST-series number, e.g. MV/26-27/000123. Null until an invoice is issued. */
   invoiceNumber?: string | null
-  /** PayU's payment reference (mihpayid), printed in the invoice notes box. */
-  payuMihpayid?: string | null
+  /** When the invoice was issued, read from the Storage state file. */
+  invoiceIssuedAt?: string | null
   /** Set only when a delivery channel accepted the document, never on claim. */
   invoiceSentAt?: string | null
   /** Last delivery failure reason; the cron sweep retries while attempts remain. */

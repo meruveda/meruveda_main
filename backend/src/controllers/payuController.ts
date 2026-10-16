@@ -207,18 +207,17 @@ export const handlePayUCallback = async (req: Request, res: Response, next: Next
         return res.redirect(`${storefrontBaseUrl(req)}/checkout/failed?order_id=${order.id}&reason=${encodeURIComponent('Payment amount mismatch. Please contact support if money was deducted.')}`);
       }
 
-      // Mark as paid / processing.
-      // payu_mihpayid gets its OWN column — the invoice notes box reads it
-      // directly instead of regex-parsing it back out of the notes blob.
-      const paidPatch: Record<string, unknown> = {
-        status: 'processing',
-        payment_status: 'paid',
-        notes: `${order.notes || ''} [PayU mihpayid: ${mihpayid}]`.trim(),
-      };
-      if (mihpayid && (await hasColumn('orders', 'payu_mihpayid'))) {
-        paidPatch.payu_mihpayid = mihpayid;
-      }
-      await supabase.from('orders').update(paidPatch).eq('id', order.id);
+      // Mark as paid / processing. The PayU reference is recorded in the notes
+      // marker, which is the only place it is stored — the invoice reads it back
+      // from there rather than depending on a dedicated column.
+      await supabase
+        .from('orders')
+        .update({
+          status: 'processing',
+          payment_status: 'paid',
+          notes: `${order.notes || ''} [PayU mihpayid: ${mihpayid}]`.trim(),
+        })
+        .eq('id', order.id);
 
       await upsertTransaction('success', 'captured');
 

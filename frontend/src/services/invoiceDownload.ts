@@ -25,27 +25,46 @@ async function extractErrorMessage(err: unknown): Promise<string> {
     return String(body.error.message);
   }
 
-  if (anyErr?.response?.status === 409) {
-    return "The invoice will be available after payment is verified.";
-  }
   if (anyErr?.response?.status === 403) {
     return "You do not have access to this invoice.";
   }
+  if (anyErr?.response?.status === 404) {
+    return "Order not found.";
+  }
+  if (anyErr?.response?.status === 410) {
+    return "This invoice was already issued and its stored file is no longer available. Contact support for a copy.";
+  }
   if (anyErr?.response?.status === 503) {
-    return "Invoices are unavailable right now. Please try again shortly.";
+    return "Your invoice is being prepared. Please try again in a moment.";
   }
   return anyErr?.message || "Could not download the invoice.";
+}
+
+/**
+ * The filename the browser will save.
+ *
+ * The server sends `Content-Disposition: attachment; filename="Invoice-<n>.pdf"`,
+ * so the invoice number from the authoritative header is preferred; this is only
+ * the fallback for when the header is missing.
+ */
+function filenameFromDisposition(disposition: string | undefined, fallback: string): string {
+  const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition || "");
+  if (!match) return fallback;
+  const name = decodeURIComponent(match[1].trim());
+  return /^[\w.-]+\.pdf$/i.test(name) ? name : fallback;
 }
 
 export async function downloadInvoicePdf(orderId: string, orderNumber?: string | null): Promise<string> {
   const { default: axiosInstance } = await import("@/api/axiosInstance");
 
   let blob: Blob;
+  let disposition: string | undefined;
   try {
     const res = await axiosInstance.get(`/orders/${encodeURIComponent(orderId)}/invoice`, {
       responseType: "blob",
     });
     blob = res.data as Blob;
+    disposition = res.headers?.["content-disposition"];
   } catch (err) {
     throw new Error(await extractErrorMessage(err));
   }
@@ -63,7 +82,10 @@ export async function downloadInvoicePdf(orderId: string, orderNumber?: string |
     throw new Error(message);
   }
 
-  const filename = `Invoice-${(orderNumber || orderId).replace(/[^A-Za-z0-9._-]+/g, "_")}.pdf`;
+  const filename = filenameFromDisposition(
+    disposition,
+    `Invoice-${(orderNumber || orderId).replace(/[^A-Za-z0-9._-]+/g, "_")}.pdf`
+  );
   const url = URL.createObjectURL(blob);
   try {
     const anchor = document.createElement("a");

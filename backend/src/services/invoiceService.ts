@@ -353,6 +353,8 @@ export async function generateInvoicePdf(order: any): Promise<Buffer> {
   // ---- data ----
   const seller = getSellerIdentity();
   const orderNumber: string = order.order_number || 'MV-000000';
+  // The invoice number and issue timestamp come from the claim the caller won,
+  // stashed on the order object — never from an orders column.
   const invoiceNumber: string = order.invoice_number || buildInvoiceNumber(orderNumber);
   const issued = order.invoice_issued_at ? new Date(order.invoice_issued_at) : new Date();
   const orderDate = order.created_at ? new Date(order.created_at) : issued;
@@ -361,6 +363,11 @@ export async function generateInvoicePdf(order: any): Promise<Buffer> {
 
   const prepaid = isPrepaid(order);
   const paid = isPaid(order);
+  // The wording is frozen at issue time; `paidAtIssue` is what the PAYMENT
+  // DETAILS block may assert as PAID. An unpaid prepaid order prints neither a
+  // PAID stamp nor a PayU reference.
+  const payment = paymentWordingFor(order);
+  const paidAtIssue = payment.paid;
   const bill = order.billing_address && Object.keys(order.billing_address).length ? order.billing_address : {};
   const ship = order.shipping_address && Object.keys(order.shipping_address).length ? order.shipping_address : {};
   const addr: any = { ...ship, ...bill, state: bill.state || ship.state };
@@ -622,10 +629,14 @@ export async function generateInvoicePdf(order: any): Promise<Buffer> {
   for (const n of numbered) listLines.push(...wrapText(f.sans, n, 9, NOTES_W - 20));
 
   // Payment reference / customer note. The raw "[PayU mihpayid: ...]" string must
-  // never be printed — it is an internal marker, and mihpayid has its own column.
+  // never be printed — it is an internal marker, and the reference it carries is
+  // surfaced separately below.
   const rawNote = String(order.notes || '').trim();
   const rawNoteClean = rawNote.replace(/\[PayU mihpayid:[^\]]*\]/gi, '').trim();
-  const refLine = prepaid && order.payu_mihpayid ? `Payment Ref: PayU ${order.payu_mihpayid}` : '';
+  // Only a reference that was genuinely recorded may be asserted. `paidAtIssue`
+  // is false for an unpaid prepaid order, which prints nothing.
+  const payuRef = paidAtIssue ? payuReferenceFor(order) : null;
+  const refLine = payuRef ? `Payment Ref: PayU ${payuRef}` : '';
   const noteText = refLine || rawNoteClean;
 
   const noteBoxH = noteText ? 27.8 : 0;
@@ -656,7 +667,7 @@ export async function generateInvoicePdf(order: any): Promise<Buffer> {
       color: hex('#fffbeb'),
     });
     const prefix = refLine ? 'Payment Ref: ' : 'Customer Note: ';
-    const body = refLine ? `PayU ${order.payu_mihpayid}` : noteText;
+    const body = refLine ? `PayU ${payuRef}` : noteText;
     const maxNoteW = nbW - 20;
     const italicFont = f.sansBold;
     const prefixW = italicFont.widthOfTextAtSize(prefix, 9);
@@ -839,9 +850,7 @@ export function isCodOrder(order: { payment_method?: string | null }): boolean {
  * otherwise the marker the callback writes into `notes` is parsed. Returns null
  * rather than guessing when neither is available.
  */
-export function payuReferenceFor(order: { payu_mihpayid?: string | null; notes?: string | null }): string | null {
-  const direct = String(order?.payu_mihpayid || '').trim();
-  if (direct) return direct;
+export function payuReferenceFor(order: { notes?: string | null }): string | null {
   const notes = String(order?.notes || '');
   const match = notes.match(/\[PayU\s*mihpayid:\s*([^\]]+)\]/i);
   return match ? match[1].trim() : null;
