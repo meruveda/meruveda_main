@@ -156,4 +156,8 @@ async function main() {
   process.exit(1);
 }
 
-await main();
+// CommonJS output: no top-level await.
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
