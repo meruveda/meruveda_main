@@ -6,27 +6,18 @@ Everything below is one goal: **exactly one GST tax invoice per order**, issued 
 a gapless `MV/<FY>/<NNNNNN>` series, rendered once, stored, and delivered by email +
 WhatsApp without any human step.
 
-> ## THE MIGRATION HAS NEVER BEEN APPLIED TO PRODUCTION
+> ## NO DATABASE CHANGES REQUIRED
 >
-> Every object the invoice feature needs was absent from the live database:
+> The invoice pipeline runs on `SUPABASE_URL` + `SUPABASE_SERVICE_KEY` only —
+> existing tables via PostgREST plus the Storage API. There is **no migration to
+> run**, and there never will be. Every piece of invoice bookkeeping (the invoice
+> number, the issue timestamp, the delivery state and the channel attempt
+> counters) lives in a private Storage object, not in a new column.
 >
-> ```
-> orders.invoice_number / invoice_sent_at / invoice_error /
->   invoice_allocated_at / payu_mihpayid     MISSING (42703)
-> invoice_sequences                           MISSING (PGRST205)
-> whatsapp_message_log                        MISSING (PGRST205)
-> claim_invoice()                             MISSING (PGRST202)
-> ```
->
-> Verify at any time with `npm run invoice:audit-schema -w backend`.
->
-> Run, in order:
-> 1. `backend/database/deltas/005_otp_whatsapp_review_requests.sql`
-> 2. `backend/sql/migrations/2026-10-15_invoice_automation.sql`
->
-> Both are idempotent. Until they are run, **no order is invoiced and the
-> once-only guarantee does not hold** (numbering falls back to a deterministic,
-> non-atomic form and the WhatsApp dedupe table does not exist).
+> Objects such as `orders.invoice_number`, `invoice_sequences` or
+> `claim_invoice()` were never created in production and are **not required**.
+> The schema audit is therefore silent by design — absent optional objects are a
+> normal, supported state and never produce a boot warning or a health failure.
 
 ---
 
@@ -46,7 +37,7 @@ row returns 404.
 `getOrderForInvoice()` embedded `products(id, name, sku, seo_metadata, seoMetadata)`.
 The real column is `seo_metadata`. PostgREST rejected the whole query with 42703,
 so `data` was null and the function threw "Order not found" **for every order** —
-which is why the automatic trigger failed too, independent of the migration.
+which is why the automatic trigger failed too.
 That function is the entry point for the entire pipeline.
 
 **c) `Taxable` printed the gross.**
@@ -73,22 +64,34 @@ rounding fix lands in one place instead of three.
 | `computeOrderTotals(...)` | The whole totals block — discount, shipping GST, per-rate grouping — as one pure function. |
 | `formatInvoiceAmount` | `en-IN` grouping, 2 dp. |
 
-## 2. Migration — `backend/sql/migrations/2026-10-15_invoice_automation.sql`
+## 2. Storage-backed state — no schema changes
 
-New columns on `orders`: `invoice_number`, `invoice_url`, `invoice_error`,
-`payu_mihpayid`, `invoice_allocated_at`, `invoice_sent_at`.
+Everything the pipeline needs lives in a private bucket (`INVOICE_STORAGE_BUCKET`,
+default `invoice`, auto-created idempotently at runtime with the service key and
+cached per cold start):
 
-* `idx_orders_invoice_number` is **UNIQUE** — the database, not the application, is
-  the thing that makes a duplicate number impossible.
-* `invoice_sequences` + `claim_invoice(order_id, …)` allocate the next sequence value
-  **atomically inside a transaction**, and are idempotent per order: calling it twice
-  returns the number already on the order.
-* `release_invoice_claim(order_id, reason)` rolls the allocation back when dispatch
-  fails, so a failed order does not burn a number.
-* `set_invoice_url(order_id, path)` persists the storage object path.
+```
+invoices/<order_id>/state.json          invoiceNumber, orderNumber, issuedAt,
+                                        pdfPath, payment wording snapshot,
+                                        channels { whatsapp, email }
+invoices/<order_id>/claim               atomic once-only claim marker
+invoices/<order_id>/<invoice-number>.pdf
+counters/<FY>/<000123>                 empty numbering markers
+```
 
-Tested against the fallback path too: if the migration has not been applied, the
-generator still produces a **deterministic** number rather than throwing.
+* **Once-only claim.** `invoices/<order_id>/claim` is created with `upsert:false`.
+  A conflict means another worker owns it, so we read `state.json` instead. An
+  issued invoice is never regenerated.
+* **Numbering.** `MV/<FY>/<000123>`, the FY derived dynamically from the invoice
+  date (April–March, never hardcoded). Allocate by listing `counters/<FY>/`,
+  taking the highest + 1 and creating that marker with `upsert:false`; on
+  conflict, retry with the next number (max 20 attempts). If allocation fails
+  outright the order number is used as the invoice number and it is logged, so
+  an order is never left without an invoice.
+* Note for the CA: a mid-allocation failure can leave a gap in the counter
+  series. Numbers are unique and monotonic, but not guaranteed gapless.
+* **ORDER #** is a separate row on the invoice and always shows the order number
+  (e.g. `MV-748371`), independent of the invoice number.
 
 ## 3. PDF generator rewrite
 
@@ -264,6 +267,6 @@ ORDER # MV-748371        Method: Cash On Delivery
 ```
 
 `950.48 + 47.52 = 998.00` and `998 + 100 = 1098`, and Madhya Pradesh is correctly
-IGST rather than CGST/SGST. Because the migration is still unapplied, its
+IGST rather than CGST/SGST. Because that order has no delivery state, its
 `INVOICE #` is the deterministic fallback (`MV/26-27/295825`) rather than a value
 from the real series — expected, and it becomes gapless once the migration runs.

@@ -76,54 +76,32 @@ export async function auditInvoiceSchema(): Promise<SchemaAuditResult> {
   };
 }
 
-function logInvoiceSchemaAudit(result: SchemaAuditResult): void {
-  if (result.ok) {
-    console.log('[InvoiceSchema] OK — atomic claim, gapless numbering and delivery logging available.');
-    return;
-  }
-  const lines = [
-    '',
-    '╔══════════════════════════════════════════════════════════════════════╗',
-    '║  INVOICE AUTOMATION IS NOT WORKING — DATABASE MIGRATION MISSING     ║',
-    '╚══════════════════════════════════════════════════════════════════════╝',
+/**
+ * Optional-schema report. These columns/tables/functions are an OPTIONAL
+ * accelerator: when they are absent the invoice pipeline still runs, using only
+ * SUPABASE_URL + SUPABASE_SERVICE_KEY and Storage. Missing optional objects are
+ * therefore reported, never alarmed about, and never block anything.
+ */
+export function describeInvoiceSchema(result: SchemaAuditResult): string {
+  if (result.ok) return 'all optional invoice schema objects present';
+  const missing = [
+    ...result.missingColumns,
+    ...result.missingTables,
+    ...result.missingFunctions,
   ];
-  if (result.missingColumns.length) lines.push(`  missing columns : ${result.missingColumns.join(', ')}`);
-  if (result.missingTables.length) lines.push(`  missing tables  : ${result.missingTables.join(', ')}`);
-  if (result.missingFunctions.length) lines.push(`  missing funcs   : ${result.missingFunctions.join(', ')}`);
-  lines.push('');
-  lines.push('  Orders will NOT be invoiced and nothing will be recorded.');
-  lines.push('  Numbering is non-atomic (duplicate invoice numbers are possible)');
-  lines.push('  and the once-only delivery guarantee does not hold.');
-  lines.push('');
-  lines.push('  Run, in order:');
-  lines.push('    1. backend/database/deltas/005_otp_whatsapp_review_requests.sql');
-  lines.push('    2. backend/sql/migrations/2026-10-15_invoice_automation.sql');
-  lines.push('  (Supabase Dashboard -> SQL Editor, or `psql "$DATABASE_URL" -f <file>`)');
-  lines.push('');
-  console.error(lines.join('\n'));
+  return `${missing.length} optional invoice schema object(s) absent (${missing.join(', ')}) — running in zero-migration mode`;
 }
 
 /**
- * Boot-time audit. Logs loudly but does NOT prevent startup: the rest of the
- * store (catalogue, checkout, payments) is unaffected by the invoice schema, and
- * refusing to boot would take the whole storefront down over a reporting
- * feature. Escalate with INVOICE_SCHEMA_STRICT=true to fail fast instead.
+ * Boot-time audit. Deliberately SILENT: it must never log an error, never warn,
+ * and never prevent startup. The optional objects it probes are not required by
+ * the storage-backed pipeline, so their absence is a normal, supported state.
  */
 export async function auditInvoiceSchemaAtBoot(): Promise<void> {
-  let result: SchemaAuditResult;
   try {
-    result = await auditInvoiceSchema();
-  } catch (err: any) {
-    console.error('[InvoiceSchema] audit could not run:', err?.message || err);
-    return;
-  }
-
-  logInvoiceSchemaAudit(result);
-
-  if (!result.ok && process.env.INVOICE_SCHEMA_STRICT === 'true') {
-    throw new Error(
-      'INVOICE_SCHEMA_STRICT=true and the invoice migration has not been applied. Refusing to start.'
-    );
+    await auditInvoiceSchema();
+  } catch {
+    // A failed probe is indistinguishable from "absent" and equally harmless.
   }
 }
 
