@@ -3,11 +3,13 @@
 import { useEffect, useMemo, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { Download, Eye, Package, Search, Truck } from "lucide-react";
 import { orderService } from "@/services/accountService";
+import { downloadInvoicePdf } from "@/services/invoiceDownload";
+import { isInvoiceAvailable } from "@/lib/invoiceAvailability";
 import type { AccountOrder } from "@/types/account";
 import { EmptyState, ErrorBox, SectionHeader, SkeletonCard, StatusBadge } from "@/components/account/ui";
+import { Toast, useToast } from "@/components/ui/Toast";
 
 const FILTERS = [
   { key: "all", label: "All" },
@@ -22,12 +24,12 @@ const fmtDate = (d: string) =>
   new Date(d).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
 
 export default function OrdersPage() {
-  const router = useRouter();
   const [orders, setOrders] = useState<AccountOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
+  const { toast, showToast } = useToast();
 
   const load = async () => {
     setLoading(true);
@@ -60,33 +62,20 @@ export default function OrdersPage() {
     });
   }, [orders, filter, query]);
 
-  const invoice = (order: AccountOrder) => {
-    // Fixed GST invoice PDF download (backend template). Anchor download is
-    // popup-blocker safe; the printable detail view is the fallback.
-    import("@/api/axiosInstance").then(async ({ default: axiosInstance }) => {
-      try {
-        const res = await axiosInstance.get(`/orders/${order.id}/invoice`, { responseType: "blob" });
-        const blob = new Blob([res.data], { type: "application/pdf" });
-        const url = URL.createObjectURL(blob);
-        try {
-          const a = document.createElement("a");
-          a.href = url;
-          a.download = `Invoice-${order.orderNumber || order.id}.pdf`;
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-        } finally {
-          setTimeout(() => URL.revokeObjectURL(url), 1000);
-        }
-      } catch {
-        // Fallback to printable detail view.
-        router.push(`/account/orders/${encodeURIComponent(order.id)}?print=1`);
-      }
-    });
+  const invoice = async (order: AccountOrder) => {
+    // The same canonical PDF the customer received on WhatsApp and the admin
+    // sees. No print fallback: on failure the reason is shown, because silently
+    // opening a print dialog produced an "invoice" that was the orders page.
+    try {
+      await downloadInvoicePdf(order.id, order.orderNumber);
+    } catch (e) {
+      showToast((e as Error)?.message || "Could not download the invoice.", "error");
+    }
   };
 
   return (
     <div>
+      <Toast toast={toast} onDismiss={() => showToast(null)} />
       <SectionHeader
         title="My Orders"
         subtitle="Track shipments, view invoices or buy again."
@@ -205,12 +194,21 @@ export default function OrdersPage() {
                         <Truck size={14} /> Track Order
                       </Link>
                     )}
-                    <button
-                      onClick={() => invoice(order)}
-                      className="flex items-center gap-1.5 px-3.5 py-2 border border-gray-200 hover:bg-gray-50 rounded-lg text-xs font-semibold text-gray-700 transition-colors"
-                    >
-                      <Download size={14} /> Invoice
-                    </button>
+                    {isInvoiceAvailable(order) ? (
+                      <button
+                        onClick={() => invoice(order)}
+                        className="flex items-center gap-1.5 px-3.5 py-2 border border-gray-200 hover:bg-gray-50 rounded-lg text-xs font-semibold text-gray-700 transition-colors"
+                      >
+                        <Download size={14} /> Invoice
+                      </button>
+                    ) : (
+                      <span
+                        title="The invoice is issued once payment is verified"
+                        className="flex items-center gap-1.5 px-3.5 py-2 border border-gray-100 bg-gray-50 rounded-lg text-xs font-semibold text-gray-400 cursor-not-allowed"
+                      >
+                        <Download size={14} /> Invoice
+                      </span>
+                    )}
                     <Link
                       href={`/account/orders/${encodeURIComponent(order.id)}`}
                       className="flex items-center gap-1.5 px-3.5 py-2 bg-deep-purple text-white hover:bg-deep-purple/90 rounded-lg text-xs font-bold transition-colors"

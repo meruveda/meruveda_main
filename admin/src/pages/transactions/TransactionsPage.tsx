@@ -7,7 +7,7 @@ import { formatCurrency, formatDateTime } from '@meruveda/shared'
 import { StatusBadge } from '../../components/ui/StatusBadge'
 import toast from 'react-hot-toast'
 import { orderService } from '../../services/orderService'
-import { COMPANY_CONFIG } from '../orders/OrderDetailPage'
+import { COMPANY_CONFIG } from '../../config/company'
 
 export const TransactionsPage: React.FC = () => {
   const [txns, setTxns] = useState<Transaction[]>([])

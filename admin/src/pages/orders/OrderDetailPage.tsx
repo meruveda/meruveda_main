@@ -1,30 +1,17 @@
 import React, { useState, useEffect } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Printer, Truck, FileText, User, ShoppingBag, Trash2 } from 'lucide-react'
+import { ArrowLeft, Truck, FileText, User, ShoppingBag, Trash2 } from 'lucide-react'
 import { orderService } from '../../services/orderService'
-import { Order, OrderStatus, StoreSettings } from '../../types'
+import { Order, OrderStatus } from '../../types'
 import { formatCurrency, formatDateTime } from '@meruveda/shared'
 import { StatusBadge } from '../../components/ui/StatusBadge'
 import toast from 'react-hot-toast'
 import { shiprocketService } from '../../services/shiprocketService'
-import { settingsService } from '../../services/settingsService'
-
-// Configurable company header info defaults
-export const COMPANY_CONFIG = {
-  name: 'MERUVEDA WELLNESS',
-  addressLine1: 'Keharsh Enterprises (Sole Proprietorship)',
-  addressLine2: 'S/N. 12, Viru City Gym Road, Inside Jalori Gate, Jodhpur - 342001, Rajasthan, India',
-  phone: '+91 8097147463',
-  email: 'customercare@meruvedawellness.com',
-  website: 'meruvedawellness.com',
-  gstin: '08BFPPS7045C1Z4'
-};
 
 export const OrderDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const [order, setOrder] = useState<Order | null>(null)
-  const [storeSettings, setStoreSettings] = useState<StoreSettings | null>(null)
   const [isLoading, setIsLoading] = useState(true)
 
   // Tracking details
@@ -35,8 +22,7 @@ export const OrderDetailPage: React.FC = () => {
   const [isGeneratingAwb, setIsGeneratingAwb] = useState(false)
   const [isSchedulingPickup, setIsSchedulingPickup] = useState(false)
   const [isDownloadingLabel, setIsDownloadingLabel] = useState(false)
-  const [isDownloadingInvoice, setIsDownloadingInvoice] = useState(false)
-  const [isResendingInvoice, setIsResendingInvoice] = useState(false)
+  const [isViewingInvoice, setIsViewingInvoice] = useState(false)
   const [isRefreshingTracking, setIsRefreshingTracking] = useState(false)
   const [isCancellingOrder, setIsCancellingOrder] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
@@ -120,19 +106,21 @@ export const OrderDetailPage: React.FC = () => {
     }
   }
 
-  const handleDownloadInvoice = async () => {
-    if (!order) return;
-    // Fixed GST tax invoice (backend pdf-lib template) - same file sent on WhatsApp/email.
-    setIsDownloadingInvoice(true);
+  /**
+   * Fetch the stored invoice through the same authenticated endpoint the
+   * customer uses. One template everywhere: this is the exact file that went out
+   * on WhatsApp and email, never a re-render.
+   */
+  const handleViewInvoice = async (orderId: string) => {
+    setIsViewingInvoice(true);
     try {
-      await orderService.downloadInvoice(order.id, order.invoiceNumber, order.orderNumber);
-      toast.success('Invoice downloaded');
+      await orderService.downloadInvoice(orderId, order?.invoiceNumber, order?.orderNumber);
     } catch (err: any) {
-      // The endpoint answers errors as JSON, but we asked for a blob — so the
-      // message has to be pulled back out of the blob before it can be shown.
-      let message = err?.message || 'Failed to download invoice';
+      // Errors come back as JSON while we asked for a blob, so the message has
+      // to be read out of the blob before it can be shown.
+      let message = err?.message || 'Failed to load the invoice';
       const body = err?.response?.data;
-      if (body instanceof Blob) {
+      if (typeof Blob !== 'undefined' && body instanceof Blob) {
         try {
           const parsed = JSON.parse(await body.text());
           if (parsed?.error?.message) message = parsed.error.message;
@@ -144,30 +132,9 @@ export const OrderDetailPage: React.FC = () => {
       }
       toast.error(message);
     } finally {
-      setIsDownloadingInvoice(false);
+      setIsViewingInvoice(false);
     }
-  }
-
-  const handleResendInvoice = async () => {
-    if (!order) return;
-    setIsResendingInvoice(true);
-    try {
-      const result: any = await orderService.resendInvoice(order.id);
-      const sentVia: string[] = [];
-      if (result?.email === 'sent') sentVia.push('email');
-      if (result?.whatsapp === 'sent') sentVia.push('WhatsApp');
-      if (sentVia.length > 0) {
-        toast.success(`Invoice ${result?.invoiceNumber || ''} resent via ${sentVia.join(' + ')}`);
-      } else {
-        toast.error(result?.reason || 'Invoice could not be resent — no channel available');
-      }
-      fetchOrderDetail();
-    } catch (err: any) {
-      toast.error(err?.response?.data?.error?.message || err?.message || 'Failed to resend invoice');
-    } finally {
-      setIsResendingInvoice(false);
-    }
-  }
+  };
 
   const handleRefreshTracking = async () => {
     const awbCode = (order as any)?.awb_code || order?.awbCode;
@@ -229,13 +196,6 @@ export const OrderDetailPage: React.FC = () => {
       const data = await orderService.getOrderById(id)
       setOrder(data)
       setTrackingNo(data.trackingNumber || '')
-
-      try {
-        const settingsData = await settingsService.getSettings()
-        setStoreSettings(settingsData)
-      } catch (settingsErr) {
-        console.error('Failed to load store settings', settingsErr)
-      }
     } catch (err) {
       toast.error('Order not found')
       navigate('/orders')
@@ -274,10 +234,6 @@ export const OrderDetailPage: React.FC = () => {
     }
   }
 
-  const handlePrint = () => {
-    window.print()
-  }
-
   if (isLoading || !order) {
     return (
       <div className="flex h-64 items-center justify-center">
@@ -286,16 +242,10 @@ export const OrderDetailPage: React.FC = () => {
     )
   }
 
-  const storeName = storeSettings?.storeName || COMPANY_CONFIG.name;
-  const storeAddress = storeSettings?.storeAddress || `${COMPANY_CONFIG.addressLine1}\n${COMPANY_CONFIG.addressLine2}`;
-  const storePhone = storeSettings?.storePhone || COMPANY_CONFIG.phone;
-  const storeEmail = storeSettings?.storeEmail || COMPANY_CONFIG.email;
-  const storeWebsite = storeSettings?.storeWebsite || COMPANY_CONFIG.website;
-
   return (
-    <div className="space-y-6 print:p-0">
+    <div className="space-y-6">
       {/* Title block */}
-      <div className="flex items-center justify-between print:hidden">
+      <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <Link
             to="/orders"
@@ -311,12 +261,6 @@ export const OrderDetailPage: React.FC = () => {
 
         <div className="flex items-center gap-3">
           <button
-            onClick={handlePrint}
-            className="btn-primary inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-xl"
-          >
-            <Printer className="h-4 w-4" /> Print Invoice
-          </button>
-          <button
             onClick={handleDeleteOrder}
             disabled={isDeleting}
             className="btn-danger inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-xl"
@@ -327,7 +271,7 @@ export const OrderDetailPage: React.FC = () => {
       </div>
 
       {/* Screen layout */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 print:hidden">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left Column: Items */}
         <div className="lg:col-span-2 space-y-6">
           {/* Card: Items listing */}
@@ -446,76 +390,129 @@ export const OrderDetailPage: React.FC = () => {
             </div>
           </div>
 
-          {/* Invoice card — always visible, independent of Shiprocket */}
+          {/* Invoice card — READ ONLY.
+              One invoice, one template, everywhere: the PDF rendered by the
+              backend generator is what goes out on WhatsApp, what the customer
+              downloads, and what is linked here. Delivery is automatic (COD at
+              placement, prepaid once PayU verifies payment) with a cron sweep
+              retrying failures, so there is deliberately no Send / Resend /
+              Download button: a manual trigger is a second way to deliver the
+              same tax document, and the once-only claim is what keeps the GST
+              series sound. */}
           <div className="card p-6 space-y-4">
             <h3 className="section-title flex items-center gap-1.5 font-bold">
               <FileText className="h-5 w-5 text-slate-400" /> Invoice
+              <span className="ml-auto text-[10px] font-normal uppercase tracking-wide text-slate-400">
+                Automatic
+              </span>
             </h3>
             <div className="space-y-3 text-sm">
-              {order.invoiceNumber && (
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-500">Invoice #</span>
-                  <span className="font-semibold font-mono">{order.invoiceNumber}</span>
-                </div>
-              )}
-              <div className="flex justify-between items-center">
-                <span className="text-slate-500">Status</span>
-                {(() => {
-                  const status = order.invoiceStatus || 'not_sent'
-                  const styles: Record<string, string> = {
-                    sent: 'bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-400 dark:border-green-900/50',
-                    failed: 'bg-red-50 text-red-700 border-red-200 dark:bg-red-950/30 dark:text-red-400 dark:border-red-900/50',
-                    not_sent: 'bg-slate-50 text-slate-500 border-slate-200 dark:bg-slate-800/40 dark:text-slate-400 dark:border-slate-700',
-                  }
-                  const label = status === 'sent' ? 'Sent' : status === 'failed' ? 'Failed' : 'Not sent'
-                  return (
-                    <span className={`inline-flex items-center px-2 py-0.5 rounded-lg border text-[11px] font-semibold ${styles[status]}`}>
-                      {label}
-                    </span>
-                  )
-                })()}
-              </div>
-              {order.invoiceSentAt && (
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-500">Sent at</span>
-                  <span className="font-semibold">{formatDateTime(order.invoiceSentAt)}</span>
-                </div>
-              )}
-              {order.invoiceError && (
-                <p className="text-xs text-red-600 bg-red-50 dark:bg-red-950/20 border border-red-100 dark:border-red-900 rounded-lg p-3">
-                  Invoice error: {order.invoiceError}
-                </p>
-              )}
-              {order.invoiceStatus === 'not_sent' && !order.invoiceError && (
-                <p className="text-xs text-slate-400">
-                  No invoice has been issued yet. One is generated automatically once payment is
-                  verified (or on order confirmation for COD). Use Resend to generate it now.
-                </p>
-              )}
-              <div className="grid grid-cols-2 gap-2 pt-1">
-                <button
-                  disabled={isDownloadingInvoice}
-                  className="btn-outline text-xs py-1.5 justify-center"
-                  onClick={handleDownloadInvoice}
-                  title={
-                    order.invoiceUrl
-                      ? 'Download the stored invoice PDF'
-                      : order.invoiceNumber
-                      ? 'No stored file for this invoice yet — one will be generated'
-                      : 'Generate and download the invoice PDF'
-                  }
-                >
-                  {isDownloadingInvoice ? 'Downloading…' : 'Download invoice'}
-                </button>
-                <button
-                  disabled={isResendingInvoice}
-                  className="btn-outline text-xs py-1.5 justify-center"
-                  onClick={handleResendInvoice}
-                  title="Send the same invoice again by email + WhatsApp (reuses the invoice number)"
-                >
-                  {isResendingInvoice ? 'Sending…' : 'Resend invoice'}
-                </button>
-              </div>
+              {(() => {
+                const status = order.invoiceStatus || 'pending'
+                const styles: Record<string, string> = {
+                  sent: 'bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-400 dark:border-green-900/50',
+                  failed: 'bg-red-50 text-red-700 border-red-200 dark:bg-red-950/30 dark:text-red-400 dark:border-red-900/50',
+                  pending: 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-400 dark:border-amber-900/50',
+                }
+                const label = status === 'sent' ? 'Sent' : status === 'failed' ? 'Failed' : 'Pending'
+                const whatsapp = order.invoiceWhatsappStatus
+                const whatsappStyles: Record<string, string> = {
+                  sent: 'text-green-600',
+                  failed: 'text-red-600',
+                }
+
+                return (
+                  <>
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-500">Status</span>
+                      <span
+                        className={`inline-flex items-center px-2 py-0.5 rounded-lg border text-[11px] font-semibold ${
+                          styles[status] || styles.pending
+                        }`}
+                      >
+                        {label}
+                      </span>
+                    </div>
+
+                    {order.invoiceNumber && (
+                      <div className="flex justify-between items-center gap-3">
+                        <span className="text-slate-500">Invoice #</span>
+                        <span className="font-semibold font-mono text-right break-all">
+                          {order.invoiceNumber}
+                        </span>
+                      </div>
+                    )}
+
+                    {status === 'sent' && order.invoiceSentAt && (
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-500">Sent at</span>
+                        <span className="font-semibold">{formatDateTime(order.invoiceSentAt)}</span>
+                      </div>
+                    )}
+
+                    {whatsapp && (
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-500">WhatsApp</span>
+                        <span
+                          className={`font-semibold capitalize ${
+                            whatsappStyles[whatsapp] || 'text-slate-600'
+                          }`}
+                        >
+                          {whatsapp}
+                        </span>
+                      </div>
+                    )}
+
+                    {order.invoiceEmailStatus && (
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-500">Email</span>
+                        <span className="font-semibold capitalize">{order.invoiceEmailStatus}</span>
+                      </div>
+                    )}
+
+                    {!!order.invoiceAttempts && order.invoiceAttempts > 0 && (
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-500">Attempts</span>
+                        <span className="font-semibold">
+                          {order.invoiceAttempts} of {order.invoiceMaxAttempts ?? 5}
+                        </span>
+                      </div>
+                    )}
+
+                    {status === 'failed' && order.invoiceError && (
+                      <div className="text-xs text-red-600 bg-red-50 dark:bg-red-950/20 border border-red-100 dark:border-red-900 rounded-lg p-3">
+                        <span className="font-semibold">Reason: </span>
+                        {order.invoiceError}
+                        <p className="mt-1 text-red-500/80">Retrying automatically. No action needed.</p>
+                      </div>
+                    )}
+
+                    {status === 'pending' && !order.invoiceError && (
+                      <p className="text-xs text-slate-400">
+                        Generated and sent automatically: on order placement for Cash on Delivery,
+                        or as soon as payment is verified for prepaid orders.
+                      </p>
+                    )}
+
+                    {/* Same stored file the customer and WhatsApp received. A link, not a
+                        button: fetching it is a read, and the invoice is never
+                        re-rendered because a link was followed. */}
+                    {status === 'sent' && order.invoiceUrl && (
+                      <div className="text-xs pt-1">
+                        <span className="text-slate-500">PDF: </span>
+                        <button
+                          type="button"
+                          onClick={() => handleViewInvoice(order.id)}
+                          className="text-deep-purple hover:underline font-semibold"
+                        >
+                          View invoice
+                        </button>
+                        <span className="font-mono text-slate-500 break-all"> {order.invoiceUrl}</span>
+                      </div>
+                    )}
+                  </>
+                )
+              })()}
             </div>
           </div>
 
@@ -715,207 +712,6 @@ export const OrderDetailPage: React.FC = () => {
               </div>
             </div>
           </div>
-        </div>
-      </div>
-
-      {/* Print Only Layout */}
-      <div className="hidden print:block w-full max-w-4xl mx-auto bg-white text-black font-sans text-sm pb-12 px-6">
-        <div className="flex justify-between items-start mb-10 gap-8 border-b pb-6">
-          <div className="flex flex-col items-start gap-4 max-w-[55%]">
-            <img src="/logo_transparent.png" alt="MeruVeda Wellness Logo" className="h-14 w-auto object-contain" />
-            <div>
-              <h1 className="text-xl font-bold text-[#2B1820] tracking-wide font-serif">
-                {storeName}
-              </h1>
-              <div className="text-slate-600 text-xs space-y-0.5 mt-1.5 leading-relaxed">
-                {storeAddress.split('\n').map((line: string, idx: number) => (
-                  <p key={idx}>{line}</p>
-                ))}
-                <p>Phone: {storePhone} | Email: {storeEmail}</p>
-                <p>Website: {storeWebsite}</p>
-                {COMPANY_CONFIG.gstin && COMPANY_CONFIG.gstin !== "GSTIN_PENDING" && (
-                  <p className="font-semibold text-slate-800">GSTIN: {COMPANY_CONFIG.gstin}</p>
-                )}
-              </div>
-            </div>
-          </div>
-          <div className="text-right flex-shrink-0 max-w-[40%]">
-            <h2 className="text-5xl font-extrabold uppercase mb-4 tracking-wider font-serif" style={{ color: '#C9A227' }}>Invoice</h2>
-            <table className="ml-auto text-left border-collapse border border-slate-200 text-xs">
-              <tbody>
-                <tr>
-                  <td className="px-3 py-1.5 border border-slate-200 font-semibold bg-slate-100 uppercase">Date</td>
-                  <td className="px-3 py-1.5 border border-slate-200 min-w-[120px] text-right">{new Date(order.createdAt).toLocaleDateString()}</td>
-                </tr>
-                <tr>
-                  <td className="px-3 py-1.5 border border-slate-200 font-semibold bg-slate-100 uppercase">Invoice #</td>
-                  <td className="px-3 py-1.5 border border-slate-200 text-right font-mono">{order.invoiceNumber || order.orderNumber}</td>
-                </tr>
-                {order.invoiceNumber ? (
-                  <tr>
-                    <td className="px-3 py-1.5 border border-slate-200 font-semibold bg-slate-100 uppercase">Order #</td>
-                    <td className="px-3 py-1.5 border border-slate-200 text-right font-mono">{order.orderNumber}</td>
-                  </tr>
-                ) : null}
-                {(order.awbCode || order.trackingNumber || (order as any).awb_code) ? (
-                  <tr>
-                    <td className="px-3 py-1.5 border border-slate-200 font-semibold bg-slate-100 uppercase">AWB / Tracking #</td>
-                    <td className="px-3 py-1.5 border border-slate-200 text-right font-mono">
-                      {order.awbCode || order.trackingNumber || (order as any).awb_code}
-                    </td>
-                  </tr>
-                ) : null}
-                <tr>
-                  <td className="px-3 py-1.5 border border-slate-200 font-semibold bg-slate-100 uppercase">Due Date</td>
-                  <td className="px-3 py-1.5 border border-slate-200 text-right">{new Date(order.createdAt).toLocaleDateString()}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        {/* Bill To */}
-        <div className="mb-10 w-1/2">
-          <h3 className="text-white font-bold uppercase text-xs tracking-wider" style={{ backgroundColor: '#4C1D5B', color: '#FFFFFF', padding: '6px 12px', WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}>Bill To</h3>
-          <div className="border border-slate-200 border-t-0 p-3 text-slate-800 text-xs leading-relaxed bg-[#fbfbfc]">
-            {((order as any).billingAddress?.fullName || order.shippingAddress?.fullName) ? (
-              <>
-                <p className="font-bold text-slate-900">{(order as any).billingAddress?.fullName || order.shippingAddress?.fullName}</p>
-                <p>{(order as any).billingAddress?.addressLine1 || order.shippingAddress?.addressLine1}</p>
-                {((order as any).billingAddress?.addressLine2 || order.shippingAddress?.addressLine2) && (
-                  <p>{(order as any).billingAddress?.addressLine2 || order.shippingAddress?.addressLine2}</p>
-                )}
-                <p>
-                  {(order as any).billingAddress?.city || order.shippingAddress?.city},{' '}
-                  {(order as any).billingAddress?.state || order.shippingAddress?.state}{' '}
-                  {(order as any).billingAddress?.pincode || order.shippingAddress?.pincode}
-                </p>
-                <p className="font-semibold mt-1">Phone: {(order as any).billingAddress?.phone || order.shippingAddress?.phone}</p>
-              </>
-            ) : (
-              <span className="text-red-500 font-semibold">[Missing Customer Address Data]</span>
-            )}
-          </div>
-        </div>
-
-        {/* Line Items Table */}
-        <table className="w-full text-left mb-10 border-collapse border border-slate-200 text-xs">
-          <thead>
-            <tr style={{ backgroundColor: '#4C1D5B', color: '#FFFFFF', WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}>
-              <th className="border border-slate-200" style={{ backgroundColor: '#4C1D5B', color: '#FFFFFF', padding: '6px 12px', WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}>Description</th>
-              <th className="border border-slate-200 text-center w-[120px]" style={{ backgroundColor: '#4C1D5B', color: '#FFFFFF', padding: '6px 12px', WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}>SKU</th>
-              <th className="border border-slate-200 text-center w-[60px]" style={{ backgroundColor: '#4C1D5B', color: '#FFFFFF', padding: '6px 12px', WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}>Qty</th>
-              <th className="border border-slate-200 text-center w-[60px]" style={{ backgroundColor: '#4C1D5B', color: '#FFFFFF', padding: '6px 12px', WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}>Taxed</th>
-              <th className="border border-slate-200 text-right w-[120px]" style={{ backgroundColor: '#4C1D5B', color: '#FFFFFF', padding: '6px 12px', WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}>Amount</th>
-            </tr>
-          </thead>
-          <tbody>
-            {order.items.length > 0 ? (
-              order.items.map((item: any, idx: number) => {
-                const isEven = idx % 2 !== 0;
-                const rowBg = isEven ? '#F5F0F7' : '#FFFFFF';
-                return (
-                  <tr key={item.id} style={{ backgroundColor: rowBg, WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}>
-                    <td className="px-4 py-2.5 border border-slate-200 font-medium">
-                      {item.productName && item.productName !== 'Unknown Product' ? item.productName : <span className="text-red-500">[Missing Name Data]</span>}
-                    </td>
-                    <td className="px-4 py-2.5 border border-slate-200 text-center font-mono">{item.sku || <span className="text-red-500">[Missing]</span>}</td>
-                    <td className="px-4 py-2.5 border border-slate-200 text-center">{item.quantity}</td>
-                    <td className="px-4 py-2.5 border border-slate-200 text-center">X</td>
-                    <td className="px-4 py-2.5 border border-slate-200 text-right font-mono">{formatCurrency(item.price * item.quantity)}</td>
-                  </tr>
-                );
-              })
-            ) : (
-              <tr>
-                <td colSpan={5} className="px-4 py-6 border border-slate-200 text-center text-red-500 font-semibold bg-white">[No Items Found]</td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-
-        {/* Footer grid */}
-        <div className="grid grid-cols-2 gap-8 mb-12">
-          {/* Comments */}
-          <div>
-            <h3 className="text-white font-bold uppercase text-xs tracking-wider" style={{ backgroundColor: '#4C1D5B', color: '#FFFFFF', padding: '6px 12px', WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}>Other Comments & Notes</h3>
-            <div className="border border-slate-200 border-t-0 p-3 min-h-[120px] text-xs text-slate-700 leading-relaxed bg-[#fbfbfc]">
-              {order.notes ? (
-                <div className="mb-4 p-2 bg-amber-50 border border-amber-200 rounded text-amber-900 italic font-sans">
-                  <strong>Customer Note:</strong> &ldquo;{order.notes}&rdquo;
-                </div>
-              ) : null}
-              <p>1. Total payment due upon receipt.</p>
-              <p>2. Please include the invoice number with your payment.</p>
-              <p className="mt-2 text-xs font-semibold text-slate-500 uppercase">Payment Details:</p>
-              <p>Method: {order.paymentMethod}</p>
-            </div>
-          </div>
-
-          {/* Calculations */}
-          <div>
-            <table className="w-full text-left border-collapse border border-slate-200 text-xs">
-              <tbody>
-                <tr className="bg-white">
-                  <td className="px-4 py-2 border border-slate-200 text-right font-semibold text-slate-700">Subtotal</td>
-                  <td className="px-4 py-2 border border-slate-200 text-right font-mono min-w-[120px]">{formatCurrency(order.subtotal)}</td>
-                </tr>
-                {order.discount > 0 && (
-                  <tr className="bg-white">
-                    <td className="px-4 py-2 border border-slate-200 text-right font-semibold text-red-600">Discount</td>
-                    <td className="px-4 py-2 border border-slate-200 text-right font-mono text-red-600">-{formatCurrency(order.discount)}</td>
-                  </tr>
-                )}
-                <tr className="bg-white">
-                  <td className="px-4 py-2 border border-slate-200 text-right font-semibold text-slate-700">Taxable</td>
-                  <td className="px-4 py-2 border border-slate-200 text-right font-mono">{formatCurrency(order.subtotal - order.discount)}</td>
-                </tr>
-                {(() => {
-                  const state = order.shippingAddress?.state || '';
-                  const s = state.trim().toLowerCase();
-                  const validMatches = ['rajasthan', 'rj', 'rajsthan', 'rajasthn', 'rajastan', 'rajasthna', 'rajastran', 'raj'];
-                  const isIntraState = validMatches.includes(s) || (s.startsWith('raj') && s.length >= 5);
-
-                  if (isIntraState) {
-                    return (
-                      <>
-                        <tr className="bg-white">
-                          <td className="px-4 py-2 border border-slate-200 text-right font-semibold text-slate-700">CGST (Included)</td>
-                          <td className="px-4 py-2 border border-slate-200 text-right font-mono">{formatCurrency(order.tax / 2)}</td>
-                        </tr>
-                        <tr className="bg-white">
-                          <td className="px-4 py-2 border border-slate-200 text-right font-semibold text-slate-700">SGST (Included)</td>
-                          <td className="px-4 py-2 border border-slate-200 text-right font-mono">{formatCurrency(order.tax / 2)}</td>
-                        </tr>
-                      </>
-                    );
-                  } else {
-                    return (
-                      <tr className="bg-white">
-                        <td className="px-4 py-2 border border-slate-200 text-right font-semibold text-slate-700">IGST (Included)</td>
-                        <td className="px-4 py-2 border border-slate-200 text-right font-mono">{formatCurrency(order.tax)}</td>
-                      </tr>
-                    );
-                  }
-                })()}
-                <tr className="bg-white">
-                  <td className="px-4 py-2 border border-slate-200 text-right font-semibold text-slate-700">Shipping</td>
-                  <td className="px-4 py-2 border border-slate-200 text-right font-mono">{order.shippingCharge === 0 ? 'FREE' : formatCurrency(order.shippingCharge)}</td>
-                </tr>
-                <tr className="bg-slate-100 font-bold text-sm">
-                  <td className="px-4 py-2.5 border border-slate-200 text-right uppercase text-slate-900">TOTAL</td>
-                  <td className="px-4 py-2.5 border border-slate-200 text-right font-mono text-slate-900">{formatCurrency(order.total)}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        {/* Thank You Note */}
-        <div className="text-center mt-12 font-medium italic text-slate-700 space-y-1">
-          <p>If you have any questions about this invoice, please contact</p>
-          <p className="text-slate-900 not-italic font-semibold">{storeEmail}</p>
-          <p className="text-lg mt-4 text-[#2B1820] font-bold not-italic font-serif">Thank You For Your Business!</p>
         </div>
       </div>
     </div>

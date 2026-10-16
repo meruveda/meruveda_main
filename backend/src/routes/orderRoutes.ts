@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getOrders, getOrderById, createOrder, updateOrderStatus, getMyOrders, updateOrder, deleteOrder, trackOrder, trackByAwb, resendInvoice, downloadInvoice, pushToShiprocket, retryShiprocketPushes } from '../controllers/ordersController';
+import { getOrders, getOrderById, createOrder, updateOrderStatus, getMyOrders, updateOrder, deleteOrder, trackOrder, trackByAwb, invoiceStatus, downloadInvoice, pushToShiprocket, retryShiprocketPushes } from '../controllers/ordersController';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { orderCreateLimiter } from '../middleware/rateLimit';
 
@@ -23,8 +23,11 @@ router.use(requireAuth as any);
 router.get('/my', getMyOrders as any);
 router.post('/', orderCreateLimiter, createOrder as any);
 
-// Owner or admin may regenerate/resend the WhatsApp invoice.
-router.post('/:id/resend-invoice', resendInvoice as any);
+// Read-only invoice delivery status. There is deliberately no resend/send
+// endpoint: delivery is automatic (COD at placement, PayU on verified callback)
+// and the cron sweep retries failures, so a manual trigger would be a second way
+// to deliver the same tax document twice.
+router.get('/:id/invoice/status', invoiceStatus as any);
 
 // Owner or admin may download the fixed GST invoice PDF.
 router.get('/:id/invoice', downloadInvoice as any);

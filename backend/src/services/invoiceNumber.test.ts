@@ -19,7 +19,7 @@ import { buildInvoiceNumber, claimInvoiceNumber } from './invoiceService';
  *   - 20 parallel claims -> exactly one winner per order, 20 unique gapless
  *     numbers, and the 19 losers are told "already claimed"
  *   - a retry never allocates a second number
- *   - force (admin resend) reuses the same number
+ *   - there is no force/resend escape hatch at all
  *   - the FY label is derived from the invoice date, never hardcoded
  *
  * To verify the SQL itself against a real Postgres (NOT the production
@@ -130,16 +130,27 @@ test('a retry (PayU double-POST) never allocates a second number', async (t) => 
   assert.equal(assigned.size, 1);
 });
 
-test('force (admin resend) reuses the stored number and allocates nothing new', async (t) => {
+test('there is no force/resend escape hatch that could reissue a number', async (t) => {
   const counters = new Map<string, number>();
   fakeClaimRpc(t, counters);
 
   const order: any = { id: 'order-2', order_number: 'MV-139559' };
   const first = await claimInvoiceNumber(order);
-  const forced = await claimInvoiceNumber(order, { force: true });
 
-  assert.equal(forced, first, 'resend must not issue a second tax document number');
-  assert.equal(counters.get(invoiceFyLabel()), 1);
+  // The old design had a `force` option used by an admin "Resend invoice"
+  // button, which let a second worker allocate/send again. Delivery is now
+  // automatic, so the escape hatch was deleted rather than left unused: the
+  // claim must stay unconditional.
+  assert.equal(
+    (claimInvoiceNumber as unknown as { length: number }).length,
+    1,
+    'claimInvoiceNumber must take only the order — no options object'
+  );
+
+  const second = await claimInvoiceNumber(order);
+  assert.equal(second, null, 'a second claim never returns a number to send again');
+  assert.equal(counters.get(invoiceFyLabel()), 1, 'no second number consumed');
+  assert.ok(first);
 });
 
 test('parallels on the SAME order produce exactly one winner', async (t) => {

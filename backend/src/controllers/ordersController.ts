@@ -1,7 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import { orderService, pushOrderToShiprocket, retryFailedShiprocketPushes } from '../services/orderService';
 import { postOrderConfirmed, isCodOrder, sendOrderConfirmationText } from '../services/postOrderConfirmed';
-import { invoiceDispatchService } from '../services/invoiceDispatchService';
+import { invoiceDispatchService, deriveInvoiceStatus } from '../services/invoiceDispatchService';
+import { getLogEntry } from '../services/whatsappService';
 import { supabase } from '../database/supabase';
 import { normalizePhone } from '../services/whatsappService';
 import { hasColumn } from '../services/schemaGuard';
@@ -219,57 +220,115 @@ export const trackByAwb = async (req: Request, res: Response, next: NextFunction
 };
 
 /**
+ * Read the delivery-tracking columns that may not exist yet.
+ *
+ * A deployment can be running this code before the migration has been applied,
+ * and every one of these is optional for rendering the status card. The column
+ * list is built dynamically so a missing column degrades to `undefined` instead
+ * of failing the whole query with 42703.
+ */
+async function optionalInvoiceTracking(orderId: string): Promise<Record<string, unknown>> {
+  const optional = [
+    'invoice_attempts',
+    'invoice_whatsapp_status',
+    'invoice_email_status',
+  ];
+  const present: string[] = [];
+  for (const column of optional) {
+    if (await hasColumn('orders', column)) present.push(column);
+  }
+  if (present.length === 0) return {};
+
+  const { data } = await supabase.from('orders').select(present.join(', ')).eq('id', orderId).maybeSingle();
+  return (data as unknown as Record<string, unknown>) || {};
+}
+
+/**
  * Serve the invoice PDF for one order.
  *
- * The PDF stored in Supabase is returned whenever it exists — an issued invoice
- * is a legal document and must never be re-rendered, because a regeneration
- * after an amount change would silently produce a DIFFERENT document under the
- * SAME invoice number.
+ * ONE invoice, ONE template: this is the same file that was sent over WhatsApp
+ * and email, and the same one the admin sees. There is no separate rendering
+ * path for the customer or the admin.
  *
- * The render path is kept only as a fallback for orders invoiced before storage
- * existed, and only when the order has no number yet (so nothing is issued).
+ * Order of precedence:
+ *   1. stored PDF — an issued invoice is a legal document and must NEVER be
+ *      re-rendered; regenerating after an amount change would silently produce a
+ *      different document under the same number.
+ *   2. no PDF yet and the order is billable -> generate ONCE through the same
+ *      claim path the automatic trigger uses, store it, then serve it.
+ *   3. no PDF and the order is not billable (unpaid prepaid) -> 409, so the
+ *      customer sees "awaiting payment" instead of an invoice for goods that
+ *      have not been paid for.
  */
 export const downloadInvoice = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
-    const { data: orderRow } = await supabase
+
+    // Probe the optional invoice columns first so a missing migration produces
+    // an actionable 503 instead of a 404 that reads as "order not found".
+    const hasInvoiceNumber = await hasColumn('orders', 'invoice_number');
+    if (!hasInvoiceNumber) {
+      console.error(
+        '[Invoice] orders.invoice_number does not exist — apply ' +
+          'backend/sql/migrations/2026-10-15_invoice_automation.sql'
+      );
+      return res.status(503).json({
+        error: {
+          message:
+            'Invoice storage is not configured on this server: the database migration ' +
+            '2026-10-15_invoice_automation.sql has not been applied. No invoice can be served yet.',
+        },
+      });
+    }
+
+    const { data: orderRow, error: queryError } = await supabase
       .from('orders')
-      .select('id, user_id, order_number, invoice_url, invoice_number')
+      .select('id, user_id, order_number, payment_method, payment_status, invoice_url, invoice_number')
       .eq('id', id)
       .maybeSingle();
+
+    if (queryError) {
+      // Schema/behaviour failure, NOT a missing order.
+      console.error(`[Invoice] order lookup failed for ${id}:`, queryError.message);
+      return res.status(503).json({
+        error: {
+          message: `Could not read this order (${queryError.code || 'database error'}). The order may exist; the database schema is incomplete.`,
+        },
+      });
+    }
     if (!orderRow) {
       return res.status(404).json({ error: { message: 'Order not found' } });
     }
+    // The order's own customer, or any admin. Nothing else can read it.
     if (req.user?.role !== 'admin' && orderRow.user_id !== req.user?.id) {
       return res.status(403).json({ error: { message: 'Forbidden' } });
     }
 
-    // The GST invoice number is the document's legal identity, so it wins over the
-    // order number in the filename. Slashes in the series must not create folders.
-    const safeInvoice = String(orderRow.invoice_number || orderRow.order_number).replace(
-      /[^A-Za-z0-9._-]+/g,
-      '_'
-    );
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/pdf',
-      'Content-Disposition': `attachment; filename="Invoice-${safeInvoice}.pdf"`,
-      // Invoices contain PII — never let a shared proxy cache them.
-      'Cache-Control': 'private, no-store, max-age=0',
-      'X-Content-Type-Options': 'nosniff',
+    const send = (bytes: Buffer) => {
+      // Filename carries the order number, which is what the customer knows.
+      // Slash-free by construction (MV-748371), but sanitise defensively.
+      const safe = String(orderRow.order_number || id).replace(/[^A-Za-z0-9._-]+/g, '_');
+      res.set({
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `attachment; filename="Invoice-${safe}.pdf"`,
+        // Invoices contain PII — never let a shared proxy cache them.
+        'Cache-Control': 'private, no-store, max-age=0',
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Length': String(bytes.length),
+      });
+      return res.send(bytes);
     };
 
+    /* ---- 1. the stored file, when one exists ---- */
     if (orderRow.invoice_url && config.invoiceStorageBucket) {
       const { data, error } = await supabase.storage
         .from(config.invoiceStorageBucket)
         .download(orderRow.invoice_url);
       if (!error && data) {
-        const bytes = Buffer.from(await data.arrayBuffer());
-        headers['Content-Length'] = String(bytes.length);
-        // Must set the PDF headers here too: without them Express sends a Buffer
-        // as application/octet-stream with no filename, so an anchor-based
-        // download (and any "open in new tab") loses the Content-Disposition.
-        res.set(headers);
-        return res.send(bytes);
+        // Must set the PDF headers here too: without them Express sends a
+        // Buffer as application/octet-stream with no filename, so an
+        // anchor-based download loses the Content-Disposition.
+        return send(Buffer.from(await data.arrayBuffer()));
       }
       console.warn(
         `[Invoice] stored PDF unavailable for order ${orderRow.order_number} (${error?.message}) — ` +
@@ -280,18 +339,63 @@ export const downloadInvoice = async (req: Request, res: Response, next: NextFun
         return res.status(410).json({
           error: {
             message:
-              'This invoice was already issued and its stored file is no longer available. Re-issue a copy from the admin order page.',
+              'This invoice was already issued and its stored file is no longer available. Contact support for a copy.',
           },
         });
       }
     }
 
-    // Fallback: no stored file AND no number issued yet (legacy order).
-    const order = await getOrderForInvoice(id as string);
-    const pdf = await generateInvoicePdf(order);
-    headers['Content-Length'] = String(pdf.length);
-    res.set(headers);
-    return res.send(pdf);
+    /* ---- 2. not issued yet: is this order billable at all? ---- */
+    // COD is billable from the moment the order is placed — the invoice states
+    // the amount due on delivery. Prepaid is billable only once PayU has
+    // verified payment, which postOrderConfirmed enforces on the callback.
+    const isCod = /cash|\bcod\b/i.test(String(orderRow.payment_method || ''));
+    if (!isCod && String(orderRow.payment_status || '') !== 'paid') {
+      return res.status(409).json({
+        error: {
+          message: 'The invoice will be available after payment is verified.',
+        },
+      });
+    }
+
+    /* ---- 3. generate ONCE through the same claim path, then serve ---- */
+    // sendInvoiceAuto is atomic: whoever claims the order generates the PDF.
+    // If the automatic trigger or the cron already claimed it, this call is a
+    // no-op and we simply serve whatever was stored. That is what keeps a
+    // customer clicking "Download" from ever producing a second invoice.
+    const dispatch = await invoiceDispatchService.sendInvoiceAuto(orderRow.id);
+    if (dispatch.reason && !dispatch.invoiceUrl) {
+      console.error(`[Invoice] on-demand generation failed for ${orderRow.order_number}: ${dispatch.reason}`);
+      return res.status(503).json({
+        error: {
+          message: `The invoice could not be generated yet: ${dispatch.reason}`,
+        },
+      });
+    }
+
+    if (dispatch.invoiceUrl && config.invoiceStorageBucket) {
+      const { data, error } = await supabase.storage
+        .from(config.invoiceStorageBucket)
+        .download(dispatch.invoiceUrl);
+      if (!error && data) {
+        return send(Buffer.from(await data.arrayBuffer()));
+      }
+      console.warn(`[Invoice] freshly generated PDF not readable from storage: ${error?.message}`);
+    }
+
+    // Last resort, and only for an order with no number issued yet: render it
+    // now without persisting. Never reached once the migration is applied,
+    // because step 3 always claims and stores first.
+    if (dispatch.invoiceNumber && dispatch.skipped) {
+      const order = await getOrderForInvoice(id as string);
+      return send(await generateInvoicePdf(order));
+    }
+
+    return res.status(503).json({
+      error: {
+        message: 'The invoice is being generated. Try again in a moment.',
+      },
+    });
   } catch (error: any) {
     if (error.status === 404) {
       return res.status(404).json({ error: { message: error.message } });
@@ -300,17 +404,32 @@ export const downloadInvoice = async (req: Request, res: Response, next: NextFun
   }
 };
 
-/** Regenerate + resend the PDF invoice over WhatsApp (customer and admin). */
-export const resendInvoice = async (req: Request, res: Response, next: NextFunction) => {
+/**
+ * Read-only invoice status for the admin Orders UI.
+ *
+ * Deliberately does NOT send anything. Invoice delivery is fully automatic
+ * (COD at placement, PayU on verified callback) with a cron sweep retrying up
+ * to MAX_INVOICE_ATTEMPTS times; a manual "resend" endpoint is a second way to
+ * deliver the same tax document and therefore a second way to double-send it.
+ */
+export const invoiceStatus = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
 
-    // Owner-or-admin check (mirrors the Shiprocket invoice endpoint).
-    const { data: orderRow } = await supabase
+    const { data: orderRow, error: lookupError } = await supabase
       .from('orders')
-      .select('id, user_id')
+      .select('id, user_id, order_number, invoice_number, invoice_url, invoice_sent_at, invoice_error')
       .eq('id', id)
       .maybeSingle();
+
+    if (lookupError) {
+      console.error(`[Invoice] status lookup failed for ${id}:`, lookupError.message);
+      return res.status(503).json({
+        error: {
+          message: `Could not read this order (${lookupError.code || 'database error'}). The database schema is incomplete.`,
+        },
+      });
+    }
     if (!orderRow) {
       return res.status(404).json({ error: { message: 'Order not found' } });
     }
@@ -318,16 +437,33 @@ export const resendInvoice = async (req: Request, res: Response, next: NextFunct
       return res.status(403).json({ error: { message: 'Forbidden' } });
     }
 
-    const result = await invoiceDispatchService.resendInvoiceDispatch(id as string);
-    const channels = [result.email, result.whatsapp]
-      .filter((s) => s === 'sent')
-      .length;
+    // The channel log is the source of truth for per-recipient delivery.
+    const whatsapp = await getLogEntry('invoice_customer', `invoice_customer:${id}`);
+    const adminCopy = await getLogEntry('invoice_admin', `invoice_admin:${id}`);
+
+    const extra = await optionalInvoiceTracking(id as string);
+    const status = deriveInvoiceStatus({
+      invoice_sent_at: orderRow.invoice_sent_at,
+      invoice_error: orderRow.invoice_error,
+      ...extra,
+    });
+
     res.json({
-      data: result,
-      message:
-        channels > 0
-          ? `Invoice ${result.invoiceNumber} resent (${[result.email === 'sent' && 'email', result.whatsapp === 'sent' && 'WhatsApp'].filter(Boolean).join(' + ')}).`
-          : `Invoice could not be resent: ${result.reason || 'no channel available'}`,
+      data: {
+        orderNumber: orderRow.order_number,
+        invoiceNumber: orderRow.invoice_number,
+        // Object path, not a URL. The admin renders it as plain text and the
+        // download endpoint resolves it.
+        invoiceUrl: orderRow.invoice_url,
+        status: status.status,
+        sentAt: status.sentAt,
+        error: status.error,
+        attempts: status.attempts,
+        maxAttempts: invoiceDispatchService.MAX_INVOICE_ATTEMPTS,
+        whatsapp: whatsapp?.status || null,
+        whatsappError: whatsapp?.error || null,
+        adminCopy: adminCopy?.status || null,
+      },
     });
   } catch (error: any) {
     if (error.status === 404) {
