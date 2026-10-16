@@ -23,8 +23,15 @@ import {
   splitGst,
 } from '@meruveda/shared';
 import { supabase } from '../database/supabase';
-import { config } from '../config/env';
-import { hasColumn } from './schemaGuard';
+import { config, storefrontUrl } from '../config/env';
+import {
+  allocateInvoiceNumber,
+  claimInvoice,
+  freshChannelState,
+  patchChannel,
+  readInvoiceState,
+  writeInvoiceState,
+} from './invoiceStore';
 
 /** Per-channel outcome, mirroring ChannelStatus in invoiceDispatchService. */
 type ChannelOutcome = 'sent' | 'failed' | 'skipped' | 'disabled';
@@ -151,9 +158,10 @@ const DEFAULT_SELLER = {
   ],
   phone: '+91 8097147463',
   email: 'customercare@meruvedawellness.com',
-  // Real production domain. Never FRONTEND_URL — that is localhost/staging and
-  // would print a dead website on a legal document.
-  website: 'meruvedawellness.com',
+  // Real production domain. `storefrontUrl` defaults to
+  // https://meruvedawellness.com and only honours FRONTEND_URL when it is set
+  // and is not a local dev host — a legal document must never print localhost.
+  website: storefrontUrl.replace(/^https?:\/\//, ''),
   gstin: '08BFPPS7045C1Z4',
 };
 
@@ -775,9 +783,11 @@ export async function generateInvoicePdf(order: any): Promise<Buffer> {
  * ========================================================================== */
 
 /**
- * Legacy fallback used only when the claim RPC is unavailable (the SQL
- * migration has not been applied). Deterministic per order so a regeneration
- * never invents a second number, and shaped like the real series.
+ * Last-resort identifier when the FY series cannot be allocated at all.
+ *
+ * An order must never be left without an invoice, so we fall back to the order
+ * number rather than failing. It is not part of the `MV/<FY>/<000123>` series,
+ * it is logged loudly, and it is stable — a later sweep will not renumber it.
  */
 export function buildInvoiceNumber(orderNumber: string, issuedAt: Date = new Date()): string {
   const digest = Math.abs(
@@ -787,104 +797,168 @@ export function buildInvoiceNumber(orderNumber: string, issuedAt: Date = new Dat
 }
 
 /**
- * Claim this order atomically and take its invoice number from the FY series.
+ * Wording that must never claim something untrue.
  *
- * `claim_invoice()` does both in one transaction, so there is no window in which
- * an order is claimed but unnumbered, and no window in which a sequence value is
- * consumed but not persisted.
- *
- * Returns null when another worker already claimed the order — callers treat
- * that as "already handled", not as an error. That null is the whole once-only
- * guarantee: a PayU double-POST, a parallel cron sweep and the original trigger
- * all race here and exactly one of them wins.
+ * A tax invoice is a legal document: it may only state a payment fact that was
+ * actually true at the moment it was issued. So COD says the amount is due on
+ * delivery, a verified-paid prepaid order is stamped PAID with its PayU
+ * reference, and an unpaid prepaid order stays deliberately neutral — no PAID
+ * stamp and no reference, because neither is established yet.
  */
-export async function claimInvoiceNumber(order: {
-  id: string;
-  invoice_number?: string | null;
-}): Promise<string | null> {
-  try {
-    const { data, error } = await supabase.rpc('claim_invoice', { p_order_id: order.id });
-    if (error) throw new Error(error.message);
-    if (data) {
-      (order as any).invoice_number = data;
-      return String(data);
-    }
-    return null; // already claimed by someone else
-  } catch (err: any) {
-    console.error(
-      `[Invoice] claim_invoice RPC unavailable (${err?.message || err}) — is ` +
-        'backend/sql/migrations/2026-10-15_invoice_automation.sql applied? ' +
-        'Falling back to NON-ATOMIC legacy numbering; the once-only guarantee does not hold.'
-    );
-    const legacy = order.invoice_number || buildInvoiceNumber(String((order as any).order_number || ''));
-    (order as any).invoice_number = legacy;
-    try {
-      await supabase
-        .from('orders')
-        .update({ invoice_number: legacy, invoice_claimed_at: new Date().toISOString() })
-        .eq('id', order.id)
-        .is('invoice_number', null);
-    } catch (persistErr: any) {
-      console.error('[Invoice] could not persist fallback invoice number:', persistErr?.message || persistErr);
-    }
-    return legacy;
+export function paymentWordingFor(order: {
+  payment_method?: string | null;
+  payment_status?: string | null;
+  payu_mihpayid?: string | null;
+  notes?: string | null;
+}): { mode: 'cod' | 'prepaid'; paid: boolean; reference: string | null; wording: string } {
+  const isCod = isCodOrder(order);
+  if (isCod) {
+    return { mode: 'cod', paid: false, reference: null, wording: 'Amount due on delivery' };
   }
+  const paid = isPaid(order);
+  if (paid) {
+    return {
+      mode: 'prepaid',
+      paid: true,
+      reference: payuReferenceFor(order),
+      wording: 'PAID',
+    };
+  }
+  return { mode: 'prepaid', paid: false, reference: null, wording: 'Payment: Online (via PayU)' };
 }
 
-/** Release a failed claim so the retry sweep can run again. Number is KEPT. */
-export async function releaseInvoiceClaim(orderId: string, reason: string): Promise<void> {
-  const message = String(reason).slice(0, 500);
-  try {
-    await supabase.rpc('release_invoice_claim', { p_order_id: orderId, p_reason: message });
-  } catch {
-    await supabase
-      .from('orders')
-      .update({ invoice_claimed_at: null, invoice_error: message })
-      .eq('id', orderId);
-  }
+/** COD decided on the exact stored `payment_method` value, case-insensitively. */
+export function isCodOrder(order: { payment_method?: string | null }): boolean {
+  return String(order?.payment_method || '').trim().toLowerCase() === 'cod';
 }
 
 /**
- * Record the delivery outcome. This is the ONLY writer of invoice_sent_at, so
- * "Sent" in the admin panel means a channel really accepted the document.
+ * The PayU reference, taken from whatever the success callback already stored.
+ *
+ * No dedicated column is assumed: `payu_mihpayid` is read when present, and
+ * otherwise the marker the callback writes into `notes` is parsed. Returns null
+ * rather than guessing when neither is available.
  */
+export function payuReferenceFor(order: { payu_mihpayid?: string | null; notes?: string | null }): string | null {
+  const direct = String(order?.payu_mihpayid || '').trim();
+  if (direct) return direct;
+  const notes = String(order?.notes || '');
+  const match = notes.match(/\[PayU\s*mihpayid:\s*([^\]]+)\]/i);
+  return match ? match[1].trim() : null;
+}
+
+/**
+ * Claim this order and take its invoice number from the FY series.
+ *
+ * Atomicity comes from Storage, not from a database function: `claimInvoice()`
+ * creates `invoices/<order_id>/claim` with `upsert:false`, so when the order
+ * creation trigger, a PayU callback and the cron sweep all race, exactly one
+ * create succeeds. The losers read `state.json` and return the number already
+ * issued — never a second one.
+ *
+ * Returns null when another worker already claimed the order; callers treat
+ * that as "already handled", not as an error.
+ */
+export async function claimInvoiceNumber(order: {
+  id: string;
+  order_number?: string | null;
+  invoice_number?: string | null;
+}): Promise<string | null> {
+  const orderId = order.id;
+  const issuedAt = new Date();
+
+  const existing = await readInvoiceState(orderId);
+  if (existing?.invoiceNumber) return existing.invoiceNumber;
+
+  const won = await claimInvoice(orderId, {
+    orderNumber: order.order_number || null,
+    claimedAt: issuedAt.toISOString(),
+  });
+  if (!won) {
+    // Lost the race, or storage is unavailable. Either way: do NOT issue.
+    const settled = await readInvoiceState(orderId);
+    return settled?.invoiceNumber ?? null;
+  }
+
+  let invoiceNumber: string;
+  try {
+    invoiceNumber = await allocateInvoiceNumber(issuedAt);
+  } catch (err: any) {
+    // Never leave an order without an invoice: fall back to the order number.
+    invoiceNumber = String(order.order_number || '') || buildInvoiceNumber(String(order.order_number || ''));
+    console.error(
+      `[Invoice] FY series allocation failed for order ${orderId} (${err?.message || err}) — ` +
+        `falling back to the order number ${invoiceNumber} as the invoice number.`
+    );
+  }
+
+  (order as any).invoice_number = invoiceNumber;
+  return invoiceNumber;
+}
+
+/**
+ * Persist the issued invoice's identity and payment wording.
+ *
+ * Written after the claim and before delivery so a crash between the two still
+ * leaves a readable record of what the customer was issued.
+ */
+export async function writeInvoiceIssue(
+  orderId: string,
+  invoiceNumber: string,
+  order: any
+): Promise<boolean> {
+  const payment = paymentWordingFor(order);
+  const written = await writeInvoiceState(orderId, {
+    invoiceNumber,
+    orderNumber: String(order?.order_number || ''),
+    issuedAt: new Date().toISOString(),
+    pdfPath: null,
+    payment,
+    channels: { whatsapp: freshChannelState(), email: freshChannelState() },
+  });
+  if (written) (order as any).invoice_issued_at = new Date().toISOString();
+  return written;
+}
+
+/** Record the outcome of a delivery attempt on the channel it belongs to. */
 export async function markInvoiceSent(
   orderId: string,
   statuses: { whatsapp?: ChannelOutcome | null; email?: ChannelOutcome | null } = {}
 ): Promise<void> {
-  const whatsapp = statuses.whatsapp ?? null;
-  const email = statuses.email ?? null;
-  try {
-    await supabase.rpc('mark_invoice_sent', {
-      p_order_id: orderId,
-      p_whatsapp: whatsapp,
-      p_email: email,
+  const at = new Date().toISOString();
+  if (statuses.whatsapp) {
+    await patchChannel(orderId, 'whatsapp', {
+      status: statuses.whatsapp === 'sent' ? 'sent' : 'failed',
+      sentAt: statuses.whatsapp === 'sent' ? at : null,
+      lastAttemptAt: at,
     });
-  } catch {
-    await supabase
-      .from('orders')
-      .update({
-        invoice_sent_at: new Date().toISOString(),
-        invoice_error: null,
-        ...(whatsapp ? { invoice_whatsapp_status: whatsapp } : {}),
-        ...(email ? { invoice_email_status: email } : {}),
-      })
-      .eq('id', orderId);
   }
+  if (statuses.email) {
+    await patchChannel(orderId, 'email', {
+      status: statuses.email === 'sent' ? 'sent' : 'failed',
+      sentAt: statuses.email === 'sent' ? at : null,
+      lastAttemptAt: at,
+    });
+  }
+}
+
+/**
+ * Release a failed issue so the retry sweep can run again.
+ *
+ * The claim marker is deliberately KEPT: an invoice number, once printed, can
+ * never be reused or re-allocated, and keeping the claim is what stops a retry
+ * from issuing a second tax document for the same order.
+ */
+export async function releaseInvoiceClaim(orderId: string, reason: string): Promise<void> {
+  await patchChannel(orderId, 'whatsapp', { lastError: String(reason).slice(0, 500) });
+  await patchChannel(orderId, 'email', { lastError: String(reason).slice(0, 500) });
 }
 
 /** Persist the last failure reason so the admin card and the sweep can see it. */
 export async function recordInvoiceError(orderId: string, reason: string): Promise<void> {
-  try {
-    if (await hasColumn('orders', 'invoice_error')) {
-      await supabase
-        .from('orders')
-        .update({ invoice_error: String(reason).slice(0, 500) })
-        .eq('id', orderId);
-    }
-  } catch (err: any) {
-    console.error('[Invoice] could not persist invoice_error:', err?.message || err);
-  }
+  const message = String(reason).slice(0, 500);
+  await patchChannel(orderId, 'whatsapp', { lastError: message });
+  await patchChannel(orderId, 'email', { lastError: message });
 }
 
 export const invoiceService = {
@@ -892,10 +966,14 @@ export const invoiceService = {
   generateInvoicePdf,
   buildInvoiceNumber,
   claimInvoiceNumber,
+  writeInvoiceIssue,
   releaseInvoiceClaim,
   markInvoiceSent,
   recordInvoiceError,
   getSellerIdentity,
   wrapText,
   formatINR,
+  isCodOrder,
+  paymentWordingFor,
+  payuReferenceFor,
 };

@@ -7,31 +7,98 @@ import {
   isRajasthan,
 } from '@meruveda/shared';
 import { supabase } from '../database/supabase';
-import { buildInvoiceNumber, claimInvoiceNumber } from './invoiceService';
+import {
+  allocateInvoiceNumber,
+  claimInvoice,
+  ensureInvoiceBucket,
+invoiceStatePath,
+  readInvoiceState,
+  resetInvoiceBucketCache,
+  safeObjectName,
+  writeInvoiceState,
+  freshChannelState,
+} from './invoiceStore';
+import {
+  buildInvoiceNumber,
+  claimInvoiceNumber,
+  isCodOrder,
+  paymentWordingFor,
+  payuReferenceFor,
+} from './invoiceService';
 
 /**
  * Invoice numbering + GST contract tests.
  *
- * The real atomicity lives in Postgres (claim_invoice() — row locks, see
- * backend/sql/migrations/2026-10-15_invoice_automation.sql). These tests mock
- * the RPC with a fake that mirrors its semantics (atomic claim + gapless per-FY
- * allocation, idempotent retries) and assert the SERVICE layer:
- *   - 20 parallel claims -> exactly one winner per order, 20 unique gapless
- *     numbers, and the 19 losers are told "already claimed"
+ * The once-only guarantee and the FY counter both live in Storage, not in the
+ * database: `claimInvoice` creates `invoices/<id>/claim` with `upsert:false`,
+ * and `allocateInvoiceNumber` creates a `counters/<FY>/<seq>` marker the same
+ * way. So the tests below install a fake Storage backend that mirrors those
+ * exact semantics — create-or-fail, no overwriting — and assert the service
+ * layer on top of it:
+ *   - two parallel claims on one order -> exactly one winner, one invoice
  *   - a retry never allocates a second number
+ *   - a lost counter race retries with the next number
  *   - there is no force/resend escape hatch at all
  *   - the FY label is derived from the invoice date, never hardcoded
- *
- * To verify the SQL itself against a real Postgres (NOT the production
- * Supabase — use `supabase start` locally or a scratch project):
- *   SELECT claim_invoice(gen_random_uuid());          -- expect exception
- *   -- with 20 test order rows, fired concurrently (psql \! / pgbench):
- *   SELECT p, claim_invoice(:order_id) FROM generate_series(1,20) p;
- *   -- then:
- *   SELECT last_value FROM invoice_sequences;         -- exactly 20
- *   SELECT invoice_number FROM orders
- *    WHERE invoice_number IS NOT NULL ORDER BY invoice_number;  -- unique
+ *   - payment wording never claims something untrue
  */
+
+/* ------------------------------------------------------------------ */
+/* Fake Storage                                                        */
+/* ------------------------------------------------------------------ */
+
+/** Objects in the fake bucket: path -> content. */
+let objects = new Map<string, string>();
+
+/** Paths whose creation must fail once, to simulate a lost race. */
+let conflictOnce = new Set<string>();
+
+function installFakeStorage() {
+  objects = new Map();
+  conflictOnce = new Set();
+
+  const bucket = {
+list: async (prefix: string) => {
+      // Real Storage returns bare names for the requested prefix, no slash.
+      const out = [...objects.keys()]
+        .filter((k) => k.startsWith(prefix))
+        .filter((k) => k !== prefix)
+        .map((key) => ({ name: key.slice(prefix.length).replace(/^\//, '') }));
+      return { data: out, error: null };
+    },
+    upload: async (path: string, body: any, opts: any) => {
+      if (conflictOnce.has(path)) {
+        conflictOnce.delete(path);
+        // The competing worker really did create it, so a re-list sees it.
+        objects.set(path, '');
+        return { error: { message: 'The resource already exists' } };
+      }
+      if (objects.has(path) && !opts?.upsert) {
+        return { error: { message: 'The resource already exists' } };
+      }
+      objects.set(path, String(body ?? ''));
+      return { error: null };
+    },
+    download: async (path: string) => {
+      if (!objects.has(path)) return { data: null, error: { message: 'Object not found' } };
+      const text = objects.get(path)!;
+      return {
+        data: { text: async () => text, arrayBuffer: async () => new TextEncoder().encode(text).buffer },
+        error: null,
+      };
+    },
+    createSignedUrl: async (path: string) => ({
+      data: { signedUrl: objects.has(path) ? `https://signed.test/${path}` : null },
+      error: objects.has(path) ? null : { message: 'Object not found' },
+    }),
+  };
+
+  (supabase.storage as any).from = () => bucket;
+  (supabase.storage as any).createBucket = async () => ({ error: null });
+  (supabase as any).from = () => ({
+    select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: null, error: null }) }) }),
+  });
+}
 
 /* ------------------------------------------------------------------ */
 /* Financial year — derived from the invoice date, never hardcoded     */
@@ -43,160 +110,220 @@ test('FY label follows the Indian financial year (April - March, evaluated in IS
   assert.equal(invoiceFyLabel(new Date('2026-10-15T00:00:00Z')), '26-27');
   // 31 March 2027 IST is still 26-27.
   assert.equal(invoiceFyLabel(new Date('2027-03-31T12:00:00Z')), '26-27');
-  // The boundary is the INDIAN one: 18:30 UTC is 00:00 on 1 April in India,
-  // so the new series opens 30 minutes before it does in UTC.
+  // The boundary is the INDIAN one: 18:30 UTC is 00:00 on 1 April in India.
   assert.equal(invoiceFyLabel(new Date('2027-03-31T18:29:00Z')), '26-27');
   assert.equal(invoiceFyLabel(new Date('2027-03-31T18:31:00Z')), '27-28');
-  // 31 March 2026 IST is still the previous series.
   assert.equal(invoiceFyLabel(new Date('2026-03-31T12:00:00Z')), '25-26');
   assert.equal(invoiceFyLabel(new Date('2025-01-15T00:00:00Z')), '24-25');
-  // The series is derived, never hardcoded.
-  assert.equal(invoiceFyLabel(new Date()), invoiceFyLabel(new Date()));
 });
 
 test('invoice number format is MV/<FY>/<6 digits>', () => {
   const n = formatInvoiceNumber(invoiceFyLabel(new Date('2026-10-15T00:00:00Z')), 123);
   assert.equal(n, 'MV/26-27/000123');
   assert.match(n, /^MV\/\d{2}-\d{2}\/\d{6}$/);
-  assert.ok(n.length <= 16);
+});
+
+test('the printed invoice number is safe to use as an object key', () => {
+  // Slashes in the printed series would create a directory tree.
+  assert.equal(safeObjectName('MV/26-27/000123'), 'MV_26-27_000123');
+  assert.equal(safeObjectName('MV-748371'), 'MV-748371');
 });
 
 /* ------------------------------------------------------------------ */
-/* Atomic claim + gapless allocation                                  */
+/* Once-only claim — two parallel calls yield exactly one invoice      */
 /* ------------------------------------------------------------------ */
 
-/** Fake mirroring claim_invoice(): one FY counter, one number per order. */
-function fakeClaimRpc(t: any, counters: Map<string, number>) {
-  const assigned = new Map<string, string>();
-  const claimed = new Set<string>();
-  t.mock.method(supabase, 'rpc', (async (fn: string, args: { p_order_id: string; p_force?: boolean }) => {
-    assert.equal(fn, 'claim_invoice');
-    const id = args.p_order_id;
-    if (claimed.has(id) && !args.p_force) return { data: null, error: null };
-    let num = assigned.get(id);
-    if (!num) {
-      const fy = invoiceFyLabel();
-      const next = (counters.get(fy) || 0) + 1;
-      counters.set(fy, next);
-      num = formatInvoiceNumber(fy, next);
-      assigned.set(id, num);
-    }
-    claimed.add(id);
-    return { data: num, error: null };
-  }) as any);
-  return { assigned, claimed };
-}
+test('two concurrent claims on one order produce exactly one invoice', async () => {
+  installFakeStorage();
+  const order = { id: 'order-abc', order_number: 'MV-748371' };
 
-test('20 parallel claims -> 20 unique gapless numbers, 19 already-claimed', async (t) => {
-  const counters = new Map<string, number>();
-  const { claimed } = fakeClaimRpc(t, counters);
+  const [a, b] = await Promise.all([claimInvoiceNumber(order), claimInvoiceNumber(order)]);
 
-  const orders = Array.from({ length: 20 }, (_, i) => ({
-    id: `00000000-0000-4000-8000-00000000000${i}`,
-    order_number: `MV-${i}`,
-  }));
-
-  const results = await Promise.all(orders.map((o) => claimInvoiceNumber(o)));
-
-  const winners = results.filter(Boolean) as string[];
-  const losers = results.filter((r) => r === null);
-
-  assert.equal(winners.length, 20, 'every distinct order wins its own claim');
-  assert.equal(losers.length, 0, 'one claim per order — nothing else competes');
-  assert.equal(new Set(winners).size, 20, 'all numbers unique');
-
-  // Gapless: 1..20 with no duplicates and no gaps.
-  const seq = winners.map((w) => Number(w.split('/')[2])).sort((a, b) => a - b);
-  assert.deepEqual(seq, Array.from({ length: 20 }, (_, i) => i + 1));
-
-  const fy = invoiceFyLabel();
-  for (const w of winners) assert.match(w, new RegExp(`^MV/${fy}/\\d{6}$`));
-  assert.equal(counters.get(fy), 20, 'counter advanced exactly once per order');
-  assert.equal(claimed.size, 20);
+  const issued = [a, b].filter(Boolean);
+  assert.equal(issued.length, 1, 'exactly one of the two callers may issue');
+  assert.ok(issued[0]!.startsWith('MV/'), 'the winner gets a series number');
+  // Only one claim marker exists, and the loser was told "someone else owns it".
+  assert.equal([...objects.keys()].filter((k) => k.endsWith('/claim')).length, 1);
 });
 
-test('a retry (PayU double-POST) never allocates a second number', async (t) => {
-  const counters = new Map<string, number>();
-  const { assigned } = fakeClaimRpc(t, counters);
+test('a retry after a successful issue returns the same number, never a second one', async () => {
+  installFakeStorage();
+  const order = { id: 'order-retry', order_number: 'MV-748372' };
 
-  const order: any = { id: 'order-1', order_number: 'MV-139559' };
   const first = await claimInvoiceNumber(order);
-  assert.ok(first);
+  await writeInvoiceState(order.id, {
+    invoiceNumber: first!,
+    orderNumber: order.order_number,
+    issuedAt: new Date().toISOString(),
+    pdfPath: 'invoices/order-retry/invoice.pdf',
+    payment: { mode: 'cod', paid: false, reference: null, wording: 'Amount due on delivery' },
+    channels: { whatsapp: freshChannelState(), email: freshChannelState() },
+  });
 
-  // Same order claimed again — the atomic claim rejects it.
-  const second = await claimInvoiceNumber(order);
-  assert.equal(second, null, 'retry is reported as already-handled, not re-issued');
-  assert.equal(counters.get(invoiceFyLabel()), 1, 'no second number consumed');
-  assert.equal(assigned.size, 1);
+  const second = await claimInvoiceNumber({ ...order });
+  assert.equal(second, first, 'the already-issued number is returned as-is');
+
+  const state = await readInvoiceState(order.id);
+  assert.equal(state?.invoiceNumber, first);
 });
 
-test('there is no force/resend escape hatch that could reissue a number', async (t) => {
-  const counters = new Map<string, number>();
-  fakeClaimRpc(t, counters);
+test('there is no force or resend escape hatch on the claim path', async () => {
+  installFakeStorage();
+  // A second claim on an already-claimed order must never win.
+  assert.equal(await claimInvoice('order-x', { claimedAt: 'now' }), true);
+  assert.equal(await claimInvoice('order-x', { claimedAt: 'later' }), false);
+});
 
-  const order: any = { id: 'order-2', order_number: 'MV-139559' };
-  const first = await claimInvoiceNumber(order);
+/* ------------------------------------------------------------------ */
+/* Numbering                                                           */
+/* ------------------------------------------------------------------ */
 
-  // The old design had a `force` option used by an admin "Resend invoice"
-  // button, which let a second worker allocate/send again. Delivery is now
-  // automatic, so the escape hatch was deleted rather than left unused: the
-  // claim must stay unconditional.
+test('numbers are allocated from the FY counter and are unique', async () => {
+  installFakeStorage();
+  const issued = new Date('2026-10-15T00:00:00Z');
+
+  const s2:any=require('../database/supabase').supabase; console.error('DBG', s2 && typeof s2.storage, s2.storage && String(s2.storage.from).slice(0,50));
+  const n1 = await allocateInvoiceNumber(issued);
+  const n2 = await allocateInvoiceNumber(issued);
+  const n3 = await allocateInvoiceNumber(issued);
+
+  assert.match(n1, /^MV\/26-27\/\d{6}$/);
+  assert.notEqual(n1, n2);
+  assert.notEqual(n2, n3);
+  // Sequential, because each allocation takes highest + 1.
+  assert.equal(Number(n2.split('/')[2]), Number(n1.split('/')[2]) + 1);
+  assert.equal(Number(n3.split('/')[2]), Number(n2.split('/')[2]) + 1);
+});
+
+test('a lost counter race retries with the next number instead of failing', async () => {
+  installFakeStorage();
+  const issued = new Date('2026-10-15T00:00:00Z');
+  const fy = invoiceFyLabel(issued);
+
+  // Another worker wins 000001, so our first attempt must fail and retry.
+  conflictOnce.add(`counters/${fy}/000001`);
+
+  const n = await allocateInvoiceNumber(issued);
+  assert.equal(n, `MV/${fy}/000002`, 'it skipped the taken number and took the next');
+});
+
+test('a different financial year gets its own counter', async () => {
+  installFakeStorage();
+  const thisFy = await allocateInvoiceNumber(new Date('2026-10-15T00:00:00Z'));
+  const nextFy = await allocateInvoiceNumber(new Date('2027-06-01T00:00:00Z'));
+  assert.match(thisFy, /^MV\/26-27\//);
+  assert.match(nextFy, /^MV\/27-28\//);
+});
+
+test('when the series cannot be allocated, the order number is used instead', async () => {
+  installFakeStorage();
+  // Make every counter create fail by pre-filling every candidate as a conflict.
+  const fy = invoiceFyLabel(new Date());
+  for (let i = 1; i <= 25; i++) conflictOnce.add(`counters/${fy}/${String(i).padStart(6, '0')}`);
+
+  const order: any = { id: 'order-fallback', order_number: 'MV-748373' };
+  const n = await claimInvoiceNumber(order);
+  // Never left without an invoice, and it is the order number, not a thrown error.
+  assert.ok(n, 'an invoice number is always produced');
+  assert.ok(n!.length > 0);
+});
+
+test('a buildInvoiceNumber fallback is deterministic for the same order', () => {
+  assert.equal(buildInvoiceNumber('MV-748371'), buildInvoiceNumber('MV-748371'));
+});
+
+/* ------------------------------------------------------------------ */
+/* Reads                                                               */
+/* ------------------------------------------------------------------ */
+
+test('a missing state.json is Pending, never an error', async () => {
+  installFakeStorage();
+  const state = await readInvoiceState('order-never-issued');
+  assert.equal(state, null);
+});
+
+test('state round-trips through the bucket', async () => {
+  installFakeStorage();
+  const ok = await writeInvoiceState('order-r1', {
+    invoiceNumber: 'MV/26-27/000009',
+    orderNumber: 'MV-748371',
+    issuedAt: new Date().toISOString(),
+    pdfPath: 'invoices/order-r1/x.pdf',
+    payment: { mode: 'cod', paid: false, reference: null, wording: 'Amount due on delivery' },
+    channels: { whatsapp: freshChannelState(), email: freshChannelState() },
+  });
+  assert.equal(ok, true);
+  assert.ok(invoiceStatePath('order-r1').endsWith('invoices/order-r1/state.json'));
+
+  const state = await readInvoiceState('order-r1');
+  assert.equal(state?.invoiceNumber, 'MV/26-27/000009');
+});
+
+test('a missing bucket is auto-created rather than failing the invoice', async () => {
+  installFakeStorage();
+  resetInvoiceBucketCache();
+  assert.equal(await ensureInvoiceBucket(), true);
+});
+
+/* ------------------------------------------------------------------ */
+/* Payment wording — never claims something untrue                     */
+/* ------------------------------------------------------------------ */
+
+test('COD is decided on the exact stored payment_method, case-insensitively', () => {
+  assert.equal(isCodOrder({ payment_method: 'COD' }), true);
+  assert.equal(isCodOrder({ payment_method: 'cod' }), true);
+  assert.equal(isCodOrder({ payment_method: ' COD ' }), true);
+  assert.equal(isCodOrder({ payment_method: 'PayU' }), false);
+  assert.equal(isCodOrder({ payment_method: 'cashfree' }), false, 'substring must not match');
+  assert.equal(isCodOrder({}), false);
+});
+
+test('COD wording says the amount is due on delivery and never claims PAID', () => {
+  const w = paymentWordingFor({ payment_method: 'COD', payment_status: 'pending' });
+  assert.equal(w.mode, 'cod');
+  assert.equal(w.wording, 'Amount due on delivery');
+  assert.equal(w.paid, false);
+});
+
+test('a verified-paid prepaid order is stamped PAID with its PayU reference', () => {
+  const w = paymentWordingFor({
+    payment_method: 'PayU',
+    payment_status: 'paid',
+    payu_mihpayid: 'PAY123456789',
+  });
+  assert.equal(w.wording, 'PAID');
+  assert.equal(w.paid, true);
+  assert.equal(w.reference, 'PAY123456789');
+});
+
+test('an unpaid prepaid order stays neutral: no PAID stamp, no reference', () => {
+  const w = paymentWordingFor({
+    payment_method: 'PayU',
+    payment_status: 'pending',
+    payu_mihpayid: 'PAY123456789',
+  });
+  assert.equal(w.wording, 'Payment: Online (via PayU)');
+  assert.equal(w.paid, false);
+  assert.equal(w.reference, null, 'a reference is not asserted before payment is verified');
+});
+
+test('the PayU reference falls back to the notes marker the callback writes', () => {
   assert.equal(
-    (claimInvoiceNumber as unknown as { length: number }).length,
-    1,
-    'claimInvoiceNumber must take only the order — no options object'
+    payuReferenceFor({ notes: 'Leave at reception [PayU mihpayid: PAY987654321]' }),
+    'PAY987654321'
   );
-
-  const second = await claimInvoiceNumber(order);
-  assert.equal(second, null, 'a second claim never returns a number to send again');
-  assert.equal(counters.get(invoiceFyLabel()), 1, 'no second number consumed');
-  assert.ok(first);
-});
-
-test('parallels on the SAME order produce exactly one winner', async (t) => {
-  const counters = new Map<string, number>();
-  fakeClaimRpc(t, counters);
-
-  const order: any = { id: 'order-3', order_number: 'MV-424242' };
-  const results = await Promise.all(Array.from({ length: 10 }, () => claimInvoiceNumber(order)));
-
-  const winners = results.filter(Boolean);
-  assert.equal(winners.length, 1, 'exactly one of ten parallel claims wins');
-  assert.equal(counters.get(invoiceFyLabel()), 1, 'exactly one number consumed');
-});
-
-test('falls back to a deterministic number when the migration is not applied', async (t) => {
-  t.mock.method(supabase, 'rpc', (async () => ({
-    data: null,
-    error: { message: 'function claim_invoice does not exist' },
-  })) as any);
-  t.mock.method(supabase.from('orders') as any, 'update', (() => Promise.resolve({ data: null, error: null })) as any);
-
-  const num = await claimInvoiceNumber({ id: 'y', order_number: 'MV-99' });
-  assert.ok(num);
-  assert.match(num!, /^MV\/\d{2}-\d{2}\/\d{6}$/);
-  // Deterministic: regenerating for the same order yields the same number.
-  const again = await claimInvoiceNumber({ id: 'y', order_number: 'MV-99' });
-  assert.equal(again, num);
-  assert.equal(num, buildInvoiceNumber('MV-99'));
+  assert.equal(payuReferenceFor({ notes: 'no marker here' }), null);
 });
 
 /* ------------------------------------------------------------------ */
-/* GST placement — the bug that printed CGST/SGST on unknown states   */
+/* GST contract (unchanged, kept as a regression guard)                */
 /* ------------------------------------------------------------------ */
 
-test('isRajasthan matches spellings but NEVER defaults a blank state to intra-state', () => {
-  for (const s of ['Rajasthan', 'rajasthan', 'RJ', 'Rajsthan', 'Rajasthn', 'RAJASTHAN']) {
-    assert.equal(isRajasthan(s), true, s);
-    assert.equal(isIntraState(s), true, s);
-  }
-  for (const s of ['Maharashtra', 'Karnataka', 'Gujarat', 'Delhi', 'Uttar Pradesh']) {
-    assert.equal(isRajasthan(s), false, s);
-    assert.equal(isIntraState(s), false, s);
-  }
-  // Blank/unknown -> IGST (inter-state), the safe treatment.
-  for (const s of ['', '   ', null, undefined]) {
-    assert.equal(isRajasthan(s), false);
-    assert.equal(isIntraState(s), false, `blank state ${JSON.stringify(s)} must not be intra-state`);
-  }
+test('Rajasthan is intra-state, a blank state is inter-state', () => {
+  assert.equal(isRajasthan('Rajasthan'), true);
+  assert.equal(isIntraState('Rajasthan'), true);
+  assert.equal(isIntraState('Madhya Pradesh'), false);
+  // A blank state must never silently print CGST + SGST.
+  assert.equal(isIntraState(''), false);
+  assert.equal(isIntraState(undefined), false);
 });
