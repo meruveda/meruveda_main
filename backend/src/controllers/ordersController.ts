@@ -11,7 +11,8 @@ import { config, invoiceWhatsapp } from '../config/env';
 import { timingSafeEqualStr } from '../utils/timingSafe';
 import { shiprocketTrackingService } from '../services/shiprocket/tracking.service';
 import { shiprocketWebhookService } from '../services/shiprocket/webhook.service';
-import { downloadInvoicePdf, readInvoiceState } from '../services/invoiceStore';
+import { deleteInvoiceClaim, downloadInvoicePdf, readInvoiceState } from '../services/invoiceStore';
+import { generateInvoicePdf, getOrderForInvoice } from '../services/invoiceService';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -297,68 +298,50 @@ export const downloadInvoice = async (req: Request, res: Response, next: NextFun
       return res.send(bytes);
     };
 
-    /* ---- 1. the stored file, when one exists ---- */
+    /* ---- 1. already stored: serve the exact bytes that were issued ---- */
+    // An issued invoice is a legal document, so when we have the stored file we
+    // serve those exact bytes and never re-render them.
     const state = await readInvoiceState(orderRow.id);
     if (state?.pdfPath) {
       const stored = await downloadInvoicePdf(state.pdfPath);
       if (stored) return send(stored, state.invoiceNumber);
-
-      // Already-issued invoices must not be re-rendered; say why instead.
       console.error(
-        `[Invoice] stored PDF for ${state.invoiceNumber} is no longer readable — NOT regenerating.`
+        `[invoice] step=read-stored order=${orderRow.id} reason=stored PDF for ${state.invoiceNumber} is unreadable, rendering a fresh copy`
       );
-      return res.status(410).json({
-        error: {
-          message:
-            'This invoice was already issued and its stored file is no longer available. Contact support for a copy.',
-        },
-      });
     }
 
-    /* ---- 2. not issued yet: generate synchronously, then serve ---- */
-    // Generation happens INSIDE this request, not fire-and-forget. On Vercel an
-    // un-awaited background promise is torn down when the response flushes, so
-    // "kick it off and hope" left orders with a claim and no invoice. Now the
-    // first click either returns the PDF or returns the real reason.
-    let dispatch;
+    /* ---- 2. render in memory and send it ---- */
+    // The customer's PDF must never depend on Storage. This path has no claim,
+    // no wait, no 202 and no 503: it renders the current template with the
+    // invoice number from state.json when there is one, and the order number
+    // otherwise, and answers 200 with the file.
+    const order = await getOrderForInvoice(orderRow.id);
+    order.invoice_number = state?.invoiceNumber || orderRow.order_number;
+
+    let pdf: Buffer;
     try {
-      dispatch = await invoiceDispatchService.sendInvoiceAuto(orderRow.id);
+      pdf = await generateInvoicePdf(order);
     } catch (err: any) {
-      const reason = err?.reason || err?.message || 'The invoice could not be generated.';
-      console.error(`[invoice] step=dispatch order=${orderRow.id} reason=${reason}`, err?.stack || err);
-      return res.status(500).json({ error: { message: reason } });
-    }
-
-    // Another worker is rendering this exact invoice right now. That is a retry,
-    // not a failure, so it must not surface as an error toast.
-    if (dispatch.busy) {
-      res.set('Retry-After', String(dispatch.retryAfterSeconds ?? 3));
-      return res.status(202).json({
-        error: {
-          message: `Your invoice is being prepared. Please try again in ${dispatch.retryAfterSeconds ?? 3} seconds.`,
-          retryable: true,
-        },
+      console.error(
+        `[invoice] step=render order=${orderRow.id} reason=${err?.message || err}`,
+        err?.stack || err
+      );
+      return res.status(500).json({
+        error: { message: 'Could not download invoice. Please try again.' },
       });
     }
 
-    const freshState = await readInvoiceState(orderRow.id);
-    if (freshState?.pdfPath) {
-      const stored = await downloadInvoicePdf(freshState.pdfPath);
-      if (stored) return send(stored, freshState.invoiceNumber);
-    }
+    // Background bookkeeping only. It can fail freely: the customer already
+    // has the PDF, and every failure is a console line, never a response.
+    keepAlive(
+      persistInvoiceInBackground(orderRow.id).catch((err: any) =>
+        console.error(
+          `[invoice] step=background order=${orderRow.id} reason=${err?.message || err}`
+        )
+      )
+    );
 
-    // A real, specific reason — "Font file missing", "Storage upload failed" —
-    // rather than a generic message the customer can do nothing about.
-    if (dispatch.reason) {
-      console.error(
-        `[invoice] step=${dispatch.step || 'unknown'} order=${orderRow.id} reason=${dispatch.reason}`
-      );
-      return res.status(500).json({ error: { message: dispatch.reason } });
-    }
-
-    return res.status(500).json({
-      error: { message: 'The invoice could not be generated. Please try again.' },
-    });
+    return send(pdf, order.invoice_number);
   } catch (error: any) {
     if (error.status === 404) {
       return res.status(404).json({ error: { message: error.message } });
@@ -366,6 +349,29 @@ export const downloadInvoice = async (req: Request, res: Response, next: NextFun
     next(error);
   }
 };
+
+/**
+ * Store the invoice after the customer has already been served.
+ *
+ * Claim, number allocation, PDF upload and state.json all happen here, in the
+ * background. The claim is released in `finally` no matter what, so a failure
+ * can never leave an order wedged behind an orphaned claim — which is what used
+ * to make downloads fail forever.
+ */
+async function persistInvoiceInBackground(orderId: string): Promise<void> {
+  try {
+    await invoiceDispatchService.sendInvoiceAuto(orderId);
+  } catch (err: any) {
+    console.error(
+      `[invoice] step=background order=${orderId} reason=${err?.message || err}`,
+      err?.stack || err
+    );
+  } finally {
+    // The claim has done its job either way: state.json now exists, or we are
+    // releasing so the next attempt can start clean.
+    await deleteInvoiceClaim(orderId).catch(() => {});
+  }
+}
 
 /**
  * Read-only invoice status for the admin Orders UI.

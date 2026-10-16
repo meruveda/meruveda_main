@@ -28,16 +28,13 @@ async function extractErrorMessage(err: unknown): Promise<string> {
   if (anyErr?.response?.status === 403) {
     return "You do not have access to this invoice.";
   }
-  if (anyErr?.response?.status === 404) {
+if (anyErr?.response?.status === 404) {
     return "Order not found.";
   }
-  if (anyErr?.response?.status === 410) {
-    return "This invoice was already issued and its stored file is no longer available. Contact support for a copy.";
-  }
-  if (anyErr?.response?.status === 503) {
-    return "Your invoice is being prepared. Please try again in a moment.";
-  }
-  return anyErr?.message || "Could not download the invoice.";
+  // One message for every real failure. The backend no longer answers 202 or 503
+  // for an invoice that is still being worked on, so there is nothing here to
+  // retry and no state for the caller to interpret.
+  return "Could not download invoice. Please try again.";
 }
 
 /**
@@ -72,7 +69,7 @@ export async function downloadInvoicePdf(orderId: string, orderNumber?: string |
   // The server answers JSON when something is wrong, even though we asked for a
   // blob. Without this check a JSON error body is saved as "Invoice-*.pdf".
   if (blob.type && blob.type.includes("application/json")) {
-    let message = "Could not download the invoice.";
+    let message = "Could not download invoice. Please try again.";
     try {
       const parsed = JSON.parse(await blob.text());
       if (parsed?.error?.message) message = String(parsed.error.message);

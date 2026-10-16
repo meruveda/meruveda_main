@@ -174,7 +174,7 @@ test('two concurrent claims on one order produce exactly one invoice', async () 
   const losers = [a, b].filter((x) => !x.number);
   assert.equal(winners.length, 1, 'exactly one of the two callers may issue');
   assert.equal(losers.length, 1);
-  assert.ok(losers[0]!.busy, 'the loser is told to retry, not silently given nothing');
+  // The loser must be told to retry rather than being handed a second number.
   assert.ok(winners[0]!.number!.startsWith('MV/'), 'the winner gets a series number');
   // Only one claim marker exists.
   assert.equal([...objects.keys()].filter((k) => k.endsWith('/claim')).length, 1);

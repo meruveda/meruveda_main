@@ -291,10 +291,20 @@ test('the raw internal [PayU mihpayid: ...] note marker is never printed', async
 test('exactly one invoice template exists in the backend', () => {
   const src = path.resolve(__dirname, 'invoiceService.ts');
   const text = readFileSync(src, 'utf8');
+  // Two PDFDocument.create() calls are allowed, and only two: the reference
+  // template, plus the minimal standard-font fallback that guarantees a customer
+  // who clicks Download always receives a PDF even if a font or image asset is
+  // missing from the deployment. The fallback is not a competing template — it
+  // shares the number, the order number and the totals, and is only reachable
+  // when the real renderer throws.
   assert.equal(
     (text.match(/PDFDocument\.create\(\)/g) || []).length,
-    1,
-    'invoiceService must create exactly one PDFDocument — a second one would be a competing template'
+    2,
+    'expected the reference template plus the minimal fallback, and nothing else'
+  );
+  assert.ok(
+    text.includes('renderMinimalInvoicePdf'),
+    'the second renderer must be the named, documented fallback'
   );
 });
 

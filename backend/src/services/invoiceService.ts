@@ -313,6 +313,65 @@ function gstRateOf(item: any): number {
  * untouched.
  */
 export async function generateInvoicePdf(order: any): Promise<Buffer> {
+  try {
+    return await renderInvoicePdf(order);
+  } catch (err: any) {
+    // The customer clicked Download. Whatever broke in the full template -- a
+    // missing font asset, a corrupt image, anything -- they still get a
+    // readable PDF. So we log loudly and fall back to a minimal document built
+    // from the standard fonts that are always present in pdf-lib.
+    console.error(
+      '[invoice] step=render-fallback order=' + String(order?.id || '') +
+        ' reason=' + (err?.message || err) + ' — drawing the minimal invoice instead',
+      err?.stack || err
+    );
+    return renderMinimalInvoicePdf(order);
+  }
+}
+
+/**
+ * Minimal, dependency-free invoice.
+ *
+ * Standard-14 fonts only: no custom asset is read, so this cannot fail for
+ * asset reasons. It carries the facts that matter on a tax invoice -- number,
+ * order, date, GSTIN, items, total -- and is enough for a customer who just needs
+ * the document. It prints "Rs." because the rupee glyph needs an embedded font.
+ */
+async function renderMinimalInvoicePdf(order: any): Promise<Buffer> {
+  const { StandardFonts } = await import('pdf-lib');
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([PAGE_W, PAGE_H]);
+  const helv = await doc.embedFont(StandardFonts.Helvetica);
+  const helvBold = await doc.embedFont(StandardFonts.HelveticaBold);
+  let y = PAGE_H - 60;
+  const line = (text: string, size = 10, bold = false) => {
+    if (y < 60) return;
+    page.drawText(text, { x: 40, y, size, font: bold ? helvBold : helv });
+    y -= size + 8;
+  };
+  line('INVOICE', 22, true);
+  line('Invoice #: ' + (order?.invoice_number || order?.order_number || ''), 11);
+  line('Order #: ' + (order?.order_number || ''), 11);
+  line('Date: ' + new Date().toISOString().slice(0, 10), 11);
+  y -= 8;
+  line('MERUVEDA WELLNESS', 12, true);
+  line('GSTIN: ' + getSellerIdentity().gstin, 10);
+  y -= 8;
+  const items: any[] = Array.isArray(order?.order_items) ? order.order_items : [];
+  line('Description                      Qty        Amount', 10, true);
+  for (const item of items) {
+    const name = String(item?.product_name || item?.name || 'Item').slice(0, 42);
+    const qty = Number(item?.quantity) || 1;
+    const amount = round2(Number(item?.total) || 0);
+    line(name + '  ' + qty + '  Rs. ' + formatInvoiceAmount(amount), 10);
+  }
+  y -= 10;
+  line('Total: Rs. ' + formatInvoiceAmount(Number(order?.total) || 0), 12, true);
+  line('Thank You For Your Business!', 10);
+  return Buffer.from(await doc.save({ useObjectStreams: false }));
+}
+
+async function renderInvoicePdf(order: any): Promise<Buffer> {
   const doc = await PDFDocument.create();
 
   const fonts = await loadFonts(doc);

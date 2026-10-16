@@ -76,7 +76,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
     try {
       await downloadInvoicePdf(orderId, order?.orderNumber || orderId);
     } catch (e) {
-      showToast((e as Error)?.message || "Could not download the invoice.", "error");
+      showToast((e as Error)?.message || "Could not download invoice. Please try again.", "error");
     } finally {
       setDownloadingInvoice(false);
     }
@@ -127,7 +127,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
           >
             {downloadingInvoice ? (
               <>
-                <Loader2 size={14} className="animate-spin" /> Preparing…
+                <Loader2 size={14} className="animate-spin" /> Downloading…
               </>
             ) : (
               <>

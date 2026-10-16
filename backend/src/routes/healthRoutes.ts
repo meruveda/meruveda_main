@@ -29,19 +29,43 @@ router.get('/invoice', async (_req, res) => {
     bucketDetail = err?.message || 'bucket probe failed';
   }
 
-  const ok = assets.fontsOk && assets.logoOk && bucketOk;
+  // The only question that really matters: can this deployment actually render
+  // a PDF? Assets present but a renderer that throws is still broken, so we
+  // render a real (tiny) document in memory and report the outcome.
+  let pdfRenderOk = false;
+  let pdfRenderDetail = '';
+  try {
+    const { PDFDocument, StandardFonts } = await import('pdf-lib');
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    doc.addPage().drawText('invoice render check', { x: 20, y: 700, size: 10, font });
+    const bytes = await doc.save();
+    pdfRenderOk = bytes.length > 0;
+    pdfRenderDetail = `${bytes.length} bytes`;
+  } catch (err: any) {
+    pdfRenderDetail = err?.message || 'render failed';
+  }
+
+  // fontsOk/logoOk being false is a degradation (the renderer falls back to
+  // Helvetica and prints "Rs."), not a failure, so the endpoint is healthy as
+  // long as a PDF can actually be produced.
+  const ok = pdfRenderOk;
   res.status(ok ? 200 : 503).json({
     ok,
     fontsOk: assets.fontsOk,
     logoOk: assets.logoOk,
     bucketOk,
+    pdfRenderOk,
     missingFonts: assets.missingFonts,
     searched: invoiceAssetPaths('fonts/NotoSans-Regular.ttf'),
     detail: assets.detail,
     bucketDetail,
+    pdfRenderDetail,
     hint: ok
-      ? 'Invoice rendering is fully operational.'
-      : 'Invoice rendering is degraded. If fontsOk is false, add "assets/**" to the backend function includeFiles in vercel.json and redeploy.',
+      ? assets.fontsOk
+        ? 'Invoice rendering is fully operational.'
+        : 'PDFs work, but the custom fonts are missing so invoices fall back to Helvetica and print "Rs.". Add "assets/**" to the backend includeFiles in vercel.json.'
+      : 'PDF rendering failed. Check the serverless logs.',
   });
 });
 

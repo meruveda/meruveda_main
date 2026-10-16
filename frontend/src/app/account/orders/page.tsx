@@ -68,7 +68,7 @@ export default function OrdersPage() {
     try {
       await downloadInvoicePdf(order.id, order.orderNumber);
     } catch (e) {
-      showToast((e as Error)?.message || "Could not download the invoice.", "error");
+      showToast((e as Error)?.message || "Could not download invoice. Please try again.", "error");
     }
   };
 
