@@ -3,19 +3,23 @@
 import { use, useCallback, useEffect, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
   Copy,
   Download,
   ExternalLink,
+  Loader2,
   MapPin,
   Star,
   Truck,
   Wallet,
 } from "lucide-react";
 import { orderService } from "@/services/accountService";
+import { downloadInvoicePdf } from "@/services/invoiceDownload";
+import { isInvoiceAvailable, invoiceUnavailableNote } from "@/lib/invoiceAvailability";
 import type { AccountOrder } from "@/types/account";
+import { Toast, useToast } from "@/components/ui/Toast";
 import {
   ErrorBox,
   LoadingRow,
@@ -36,11 +40,12 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
   const { id } = use(params);
   const orderId = decodeURIComponent(id);
   const router = useRouter();
-  const search = useSearchParams();
   const [order, setOrder] = useState<AccountOrder | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [downloadingInvoice, setDownloadingInvoice] = useState(false);
+  const { toast, showToast } = useToast();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -58,16 +63,25 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
     load();
   }, [load]);
 
-  // ?print=1 (from the orders list "Invoice" button) → print, then clean URL.
-  useEffect(() => {
-    if (search.get("print") === "1" && order && !loading) {
-      const t = setTimeout(() => {
-        window.print();
-        router.replace(`/account/orders/${encodeURIComponent(orderId)}`);
-      }, 350);
-      return () => clearTimeout(t);
+  /**
+   * Download the one canonical invoice PDF.
+   *
+   * This used to fall back to `window.print()` on any error, which printed the
+   * "My Orders" page instead of an invoice — the browser dialog appeared to
+   * work while producing a document with no invoice on it. There is no print
+   * fallback: the backend serves the same PDF the customer received on WhatsApp,
+   * or it fails, and the failure is reported.
+   */
+  const handleDownloadInvoice = async () => {
+    setDownloadingInvoice(true);
+    try {
+      await downloadInvoicePdf(orderId, order?.orderNumber || orderId);
+    } catch (e) {
+      showToast((e as Error)?.message || "Could not download the invoice.", "error");
+    } finally {
+      setDownloadingInvoice(false);
     }
-  }, [search, order, loading, router, orderId]);
+  };
 
   const copyTracking = async () => {
     const code = order?.awbCode || order?.trackingNumber;
@@ -95,45 +109,40 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
 
   const trackingCode = order.awbCode || order.trackingNumber;
   const canReview = order.normalizedStatus === "delivered";
+  // Cash on Delivery is invoiced at placement; prepaid only once PayU has
+  // verified payment. Offering a download before that would 409.
+  const invoiceReady = isInvoiceAvailable(order);
+  const invoiceNote = invoiceUnavailableNote(order);
 
   return (
     <div className="space-y-6">
+      <Toast toast={toast} onDismiss={() => showToast(null)} />
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <button onClick={() => router.push("/account/orders")} className="flex items-center gap-1.5 text-xs font-bold text-gray-500 hover:text-deep-purple transition-colors">
           <ArrowLeft size={14} /> All orders
         </button>
-        <div className="flex gap-2 print:hidden">
-          <button
-            onClick={async () => {
-              try {
-                const { default: axiosInstance } = await import("@/api/axiosInstance");
-                const res = await axiosInstance.get(`/orders/${orderId}/invoice`, { responseType: "blob" });
-                const blob = new Blob([res.data], { type: "application/pdf" });
-                const url = URL.createObjectURL(blob);
-                try {
-                  const a = document.createElement("a");
-                  a.href = url;
-                  a.download = `Invoice-${order.orderNumber || orderId}.pdf`;
-                  document.body.appendChild(a);
-                  a.click();
-                  a.remove();
-                } finally {
-                  setTimeout(() => URL.revokeObjectURL(url), 1000);
-                }
-              } catch {
-                window.print();
-              }
-            }}
-            className="flex items-center gap-1.5 px-3.5 py-2 border border-gray-200 hover:bg-gray-50 rounded-lg text-xs font-semibold text-gray-700 transition-colors"
-          >
-            <Download size={14} /> Download invoice
-          </button>
-          <button
-            onClick={() => window.print()}
-            className="flex items-center gap-1.5 px-3.5 py-2 border border-gray-200 hover:bg-gray-50 rounded-lg text-xs font-semibold text-gray-700 transition-colors"
-          >
-            Print
-          </button>
+        <div className="flex gap-2">
+          {invoiceReady ? (
+            <button
+              onClick={handleDownloadInvoice}
+              disabled={downloadingInvoice}
+              className="flex items-center gap-1.5 px-3.5 py-2 border border-gray-200 hover:bg-gray-50 rounded-lg text-xs font-semibold text-gray-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              {downloadingInvoice ? (
+                <>
+                  <Loader2 size={14} className="animate-spin" /> Preparing…
+                </>
+              ) : (
+                <>
+                  <Download size={14} /> Download invoice
+                </>
+              )}
+            </button>
+          ) : (
+            <span className="px-3.5 py-2 text-xs font-semibold text-gray-400 bg-gray-50 rounded-lg border border-gray-100">
+              {invoiceNote}
+            </span>
+          )}
         </div>
       </div>
 

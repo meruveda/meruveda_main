@@ -14,6 +14,10 @@ import {
 } from '@meruveda/shared';
 import { supabase } from '../database/supabase';
 import { config } from '../config/env';
+import { hasColumn } from './schemaGuard';
+
+/** Per-channel outcome, mirroring ChannelStatus in invoiceDispatchService. */
+type ChannelOutcome = 'sent' | 'failed' | 'skipped' | 'disabled';
 
 /* ------------------------------------------------------------------ */
 /* Palette — sampled from the reference invoice's own rendered pixels  */
@@ -167,17 +171,29 @@ function rateOfProduct(product: any): number {
 /**
  * Load an order shaped for invoicing: line items joined to their products so the
  * per-item GST rate is known.
+ *
+ * `seo_metadata` is the real column name. A camelCase `seoMetadata` in this list
+ * made PostgREST reject the whole query with 42703, so `data` came back null and
+ * this function threw "Order not found" for EVERY order — which surfaced as the
+ * invoice endpoint answering 404 for orders that plainly existed, and as the
+ * automatic trigger failing for all of them. Only snake_case columns belong here.
  */
 export async function getOrderForInvoice(orderId: string) {
   const { data, error } = await supabase
     .from('orders')
-    .select('*, order_items(*, products(id, name, sku, seo_metadata, seoMetadata)), users(email, first_name, last_name, phone)')
+    .select('*, order_items(*, products(id, name, sku, seo_metadata)), users(email, first_name, last_name, phone)')
     .eq('id', orderId)
     .single();
 
   if (error || !data) {
-    const err = new Error('Order not found');
-    (err as any).status = 404;
+    // Distinguish "no such order" from "the query itself was rejected" so a
+    // schema mistake is never again reported as a missing order.
+    const err = new Error(
+      error
+        ? `Could not load order for invoicing: ${error.code || ''} ${error.message}`.trim()
+        : 'Order not found'
+    );
+    (err as any).status = error ? 500 : 404;
     throw err;
   }
   return data;
@@ -298,7 +314,11 @@ export async function generateInvoicePdf(order: any): Promise<Buffer> {
   const discount = round2(Number(order.discount) || 0);
   // Reference semantics: "Taxable" is the GST-INCLUSIVE amount the tax is
   // charged on, and the GST line is labelled "(Included)" and never added on.
-  const taxableBase = round2(totals.gross - discount);
+  // "Taxable" on a GST invoice is the value EXCLUDING tax. It must equal the sum
+  // of the per-line "Taxed" column, otherwise the same document contradicts
+  // itself (lines showed 950.48 while this row showed the 998 gross) and the
+  // taxable value + GST would no longer reconcile to the gross.
+  const taxableBase = round2(totals.taxable);
   const grandTotal = Number(order.total) || round2(totals.gross - discount + shippingFee);
 
   /* ---------------- page / cursor ---------------- */
@@ -669,8 +689,7 @@ export function buildInvoiceNumber(orderNumber: string, issuedAt: Date = new Dat
 }
 
 /**
- * Allocate this order's invoice number, allocating it inside the SAME atomic
- * step that claims the order.
+ * Claim this order atomically and take its invoice number from the FY series.
  *
  * `claim_invoice()` (backend/sql/migrations/2026-10-15_invoice_automation.sql)
  * does both in one transaction, so there is no window in which an order is
@@ -679,17 +698,16 @@ export function buildInvoiceNumber(orderNumber: string, issuedAt: Date = new Dat
  * time (April-March), never hardcoded.
  *
  * Returns null when another worker already claimed the order — callers treat
- * that as "already handled", not as an error.
+ * that as "already handled", not as an error. That null is the whole
+ * once-only guarantee: a PayU double-POST, a parallel cron sweep and the
+ * original trigger all race here and exactly one of them wins.
  */
-export async function claimInvoiceNumber(
-  order: { id: string; invoice_number?: string | null },
-  options: { force?: boolean } = {}
-): Promise<string | null> {
+export async function claimInvoiceNumber(order: {
+  id: string;
+  invoice_number?: string | null;
+}): Promise<string | null> {
   try {
-    const { data, error } = await supabase.rpc('claim_invoice', {
-      p_order_id: order.id,
-      p_force: options.force === true,
-    });
+    const { data, error } = await supabase.rpc('claim_invoice', { p_order_id: order.id });
     if (error) throw new Error(error.message);
     if (data) {
       (order as any).invoice_number = data;
@@ -697,17 +715,23 @@ export async function claimInvoiceNumber(
     }
     return null; // already claimed by someone else
   } catch (err: any) {
-    console.warn(
+    // Degraded mode: the migration has not been applied, so there is no atomic
+    // claim and no real series. We still produce a stable number so the rest of
+    // the pipeline works, but it is NOT gapless and NOT race-safe — which is
+    // exactly why the boot-time schema audit refuses to start.
+    console.error(
       `[Invoice] claim_invoice RPC unavailable (${err?.message || err}) — is ` +
-        'backend/sql/migrations/2026-10-15_invoice_automation.sql applied? Falling back to legacy numbering.'
+        'backend/sql/migrations/2026-10-15_invoice_automation.sql applied? ' +
+        'Falling back to NON-ATOMIC legacy numbering; the once-only guarantee does not hold.'
     );
-    // Degraded mode: still generate, still persist, so admin + storage stay in sync.
     const legacy = order.invoice_number || buildInvoiceNumber(String((order as any).order_number || ''));
     (order as any).invoice_number = legacy;
     try {
+      // Deliberately claims, does not "send": delivery is recorded separately by
+      // markInvoiceSent() once a channel actually succeeded.
       await supabase
         .from('orders')
-        .update({ invoice_number: legacy, invoice_sent_at: new Date().toISOString() })
+        .update({ invoice_number: legacy, invoice_claimed_at: new Date().toISOString() })
         .eq('id', order.id)
         .is('invoice_number', null);
     } catch (persistErr: any) {
@@ -719,16 +743,58 @@ export async function claimInvoiceNumber(
 
 /** Release a failed claim so the retry sweep can run again. Number is KEPT. */
 export async function releaseInvoiceClaim(orderId: string, reason: string): Promise<void> {
+  const message = String(reason).slice(0, 500);
   try {
-    await supabase.rpc('release_invoice_claim', {
+    await supabase.rpc('release_invoice_claim', { p_order_id: orderId, p_reason: message });
+  } catch {
+    await supabase
+      .from('orders')
+      .update({ invoice_claimed_at: null, invoice_error: message })
+      .eq('id', orderId);
+  }
+}
+
+/**
+ * Record the delivery outcome. This is the ONLY writer of invoice_sent_at, so
+ * "Sent" in the admin panel means a channel really accepted the document —
+ * claiming the order no longer masquerades as delivering it.
+ */
+export async function markInvoiceSent(
+  orderId: string,
+  statuses: { whatsapp?: ChannelOutcome | null; email?: ChannelOutcome | null } = {}
+): Promise<void> {
+  const whatsapp = statuses.whatsapp ?? null;
+  const email = statuses.email ?? null;
+  try {
+    await supabase.rpc('mark_invoice_sent', {
       p_order_id: orderId,
-      p_reason: String(reason).slice(0, 500),
+      p_whatsapp: whatsapp,
+      p_email: email,
     });
   } catch {
     await supabase
       .from('orders')
-      .update({ invoice_sent_at: null, invoice_error: String(reason).slice(0, 500) })
+      .update({
+        invoice_sent_at: new Date().toISOString(),
+        invoice_error: null,
+        ...(whatsapp ? { invoice_whatsapp_status: whatsapp } : {}),
+        ...(email ? { invoice_email_status: email } : {}),
+      })
       .eq('id', orderId);
+  }
+}
+
+/** Persist the last failure reason so the admin card and the sweep can see it. */
+export async function recordInvoiceError(orderId: string, reason: string): Promise<void> {
+  try {
+    if (await hasColumn('orders', 'invoice_error')) {
+      await supabase
+        .from('orders')
+        .update({ invoice_error: String(reason).slice(0, 500) })
+        .eq('id', orderId);
+    }
+  } catch (err: any) {
+    console.error('[Invoice] could not persist invoice_error:', err?.message || err);
   }
 }
 
@@ -738,6 +804,8 @@ export const invoiceService = {
   buildInvoiceNumber,
   claimInvoiceNumber,
   releaseInvoiceClaim,
+  markInvoiceSent,
+  recordInvoiceError,
   getSellerIdentity,
   wrapText,
 };

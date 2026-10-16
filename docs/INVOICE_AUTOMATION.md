@@ -6,6 +6,55 @@ Everything below is one goal: **exactly one GST tax invoice per order**, issued 
 a gapless `MV/<FY>/<NNNNNN>` series, rendered once, stored, and delivered by email +
 WhatsApp without any human step.
 
+> ## THE MIGRATION HAS NEVER BEEN APPLIED TO PRODUCTION
+>
+> Every object the invoice feature needs was absent from the live database:
+>
+> ```
+> orders.invoice_number / invoice_sent_at / invoice_error /
+>   invoice_allocated_at / payu_mihpayid     MISSING (42703)
+> invoice_sequences                           MISSING (PGRST205)
+> whatsapp_message_log                        MISSING (PGRST205)
+> claim_invoice()                             MISSING (PGRST202)
+> ```
+>
+> Verify at any time with `npm run invoice:audit-schema -w backend`.
+>
+> Run, in order:
+> 1. `backend/database/deltas/005_otp_whatsapp_review_requests.sql`
+> 2. `backend/sql/migrations/2026-10-15_invoice_automation.sql`
+>
+> Both are idempotent. Until they are run, **no order is invoiced and the
+> once-only guarantee does not hold** (numbering falls back to a deterministic,
+> non-atomic form and the WhatsApp dedupe table does not exist).
+
+---
+
+## 0. Three bugs that made invoices silently not happen
+
+All three presented as "the invoice button is broken". None were.
+
+**a) A missing column was reported as a missing order.**
+`GET /orders/:id/invoice` destructured only `data` from its query, so PostgREST's
+`42703 column orders.invoice_number does not exist` was indistinguishable from an
+absent row — the endpoint answered **404 "Order not found" for orders that
+existed**, and the admin told the merchant their order had vanished. Schema
+failures now return **503** with an actionable message; only a genuinely missing
+row returns 404.
+
+**b) `products.seoMetadata` does not exist.**
+`getOrderForInvoice()` embedded `products(id, name, sku, seo_metadata, seoMetadata)`.
+The real column is `seo_metadata`. PostgREST rejected the whole query with 42703,
+so `data` was null and the function threw "Order not found" **for every order** —
+which is why the automatic trigger failed too, independent of the migration.
+That function is the entry point for the entire pipeline.
+
+**c) `Taxable` printed the gross.**
+The totals block showed `Taxable Rs. 998.00` while the per-line `Taxed` column
+showed `Rs. 950.48` — the same document contradicting itself, and a taxable value
+that already contained the tax. `Taxable` now uses `totals.taxable` (net), so
+`Taxable + IGST === Subtotal` and `+ Shipping === TOTAL`. Asserted in tests.
+
 ---
 
 ## 1. Shared tax / financial-year module
@@ -82,19 +131,53 @@ as soon as the 24-hour customer-service window closed.
 
 ## 7. Serving the stored invoice
 
-`GET /api/orders/:id/invoice` returns the stored PDF. Auth is `requireAuth` plus an
-owner-or-admin check in the controller.
+`GET /api/orders/:id/invoice` is the **single** way to obtain an invoice PDF —
+customer download, admin view and (by internal call) the WhatsApp send all
+reference the same file. Auth is `requireAuth` plus an owner-or-admin check in the
+controller, so one customer cannot read another's invoice.
 
-Three details worth calling out, because each was a real defect:
+Order of precedence:
 
-* **Headers were dropped on the stored-file branch.** `res.set(headers)` was only
-  reached on the legacy fallback path, so a stored PDF was served as
-  `application/octet-stream` with no `Content-Disposition`. Anchor-based downloads
-  lost their filename. Fixed.
-* **`Content-Disposition` now prefers the GST invoice number** over the order number,
-  with slashes normalised so the series cannot create storage folders.
-* An **already-issued** invoice whose stored file has gone missing returns `410` and
-  an explanation, never a silent re-render under the same number.
+1. **Stored PDF** — an issued invoice is a legal document and must never be
+   re-rendered; regenerating after an amount change would silently produce a
+   *different* document under the *same* number.
+2. **Not issued yet but billable** — generate **once** through the same atomic
+   claim the automatic trigger uses, store it, then serve it. Because that claim
+   is atomic, a customer clicking Download can never produce a second invoice.
+3. **Not billable** (unpaid prepaid) — `409` "available after payment is verified",
+   instead of an invoice for goods not yet paid for.
+
+Returns `Content-Disposition: attachment; filename="Invoice-MV-748371.pdf"`. An
+already-issued invoice whose stored file has gone missing returns `410`, never a
+silent re-render.
+
+## 7a. One invoice, one template — the print-dialog bug
+
+The customer "Download invoice" button **called the correct backend endpoint but
+fell back to `window.print()` on any error**. Because of bugs (a) and (b) above the
+endpoint *always* errored, so the button always opened the browser print dialog and
+printed the "My Orders" page — which looked like a successful download and produced
+a document with no invoice on it.
+
+Removed entirely:
+
+* the `catch { window.print() }` fallback in both the order list and detail page,
+* the standalone "Print" button,
+* the `?print=1` route and the effect that cleaned the URL afterwards,
+* the admin's `hidden print:block` block — a **second, complete invoice template**
+  (its own INVOICE heading, line-items table and totals table) competing with the
+  real PDF,
+* the `@media print` block in `admin/src/styles/globals.css` that existed only to
+  support it.
+
+`invoiceTemplateContract.test.ts` fails if a print-only template or
+`window.print(` reappears, if a second `PDFDocument.create()` is added, or if any
+element of the reference layout is dropped.
+
+The customer button is gated on payment validity: COD always (invoiced at
+placement), prepaid only once PayU has verified payment — before that it reads
+"Invoice available after payment". It shows a spinner while fetching and a toast on
+failure.
 
 ## 8. State is required at checkout
 
@@ -110,36 +193,77 @@ should not have.
   `<select>`.
 * The backend list is the same 36 names, so the UI cannot accept what the API rejects.
 
-## 9. Admin
+## 9. Admin — read only
 
-* The invoice card shows the **GST invoice number** (`MV/26-27/000123`), distinct
-  from the order number (`MV-139559`) — these were previously conflated.
-* The print view labels each correctly instead of printing the order number under
-  `INVOICE #`.
-* Download names the file after the invoice number, and the button explains which of
-  three states it is in (stored file / generate-and-download / already issued).
-* Error bodies come back as JSON while the client asked for a blob, so the message is
-  now parsed out of the blob rather than surfacing as a generic failure.
+The Invoice card is a **status display**. There is no Send, Resend or Download
+button: delivery is automatic, and a manual trigger is a second way to deliver the
+same tax document, which is exactly what the once-only claim exists to prevent.
+The `resendInvoiceDispatch({force:true})` path and its `POST /orders/:id/resend-invoice`
+endpoint were deleted rather than merely hidden.
 
-## 10. Operational notes
+* `Pending` — trigger has not completed yet, no failure recorded.
+* `Sent` — with timestamp, and the per-channel WhatsApp / email outcome.
+* `Failed` — with a short reason and "retrying automatically". No button.
+* `Attempts` — `n of 5`, so an order that has exhausted its retries is visible.
+* A plain **View invoice** link plus the storage path once a PDF exists, hitting
+  the same endpoint the customer uses.
+
+The GST invoice number (`MV/26-27/000123`) is shown separately from the order
+number (`MV-748371`) — they were previously conflated.
+
+## 10. Retry
+
+`retryPendingInvoices()` runs from `/api/jobs/retry-failures`, capped at
+**5 attempts** per order with a **2/4/8/16-minute backoff** so the sweep is safe
+to run every two minutes without hammering a failing provider. After the cap the
+order is left alone with its failure recorded for a human. Unpaid prepaid orders
+are skipped, so no invoice can ever precede a verified payment.
+
+## 11. Operational notes
 
 `backend/.env.example` documents `INVOICE_AUTO_SEND=true` and adds a **Render**
 section: which vars to set, why dispatch is safe on an idling free instance
-(nothing in process memory, numbers allocated in Postgres), and the daily retry
-sweep. It also flags that `INVOICE_STORAGE_BUCKET` must match the bucket you
-actually created — the RLS migration makes one named `invoice` while the code
-default is `invoices`.
+(nothing in process memory, numbers allocated in Postgres), and the retry sweep. It
+also flags that `INVOICE_STORAGE_BUCKET` must match the bucket you actually
+created — the RLS migration makes one named `invoice` while the code default is
+`invoices`.
+
+**Boot-time schema audit.** `auditInvoiceSchemaAtBoot()` checks for every required
+column, table and function and prints a loud boxed error naming the files to run.
+It does not refuse to start (the rest of the store is unaffected), but set
+`INVOICE_SCHEMA_STRICT=true` to fail fast. This exists because every consumer of
+the missing objects degraded gracefully — the claim fell back to non-atomic
+numbering, the dedupe check silently returned false, and `invoice_error` writes
+were guarded by a `hasColumn` check that was quietly false — so nothing surfaced.
+
+**Cron.** The retry sweep needs a 2-minute schedule. Vercel's Hobby plan allows
+cron only once per day and `vercel.json` also does not reach a Render-hosted
+backend, so this must be a **Render cron job** hitting
+`GET /api/jobs/retry-failures?limit=25` with `Authorization: Bearer $CRON_SECRET`.
+This cannot be configured from the repo.
 
 ## Verification
 
 | Check | Result |
 | --- | --- |
 | `npm run build` — shared, backend, frontend, admin | pass |
-| `npm test -w backend` | 67/67 |
+| `npm test -w backend` | 72/72 |
 | `npm test -w meruveda` | 17/17 |
-| `npm run lint` (all workspaces) | 0 errors (185 pre-existing warnings) |
-| `npm run samples -w backend` | 5 PDFs, byte-identical to the previous run |
+| `npm run lint` (all workspaces) | 0 errors (131 + 170 pre-existing warnings) |
+| `npm run samples -w backend` | 5 PDFs regenerated |
+| `npm run samples:order -w backend` | MV-748371 rendered, 5/5 reconciliation checks pass |
 
-`docs/samples/` holds the five rendered cases: single-item IGST, multi-item,
-COD-unpaid, Rajasthan CGST/SGST, and a discount coupon. They come from the real
-generator with fixture orders, not from mocked layout code.
+`docs/samples/06-cod-MV-748371.pdf` is rendered from the **real database row** for
+order MV-748371 (COD, 2 x Joint Pain Oil @ 499, Gwalior / Madhya Pradesh) through
+the production generator. Its extracted text:
+
+```
+Subtotal Rs. 998.00      Taxable Rs. 950.48     IGST (Included) Rs. 47.52
+Shipping Rs. 100.00      TOTAL     Rs. 1,098.00
+ORDER # MV-748371        Method: Cash On Delivery
+```
+
+`950.48 + 47.52 = 998.00` and `998 + 100 = 1098`, and Madhya Pradesh is correctly
+IGST rather than CGST/SGST. Because the migration is still unapplied, its
+`INVOICE #` is the deterministic fallback (`MV/26-27/295825`) rather than a value
+from the real series — expected, and it becomes gapless once the migration runs.

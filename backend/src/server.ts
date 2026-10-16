@@ -1,8 +1,16 @@
 import app from './app';
 import { config } from './config/env';
 import { reviewJobService } from './services/reviewJobService';
+import { auditInvoiceSchemaAtBoot } from './services/invoiceSchemaGuard';
 
 const PORT = config.port || 5000;
+
+// The invoice pipeline degrades quietly when its migration is missing, which is
+// how it shipped broken: no invoice, no error recorded, admin shows "Order not
+// found". Audit at boot so the mismatch is visible immediately.
+auditInvoiceSchemaAtBoot().catch((err) => {
+  console.error('[InvoiceSchema] boot audit failed:', err?.message || err);
+});
 
 // On Vercel the framework runtime imports the exported app directly —
 // never call listen() there, only in local/standalone deployments.

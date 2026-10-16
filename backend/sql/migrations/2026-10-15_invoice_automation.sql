@@ -1,64 +1,29 @@
 -- =============================================================================
--- 2026-10-15 — Invoice automation: storage URL, PayU reference, atomic
---                claim + gapless FY-series number allocation.
+-- 2026-10-15 — Invoice automation: atomic claim, gapless FY-series numbering,
+--                delivery tracking and automatic retry.
 --
--- Run AFTER backend/sql/migrations/2026-10-14_invoice_sequence.sql.
--- Idempotent: safe to run multiple times.
+-- !! THIS FILE HAS NEVER BEEN APPLIED TO PRODUCTION. Everything the invoice
+-- !! feature needs was missing from the live schema, which is why
+-- !! GET /orders/:id/invoice answered 404 "Order not found" for orders that
+-- !! existed (PostgREST rejected the query with 42703 on orders.invoice_number,
+-- !! the controller saw a null row, and reported it as a missing order) and why
+-- !! automatic dispatch failed with nothing recorded anywhere.
 --
--- What this adds
---   1. orders.invoice_url            — Supabase Storage object path of the ONE
---                                      issued PDF. The PDF is generated once
---                                      and never regenerated, so this is the
---                                      only copy the admin ever downloads.
---   2. orders.invoice_error          — last delivery failure (delta 010 has it,
---                                      repeated here so this file stands alone).
---   3. orders.payu_mihpayid          — PayU's payment reference, in its own
---                                      column. Previously it was only ever
---                                      concatenated into the free-text `notes`
---                                      field and had to be regex-parsed back
---                                      out; the invoice notes box now reads it
---                                      directly.
---   4. orders.invoice_allocated_at   — when the number was taken from the
---                                      sequence. Lets us audit gaps.
---   5. claim_invoice()               — THE atomic step: claims the order AND
---                                      allocates the number in one transaction.
---
--- Why one function instead of two calls
---   Previously the dispatcher did `UPDATE ... SET invoice_sent_at = now()
---   WHERE invoice_sent_at IS NULL` (claim) and then a separate
---   assign_invoice_number() (allocate). Two statements = two round trips = two
---   windows in which the process can die:
---     - die between claim and allocate -> the order is claimed but has NO
---       number; every retry is skipped forever, invoice never issued.
---     - die after allocate but before persist -> sequence value burned, series
---       has a gap.
---   claim_invoice() closes both: it is ONE statement inside ONE transaction.
---
--- Gapless guarantee
---   The FY counter row is taken with INSERT ... ON CONFLICT DO UPDATE ...
---   RETURNING, which holds a row lock on invoice_sequences.fy for the rest of
---   the transaction, so concurrent callers serialise and each gets the next
---   value. A number is never skipped: allocation only happens for an order
---   that will get an invoice, and the number is persisted in the same
---   transaction. If the PDF then fails to render, the number stays consumed
---   and the retry REUSES it (idempotent) — a GST series must never reissue.
---
--- FY is computed from the invoice date at allocation time, not hardcoded:
---   EXTRACT(MONTH FROM NOW()) >= 4  ->  current year starts the FY (26-27)
---   otherwise                       ->  previous year starts it
--- So an invoice generated in March 2027 is MV/26-27/..., and one generated in
--- April 2027 is MV/27-28/....
+-- Run order (all idempotent, safe to re-run):
+--   1. backend/database/deltas/005_otp_whatsapp_review_requests.sql
+--        creates whatsapp_message_log. INCLUDED below as a fallback, but run it
+--        properly if you have not - it also owns the OTP tables.
+--   2. THIS FILE.
 --
 -- Verify afterwards:
---   SELECT invoice_number, invoice_url, payu_mihpayid, invoice_sent_at,
---          invoice_allocated_at
---     FROM public.orders
---    WHERE invoice_number IS NOT NULL
---    ORDER BY invoice_allocated_at DESC LIMIT 20;
---   -- unique + gapless:
---   SELECT invoice_number, COUNT(*) FROM public.orders
---    WHERE invoice_number IS NOT NULL GROUP BY 1 HAVING COUNT(*) > 1;
---   SELECT * FROM public.invoice_sequences;
+--   SELECT column_name FROM information_schema.columns
+--     WHERE table_name='orders' AND column_name LIKE 'invoice%'
+--        OR column_name = 'payu_mihpayid';
+--   SELECT to_regclass('public.invoice_sequences');        -- not null
+--   SELECT to_regclass('public.whatsapp_message_log');     -- not null
+--   SELECT proname FROM pg_proc WHERE proname IN
+--     ('claim_invoice','release_invoice_claim','record_invoice_attempt',
+--      'mark_invoice_sent','set_invoice_url');
 -- =============================================================================
 
 -- ---------------------------------------------------------------------------
@@ -68,13 +33,37 @@ ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS invoice_number TEXT;
 ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS invoice_url TEXT;
 ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS invoice_error TEXT;
 ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS payu_mihpayid TEXT;
-ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS invoice_allocated_at TIMESTAMPTZ;
+
+-- Claim marker. Deliberately SEPARATE from invoice_sent_at:
+--   invoice_claimed_at = we own this order and a number has been taken.
+--   invoice_sent_at    = the document actually reached the customer.
+-- The earlier draft stored the claim in invoice_sent_at, so an order whose
+-- WhatsApp send then failed still looked "Sent" in the admin panel. It did not.
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS invoice_claimed_at TIMESTAMPTZ;
 ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS invoice_sent_at TIMESTAMPTZ;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS invoice_allocated_at TIMESTAMPTZ;
+
+-- Retry bookkeeping. invoice_attempts caps the cron sweep at 5 tries and then
+-- stops, so a permanently-broken order (bad phone number, revoked Meta token)
+-- cannot be retried forever.
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS invoice_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS invoice_last_attempt_at TIMESTAMPTZ;
+
+-- Per-channel delivery outcome, so the admin card can show "WhatsApp: sent,
+-- email: failed" instead of a single opaque flag.
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS invoice_whatsapp_status TEXT;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS invoice_email_status TEXT;
 
 -- One number per order, ever.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_invoice_number
   ON public.orders (invoice_number)
   WHERE invoice_number IS NOT NULL;
+
+-- Drives the retry sweep: unsent, under the attempt cap, newest-first so a
+-- backlog is worked from the oldest end.
+CREATE INDEX IF NOT EXISTS idx_orders_invoice_retry
+  ON public.orders (created_at)
+  WHERE invoice_sent_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_orders_invoice_sent_at
   ON public.orders (invoice_sent_at) WHERE invoice_sent_at IS NOT NULL;
@@ -89,57 +78,76 @@ CREATE TABLE IF NOT EXISTS public.invoice_sequences (
 );
 
 -- ---------------------------------------------------------------------------
--- 3. THE atomic claim + allocate step
--- ---------------------------------------------------------------------------
--- Returns the invoice number on success, or NULL when this order was already
--- claimed (idempotent no-op for PayU retries / webhook double-posts).
+-- 3. whatsapp_message_log
 --
--- force = true  -> skip the claim and just return/allocate the existing number
---                 (used by the admin "Resend invoice" button, which must not
---                 burn a second number).
-CREATE OR REPLACE FUNCTION public.claim_invoice(
-  p_order_id UUID,
-  p_force    BOOLEAN DEFAULT FALSE
-)
+-- Required for the once-only guarantee: wasSent()/getLogEntry() read this
+-- table, and it did not exist, so the dedupe check silently returned false and
+-- every trigger believed it was the first send.
+--
+-- Normally created by database/deltas/005_otp_whatsapp_review_requests.sql.
+-- Repeated here so this migration stands alone.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.whatsapp_message_log (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  recipient      TEXT,
+  template_name  TEXT,
+  message_type   TEXT,
+  purpose        TEXT NOT NULL,
+  reference_id   TEXT,
+  status         TEXT NOT NULL DEFAULT 'sent',
+  error          TEXT,
+  payload        JSONB DEFAULT '{}'::jsonb,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- The upsert in logSend() targets onConflict: 'purpose,reference_id'.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_whatsapp_message_log_reference
+  ON public.whatsapp_message_log (purpose, reference_id)
+  WHERE reference_id IS NOT NULL;
+
+-- ---------------------------------------------------------------------------
+-- 4. THE atomic claim + allocate step
+-- ---------------------------------------------------------------------------
+-- Returns the invoice number when this caller won the claim, or NULL when the
+-- order was already claimed. The NULL is the "someone else is on it" signal
+-- that makes a PayU double-POST or a parallel cron sweep harmless.
+CREATE OR REPLACE FUNCTION public.claim_invoice(p_order_id UUID)
 RETURNS TEXT
 LANGUAGE plpgsql
 AS $$
 DECLARE
   v_invoice_number TEXT;
-  v_sent_at        TIMESTAMPTZ;
+  v_claimed_at     TIMESTAMPTZ;
   v_fy             TEXT;
   v_seq            BIGINT;
   v_start_year     INT;
 BEGIN
   -- Serialises concurrent claimers for the SAME order. Parallel PayU callbacks
-  -- for one order queue here; the loser sees invoice_sent_at already set and
+  -- for one order queue here; the loser sees invoice_claimed_at already set and
   -- returns NULL.
-  SELECT invoice_number, invoice_sent_at
-    INTO v_invoice_number, v_sent_at
+  SELECT invoice_number, invoice_claimed_at
+    INTO v_invoice_number, v_claimed_at
     FROM public.orders
    WHERE id = p_order_id
-    FOR UPDATE;
+     FOR UPDATE;
 
   IF NOT FOUND THEN
     RAISE EXCEPTION 'claim_invoice: order % not found', p_order_id;
   END IF;
 
-  -- Already claimed and not forced: idempotent no-op. The retry (or the cron
-  -- sweep, or a second PayU POST) must not allocate a second number or send a
-  -- second invoice.
-  IF v_sent_at IS NOT NULL AND NOT p_force THEN
+  -- Already claimed: idempotent no-op. A retry, the cron sweep or a second
+  -- PayU POST must not allocate a second number or send a second invoice.
+  IF v_claimed_at IS NOT NULL THEN
     RETURN NULL;
   END IF;
 
-  -- Already allocated (e.g. the claim was released after a render failure):
-  -- reuse the stored number, never take a second one from the series.
+  -- A previous attempt allocated a number and then failed. Reuse that number:
+  -- a GST series must never skip or reissue.
   IF v_invoice_number IS NOT NULL AND v_invoice_number <> '' THEN
-    IF v_sent_at IS NULL OR p_force THEN
-      UPDATE public.orders
-         SET invoice_sent_at = COALESCE(invoice_sent_at, NOW()),
-             invoice_error    = NULL
-       WHERE id = p_order_id;
-    END IF;
+    UPDATE public.orders
+       SET invoice_claimed_at = NOW(),
+           invoice_error      = NULL
+     WHERE id = p_order_id;
     RETURN v_invoice_number;
   END IF;
 
@@ -162,9 +170,11 @@ BEGIN
   -- Claim + number persisted in the SAME transaction as the allocation.
   UPDATE public.orders
      SET invoice_number       = v_invoice_number,
-         invoice_sent_at      = NOW(),
+         invoice_claimed_at   = NOW(),
          invoice_allocated_at = NOW(),
-         invoice_error        = NULL
+         invoice_error        = NULL,
+         invoice_attempts     = invoice_attempts + 1,
+         invoice_last_attempt_at = NOW()
    WHERE id = p_order_id;
 
   RETURN v_invoice_number;
@@ -172,24 +182,61 @@ END;
 $$;
 
 -- ---------------------------------------------------------------------------
--- 4. Release a failed claim so the retry sweep can pick the order up again.
---    The allocated number is intentionally KEPT — a GST invoice number that has
---    been issued must never be reused or re-issued.
+-- 5. Release a failed claim so the retry sweep can pick the order up again.
+--    The allocated number is intentionally KEPT - an invoice number that has
+--    been allocated must never be reused or re-issued.
 -- ---------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.release_invoice_claim(p_order_id UUID, p_reason TEXT DEFAULT NULL)
+CREATE OR REPLACE FUNCTION public.release_invoice_claim(
+  p_order_id UUID,
+  p_reason   TEXT DEFAULT NULL
+)
 RETURNS VOID
 LANGUAGE plpgsql
 AS $$
 BEGIN
   UPDATE public.orders
-     SET invoice_sent_at = NULL,
-         invoice_error   = LEFT(COALESCE(p_reason, 'invoice delivery failed'), 500)
+     SET invoice_claimed_at = NULL,
+         invoice_error      = LEFT(COALESCE(p_reason, 'invoice delivery failed'), 500)
    WHERE id = p_order_id;
 END;
 $$;
 
 -- ---------------------------------------------------------------------------
--- 5. Mark a delivered invoice's storage object path.
+-- 6. Count an attempt that was skipped by the claim (retry path), so the cap
+--    counts real attempts rather than only first-time allocations.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.record_invoice_attempt(p_order_id UUID)
+RETURNS VOID
+LANGUAGE sql
+AS $$
+  UPDATE public.orders
+     SET invoice_attempts        = invoice_attempts + 1,
+         invoice_last_attempt_at  = NOW()
+   WHERE id = p_order_id;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- 7. Record the real delivery outcome. This is the ONLY thing that sets
+--    invoice_sent_at, so the admin "Sent" state means the customer got it.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.mark_invoice_sent(
+  p_order_id     UUID,
+  p_whatsapp     TEXT DEFAULT NULL,
+  p_email        TEXT DEFAULT NULL
+)
+RETURNS VOID
+LANGUAGE sql
+AS $$
+  UPDATE public.orders
+     SET invoice_sent_at           = NOW(),
+         invoice_error             = NULL,
+         invoice_whatsapp_status   = COALESCE(p_whatsapp, invoice_whatsapp_status),
+         invoice_email_status      = COALESCE(p_email, invoice_email_status)
+   WHERE id = p_order_id;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- 8. Store the PDF's Supabase Storage object path.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.set_invoice_url(p_order_id UUID, p_url TEXT)
 RETURNS VOID
@@ -202,10 +249,7 @@ AS $$
 $$;
 
 -- ---------------------------------------------------------------------------
--- 6. Backfill: orders that were sent before this migration have an
---    invoice_sent_at but no invoice_url (nothing was stored back then).
---    Leave them NULL — regenerating them would reissue a tax document that was
---    already issued under the same number, which is not allowed.
+-- 9. Older deployments created assign_invoice_number() / release_invoice_claim()
+--    via 2026-10-14_invoice_sequence.sql. Leave them in place if present; they
+--    are unused by the dispatcher, which calls claim_invoice() only.
 -- ---------------------------------------------------------------------------
--- SELECT COUNT(*) FROM public.orders
---  WHERE invoice_sent_at IS NOT NULL AND invoice_url IS NULL;

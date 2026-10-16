@@ -71,10 +71,17 @@ export interface Order {
   invoiceNumber?: string | null
   /** PayU's payment reference (mihpayid), printed in the invoice notes box. */
   payuMihpayid?: string | null
-  /** Null/undefined when the invoice-automation migration has not been applied yet. */
+  /** Set only when a delivery channel accepted the document, never on claim. */
   invoiceSentAt?: string | null
+  /** Last delivery failure reason; the cron sweep retries while attempts remain. */
   invoiceError?: string | null
-  invoiceStatus?: 'sent' | 'failed' | 'not_sent'
+  invoiceStatus?: 'pending' | 'sent' | 'failed'
+  /** Attempts made so far (cap 5) and the per-order cap. */
+  invoiceAttempts?: number | null
+  invoiceMaxAttempts?: number
+  /** Per-channel delivery outcome recorded on the order row. */
+  invoiceWhatsappStatus?: string | null
+  invoiceEmailStatus?: string | null
   /** Delta 010 — 'pushed' | 'failed' | 'in_progress' | null (never attempted). */
   shiprocketPushStatus?: string | null
   shiprocketPushError?: string | null

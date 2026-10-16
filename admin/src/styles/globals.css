@@ -133,11 +133,3 @@
 .rich-text-editor-content li {
   margin-bottom: 0.25rem !important;
 }
-
-@media print {
-  /* Hide toasts, notifications, and portals from print */
-  [role="status"],
-  .react-hot-toast-container {
-    display: none !important;
-  }
-}

@@ -7,10 +7,10 @@ import { formatCurrency, formatDateTime } from '@meruveda/shared'
 import { StatusBadge } from '../../components/ui/StatusBadge'
 import toast from 'react-hot-toast'
 
-const INVOICE_BADGE: Record<'sent' | 'failed' | 'not_sent', { label: string; className: string }> = {
+const INVOICE_BADGE: Record<'sent' | 'failed' | 'pending', { label: string; className: string }> = {
   sent: { label: 'Sent', className: 'bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-400 dark:border-green-900/50' },
   failed: { label: 'Failed', className: 'bg-red-50 text-red-700 border-red-200 dark:bg-red-950/30 dark:text-red-400 dark:border-red-900/50' },
-  not_sent: { label: 'Not sent', className: 'bg-slate-50 text-slate-500 border-slate-200 dark:bg-slate-800/40 dark:text-slate-400 dark:border-slate-700' },
+  pending: { label: 'Pending', className: 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-400 dark:border-amber-900/50' },
 }
 
 const PUSH_BADGE: Record<'pushed' | 'failed' | 'pending', { label: string; className: string }> = {
@@ -241,10 +241,10 @@ export const OrdersPage: React.FC = () => {
                     </td>
                     <td className="p-4">
                       <span
-                        title={o.invoiceError || (o.invoiceSentAt ? `Sent ${formatDateTime(o.invoiceSentAt)}` : 'Invoice has not been sent automatically')}
-                        className={`inline-flex items-center px-2 py-0.5 rounded-lg border text-[11px] font-semibold ${INVOICE_BADGE[o.invoiceStatus || 'not_sent'].className}`}
+                        title={o.invoiceError || (o.invoiceSentAt ? `Sent ${formatDateTime(o.invoiceSentAt)}` : 'Invoice is issued automatically once the order is billable')}
+                        className={`inline-flex items-center px-2 py-0.5 rounded-lg border text-[11px] font-semibold ${INVOICE_BADGE[o.invoiceStatus || 'pending'].className}`}
                       >
-                        {INVOICE_BADGE[o.invoiceStatus || 'not_sent'].label}
+                        {INVOICE_BADGE[o.invoiceStatus || 'pending'].label}
                       </span>
                     </td>
                     <td className="p-4">

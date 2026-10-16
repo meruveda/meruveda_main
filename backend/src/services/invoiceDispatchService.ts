@@ -5,6 +5,7 @@ import {
   claimInvoiceNumber,
   generateInvoicePdf,
   getOrderForInvoice,
+  markInvoiceSent,
   releaseInvoiceClaim,
 } from './invoiceService';
 import { getInvoiceEmailTemplate, isEmailConfigured, sendEmailWithAttachments } from './emailService';
@@ -73,39 +74,48 @@ function customerFirstName(order: any): string {
 /* Error bookkeeping                                                   */
 /* ------------------------------------------------------------------ */
 
-async function recordError(orderId: string, reason: string): Promise<void> {
-  try {
-    if (await hasColumn('orders', 'invoice_error')) {
-      await supabase.from('orders').update({ invoice_error: String(reason).slice(0, 500) }).eq('id', orderId);
-    }
-  } catch (err: any) {
-    console.error('[Invoice] failed to record error:', err?.message || err);
-  }
-}
+/* ------------------------------------------------------------------ */
+/* Status derivation for the admin Orders UI                          */
+/* ------------------------------------------------------------------ */
 
-async function clearError(orderId: string): Promise<void> {
-  try {
-    if (await hasColumn('orders', 'invoice_error')) {
-      await supabase.from('orders').update({ invoice_error: null }).eq('id', orderId);
-    }
-  } catch (err: any) {
-    console.error('[Invoice] failed to clear error:', err?.message || err);
-  }
-}
+export type InvoiceStatus = 'pending' | 'sent' | 'failed';
 
 /**
  * Public snapshot used by the admin Orders UI.
+ *
+ * Read-only: it never triggers a send. The three states mirror the automated
+ * pipeline exactly —
+ *   sent    = a channel accepted the document (invoice_sent_at written on
+ *             delivery, never on claim)
+ *   failed  = every attempt failed and a reason is recorded; the cron sweep
+ *             keeps retrying until MAX_INVOICE_ATTEMPTS
+ *   pending = not yet delivered, no failure recorded; either the trigger has
+ *             not fired or a retry is still in flight
+ *
  * Works even when the invoice columns have not been created yet.
  */
 export function deriveInvoiceStatus(order: {
   invoice_sent_at?: string | null;
   invoice_error?: string | null;
-}): { status: 'sent' | 'failed' | 'not_sent'; sentAt: string | null; error: string | null } {
+  invoice_attempts?: number | null;
+  invoice_whatsapp_status?: string | null;
+  invoice_email_status?: string | null;
+}): {
+  status: InvoiceStatus;
+  sentAt: string | null;
+  error: string | null;
+  attempts: number;
+  whatsappStatus: string | null;
+  emailStatus: string | null;
+} {
   const sentAt = order?.invoice_sent_at || null;
   const error = order?.invoice_error || null;
-  if (error) return { status: 'failed', sentAt, error };
-  if (sentAt) return { status: 'sent', sentAt, error: null };
-  return { status: 'not_sent', sentAt: null, error: null };
+  const attempts = Number(order?.invoice_attempts || 0);
+  const whatsappStatus = order?.invoice_whatsapp_status || null;
+  const emailStatus = order?.invoice_email_status || null;
+  if (sentAt) return { status: 'sent', sentAt, error: null, attempts, whatsappStatus, emailStatus };
+  if (error) return { status: 'failed', sentAt, error, attempts, whatsappStatus, emailStatus };
+  return { status: 'pending', sentAt: null, error: null, attempts, whatsappStatus, emailStatus };
 }
 
 /* ------------------------------------------------------------------ */
@@ -197,11 +207,7 @@ export async function createInvoiceSignedUrl(objectPath: string): Promise<string
  * channel never blocks the others, and nothing here can fail the order flow:
  * this function never throws.
  */
-export async function sendInvoiceDispatch(
-  orderId: string,
-  options: { force?: boolean } = {}
-): Promise<InvoiceDispatchResult> {
-  const force = options.force === true;
+export async function sendInvoiceDispatch(orderId: string): Promise<InvoiceDispatchResult> {
   const order: any = await getOrderForInvoice(orderId);
 
   const result: InvoiceDispatchResult = {
@@ -214,7 +220,11 @@ export async function sendInvoiceDispatch(
   };
 
   /* ---- 1. atomic claim + number allocation (one transaction) ---- */
-  const invoiceNumber = await claimInvoiceNumber(order, { force });
+  // Returns null when another worker already owns this order. There is no
+  // "force" path on purpose: the once-only guarantee has exactly one escape
+  // hatch (a failed claim is released and retried), never a manual override
+  // that would mint a second tax document.
+  const invoiceNumber = await claimInvoiceNumber(order);
   if (!invoiceNumber) {
     // Someone else already claimed this order. Nothing to do.
     result.skipped = true;
@@ -230,8 +240,7 @@ export async function sendInvoiceDispatch(
     pdf = await generateInvoicePdf(order);
   } catch (err: any) {
     const reason = `PDF generation failed: ${err?.message || err}`;
-    if (!force) await releaseInvoiceClaim(orderId, reason);
-    else await recordError(orderId, reason);
+    await releaseInvoiceClaim(orderId, reason);
     result.reason = reason;
     return result;
   }
@@ -257,7 +266,7 @@ export async function sendInvoiceDispatch(
       console.warn('[Invoice] no customer email on the order / Resend not configured — skipping email.');
       return 'disabled';
     }
-    if (!force && (await wasSent(EMAIL_PURPOSE, emailRef))) return 'skipped';
+    if (await wasSent(EMAIL_PURPOSE, emailRef)) return 'skipped';
 
     const signedUrl = await signedUrlPromise;
     const delivered = await withTimeout(
@@ -283,7 +292,7 @@ export async function sendInvoiceDispatch(
       recipient: toEmail,
       messageType: delivered ? 'email' : 'failed',
       purpose: EMAIL_PURPOSE,
-      referenceId: force ? `${emailRef}:resent:${Date.now()}` : emailRef,
+      referenceId: emailRef,
       status: delivered ? 'sent' : 'failed',
       error: delivered ? undefined : 'Email delivery failed (Resend rejected, API key missing, or timed out)',
       payload: { order_number: order.order_number, invoice_number: invoiceNumber },
@@ -302,7 +311,7 @@ export async function sendInvoiceDispatch(
     if (!isWhatsappConfigured()) return 'disabled';
 
     const signedUrl = await signedUrlPromise;
-    const whatsRef = force ? `${WHATSAPP_PURPOSE}:${orderId}:resent:${Date.now()}` : `${WHATSAPP_PURPOSE}:${orderId}`;
+    const whatsRef = `${WHATSAPP_PURPOSE}:${orderId}`;
     const delivered = await withTimeout(
       sendDocumentTemplateOnce({
         to: phone,
@@ -314,7 +323,7 @@ export async function sendInvoiceDispatch(
         orderNumber: order.order_number,
         total: money(order.total),
         signedUrl,
-        payload: { order_number: order.order_number, invoice_number: invoiceNumber, resent: force },
+        payload: { order_number: order.order_number, invoice_number: invoiceNumber },
       }),
       CHANNEL_TIMEOUT_MS,
       'whatsapp send'
@@ -330,7 +339,7 @@ export async function sendInvoiceDispatch(
     const adminPhone = normalizePhone(config.adminWhatsappNumber);
     if (!adminPhone || !isWhatsappConfigured()) return 'disabled';
 
-    const whatsRef = force ? `${ADMIN_PURPOSE}:${orderId}:resent:${Date.now()}` : `${ADMIN_PURPOSE}:${orderId}`;
+    const whatsRef = `${ADMIN_PURPOSE}:${orderId}`;
     const delivered = await withTimeout(
       sendDocumentTemplateOnce({
         to: adminPhone,
@@ -342,7 +351,7 @@ export async function sendInvoiceDispatch(
         orderNumber: order.order_number,
         total: money(order.total),
         signedUrl: null,
-        payload: { order_number: order.order_number, invoice_number: invoiceNumber, recipient: 'admin', resent: force },
+        payload: { order_number: order.order_number, invoice_number: invoiceNumber, recipient: 'admin' },
       }),
       CHANNEL_TIMEOUT_MS,
       'admin whatsapp copy'
@@ -377,7 +386,13 @@ export async function sendInvoiceDispatch(
   const anyChannelTried = result.email !== 'disabled' || result.whatsapp !== 'disabled';
 
   if (anyDelivered) {
-    await clearError(orderId);
+    // The claim is still held (the order IS invoiced); only the failure reason
+    // is cleared. invoice_sent_at is written HERE and nowhere else, so it means
+    // "a channel accepted the document", not "some worker touched this row".
+    await markInvoiceSent(orderId, {
+      whatsapp: result.whatsapp === 'disabled' ? null : result.whatsapp,
+      email: result.email === 'disabled' ? null : result.email,
+    });
     return result;
   }
 
@@ -390,28 +405,15 @@ export async function sendInvoiceDispatch(
     : 'WhatsApp delivery failed.';
 
   result.reason = reason;
-  if (!force) {
-    // Release the claim so the daily retry sweep can try again. The invoice
-    // NUMBER is kept — an issued GST number is never reused.
-    await releaseInvoiceClaim(orderId, reason);
-  } else {
-    await recordError(orderId, reason);
-  }
+  // Release the claim so the retry sweep can try again. The invoice NUMBER is
+  // kept — an issued GST number is never reused.
+  await releaseInvoiceClaim(orderId, reason);
   return result;
 }
 
 /** Convenience wrapper used by postOrderConfirmed. Never throws. */
 export async function sendInvoiceAuto(orderId: string): Promise<InvoiceDispatchResult> {
-  return sendInvoiceDispatch(orderId, { force: false });
-}
-
-/**
- * Admin/owner "Resend invoice" — bypasses the claim so the customer really
- * receives it again. Reuses the SAME invoice number; it never issues a second
- * tax document number.
- */
-export async function resendInvoiceDispatch(orderId: string): Promise<InvoiceDispatchResult> {
-  return sendInvoiceDispatch(orderId, { force: true });
+  return sendInvoiceDispatch(orderId);
 }
 
 /** True when a delivery for this order is already recorded as sent. */
@@ -421,66 +423,140 @@ export async function invoiceAlreadyLogged(orderId: string): Promise<boolean> {
   return Boolean((w && w.status === 'sent') || (e && e.status === 'sent'));
 }
 
+/** Hard cap on delivery attempts per order. After this the order is left alone. */
+export const MAX_INVOICE_ATTEMPTS = 5;
+
 /**
- * Daily retry sweep for invoices that never went out (channel outage, missing
- * email at the time, provider quota, template rejection...).
+ * Gap between the first retry and the next, in minutes: 2, 4, 8, 16.
+ *
+ * The cron runs every 2 minutes; the backoff keeps a genuinely broken order
+ * (bad phone number, revoked Meta token) from burning all five attempts inside
+ * ten minutes, while a transient blip is still retried within the half hour the
+ * merchant is willing to wait.
+ */
+const RETRY_BACKOFF_MINUTES = [2, 4, 8, 16];
+
+export interface InvoiceRetryRow {
+  orderId: string;
+  orderNumber: string;
+  ok: boolean;
+  skipped?: boolean;
+  error?: string;
+}
+
+/**
+ * Retry sweep for invoices that never went out (WhatsApp outage, missing email,
+ * provider quota, template rejection).
  *
  * Only orders that are genuinely billable are considered: paid prepaid orders
- * and COD orders (which are unpaid until delivery). Unpaid prepaid checkouts
- * are skipped so no invoice can ever precede a verified payment.
+ * and COD orders (unpaid until delivery). An unpaid prepaid checkout is skipped
+ * so no invoice can ever precede a verified payment.
+ *
+ * Bounded by MAX_INVOICE_ATTEMPTS and by a per-attempt backoff, so the sweep is
+ * safe to run every two minutes without hammering a failing provider.
  */
-export async function retryPendingInvoices(limit = 15): Promise<
-  Array<{ orderId: string; orderNumber: string; ok: boolean; skipped?: boolean; error?: string }>
-> {
-  const now = Date.now();
-  const tooYoung = new Date(now - 10 * 60 * 1000).toISOString();
-  const tooOld = new Date(now - 14 * 24 * 60 * 60 * 1000).toISOString();
-
+export async function retryPendingInvoices(limit = 25): Promise<InvoiceRetryRow[]> {
   const hasSentAt = await hasColumn('orders', 'invoice_sent_at');
   const hasErrorCol = await hasColumn('orders', 'invoice_error');
+  const hasAttempts = await hasColumn('orders', 'invoice_attempts');
+  const hasLastAttempt = await hasColumn('orders', 'invoice_last_attempt_at');
+  if (!hasSentAt) {
+    console.error(
+      '[Invoice] retry sweep aborted: orders.invoice_sent_at does not exist — apply ' +
+        'backend/sql/migrations/2026-10-15_invoice_automation.sql'
+    );
+    return [];
+  }
+
+  // Oldest-first within the retry window; 7 days is enough for a provider
+  // outage to be resolved, and older failures need manual attention anyway.
+  const tooOld = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
   const selectCols = [
     'id', 'order_number', 'status', 'payment_status', 'payment_method', 'created_at',
-    hasSentAt ? 'invoice_sent_at' : '',
+    'invoice_sent_at',
     hasErrorCol ? 'invoice_error' : '',
-  ].filter(Boolean).join(', ');
+    hasAttempts ? 'invoice_attempts' : '',
+    hasLastAttempt ? 'invoice_last_attempt_at' : '',
+  ]
+    .filter(Boolean)
+    .join(', ');
 
-  let query = supabase
+  const { data: rows, error } = await supabase
     .from('orders')
     .select(selectCols)
-    .lt('created_at', tooYoung)
+    .is('invoice_sent_at', null)
     .gt('created_at', tooOld)
-    .in('status', ['processing', 'confirmed', 'pending', 'packed', 'shipped'])
+    .in('status', ['pending', 'processing', 'confirmed', 'packed', 'shipped'])
     .order('created_at', { ascending: true })
     .limit(limit);
-  if (hasSentAt) query = query.is('invoice_sent_at', null);
 
-  const { data: rows, error } = await query;
   if (error) {
     console.error('[Invoice] retry sweep query failed:', error.message);
     return [];
   }
 
-  const results: Array<{ orderId: string; orderNumber: string; ok: boolean; skipped?: boolean; error?: string }> = [];
+  const results: InvoiceRetryRow[] = [];
   for (const row of (rows || []) as any[]) {
+    const orderNumber = row.order_number;
+    const orderId = row.id;
+
     // Never ship an invoice for an order that has not been paid (COD excepted).
     const method = String(row.payment_method || '').toUpperCase();
     const isCOD = method.includes('COD') || method.includes('CASH');
     if (!isCOD && row.payment_status !== 'paid') continue;
-    if (await invoiceAlreadyLogged(row.id)) {
-      results.push({ orderId: row.id, orderNumber: row.order_number, ok: true, skipped: true });
+
+    // Attempt cap: stop retrying, leave the failure recorded for a human.
+    const attempts = hasAttempts ? Number(row.invoice_attempts || 0) : 0;
+    if (attempts >= MAX_INVOICE_ATTEMPTS) {
+      results.push({
+        orderId,
+        orderNumber,
+        ok: false,
+        skipped: true,
+        error: `gave up after ${attempts} attempts`,
+      });
       continue;
     }
+
+    // Backoff: do not retry before this attempt's delay has elapsed.
+    if (hasLastAttempt && row.invoice_last_attempt_at) {
+      const delay = RETRY_BACKOFF_MINUTES[Math.min(attempts, RETRY_BACKOFF_MINUTES.length - 1)];
+      const nextEligible = new Date(row.invoice_last_attempt_at).getTime() + delay * 60_000;
+      if (Date.now() < nextEligible) {
+        results.push({
+          orderId,
+          orderNumber,
+          ok: true,
+          skipped: true,
+          error: `backing off until ${new Date(nextEligible).toISOString()}`,
+        });
+        continue;
+      }
+    }
+
+    // Belt-and-braces: the channel log is the real once-only guard. It did not
+    // exist in production, which is how repeat sends slipped through before.
+    if (await invoiceAlreadyLogged(orderId)) {
+      results.push({ orderId, orderNumber, ok: true, skipped: true, error: 'already logged as sent' });
+      continue;
+    }
+
     try {
-      const dispatch = await sendInvoiceDispatch(row.id, { force: false });
+      const dispatch = await sendInvoiceDispatch(orderId);
       results.push({
-        orderId: row.id,
-        orderNumber: row.order_number,
+        orderId,
+        orderNumber,
         ok: !dispatch.reason,
         skipped: dispatch.skipped,
         error: dispatch.reason,
       });
     } catch (err: any) {
-      results.push({ orderId: row.id, orderNumber: row.order_number, ok: false, error: err?.message || 'send failed' });
+      results.push({
+        orderId,
+        orderNumber,
+        ok: false,
+        error: err?.message || 'send failed',
+      });
     }
   }
   return results;
@@ -491,10 +567,10 @@ export const WHATSAPP_INVOICE_TEMPLATE = WHATSAPP_TEMPLATES.INVOICE_WITH_DOCUMEN
 export const invoiceDispatchService = {
   sendInvoiceDispatch,
   sendInvoiceAuto,
-  resendInvoiceDispatch,
   deriveInvoiceStatus,
   invoiceAlreadyLogged,
   retryPendingInvoices,
   createInvoiceSignedUrl,
+  MAX_INVOICE_ATTEMPTS,
   WHATSAPP_INVOICE_TEMPLATE,
 };

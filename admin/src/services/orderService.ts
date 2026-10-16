@@ -98,6 +98,10 @@ const mapOrder = (o: any): Order => ({
   payuMihpayid: o.payu_mihpayid ?? null,
   invoiceSentAt: o.invoice_sent_at ?? null,
   invoiceError: o.invoice_error ?? null,
+  invoiceAttempts: o.invoice_attempts ?? 0,
+  invoiceMaxAttempts: 5,
+  invoiceWhatsappStatus: o.invoice_whatsapp_status ?? null,
+  invoiceEmailStatus: o.invoice_email_status ?? null,
   invoiceStatus: deriveInvoiceStatus(o),
   shiprocketPushStatus: o.shiprocket_push_status ?? null,
   shiprocketPushError: o.shiprocket_push_error ?? null,
@@ -109,15 +113,14 @@ const mapOrder = (o: any): Order => ({
 
 /**
  * Mirrors backend/src/services/invoiceDispatchService.ts#deriveInvoiceStatus so
- * the Orders list can render a badge even when the delta-010 columns are absent
- * (in which case both are null -> "not_sent").
+ * the Orders list can render a badge even when the invoice columns are absent
+ * (both null -> "pending"). Delivery is automatic, so "pending" means the
+ * trigger has not completed yet — not "nothing has been set up".
  */
-const deriveInvoiceStatus = (o: any): 'sent' | 'failed' | 'not_sent' => {
-  const sentAt = o?.invoice_sent_at || null
-  const error = o?.invoice_error || null
-  if (error) return 'failed'
-  if (sentAt) return 'sent'
-  return 'not_sent'
+const deriveInvoiceStatus = (o: any): 'pending' | 'sent' | 'failed' => {
+  if (o?.invoice_sent_at) return 'sent'
+  if (o?.invoice_error) return 'failed'
+  return 'pending'
 }
 
 /** Mirrors the backend push claim so the badge degrades gracefully. */
@@ -179,19 +182,19 @@ class OrderService {
     await apiClient.delete<any>(`/orders/${id}`);
   }
 
-  /** Force-resend the invoice (bypasses the once-only claim). */
-  async resendInvoice(id: string): Promise<{ email?: string; whatsapp?: string; reason?: string; invoiceNumber?: string }> {
-    return apiClient.post<any>(`/orders/${id}/resend-invoice`);
-  }
-
-  /** Download the GST invoice PDF for one order (auth handled by axiosInstance). */
+  /**
+  * Fetch the stored invoice PDF for one order (auth handled by axiosInstance).
+  *
+  * This is the same endpoint, and therefore the same file, that the customer
+  * downloads and that was sent over WhatsApp. An issued invoice is never
+  * re-rendered, so following this repeatedly cannot produce a second document.
+  */
   async downloadInvoice(id: string, invoiceNumber?: string | null, orderNumber?: string | null): Promise<void> {
     const res = await axiosInstance.get(`/orders/${id}/invoice`, { responseType: 'blob' });
     const blob = res.data as Blob;
     const url = URL.createObjectURL(blob);
-    // Prefer the GST series number; fall back to the order number for orders
-    // invoiced before the series existed.
-    const name = (invoiceNumber || orderNumber || id).replace(/[^A-Za-z0-9._-]+/g, '_');
+    // Filename mirrors the server's Content-Disposition: Invoice-<order#>.pdf
+    const name = (orderNumber || invoiceNumber || id).replace(/[^A-Za-z0-9._-]+/g, '_');
     try {
       const anchor = document.createElement('a');
       anchor.href = url;
