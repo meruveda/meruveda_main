@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import axiosInstance from "@/api/axiosInstance";
 import { track as trackEvent } from "@/lib/analytics";
+import { INDIAN_STATES as STATES, isIndianState } from "@/constants/states";
 
 // OTP feature flag. Default false = the no-OTP Sign up / Login flow below is
 // active. Set NEXT_PUBLIC_OTP_ENABLED=true to bring the WhatsApp OTP UI back.
@@ -35,44 +36,9 @@ const SHIPPING_IS_TAXABLE = false; // TODO: PENDING CLIENT CONFIRMATION. Set to 
 const OTP_RESEND_SECONDS = 45;
 
 // All Indian states and Union Territories — dropdown for the delivery address.
-const INDIAN_STATES: string[] = [
-  "Andaman and Nicobar Islands",
-  "Andhra Pradesh",
-  "Arunachal Pradesh",
-  "Assam",
-  "Bihar",
-  "Chandigarh",
-  "Chhattisgarh",
-  "Dadra and Nagar Haveli and Daman and Diu",
-  "Delhi",
-  "Goa",
-  "Gujarat",
-  "Haryana",
-  "Himachal Pradesh",
-  "Jammu and Kashmir",
-  "Jharkhand",
-  "Karnataka",
-  "Kerala",
-  "Ladakh",
-  "Lakshadweep",
-  "Madhya Pradesh",
-  "Maharashtra",
-  "Manipur",
-  "Meghalaya",
-  "Mizoram",
-  "Nagaland",
-  "Odisha",
-  "Puducherry",
-  "Punjab",
-  "Rajasthan",
-  "Sikkim",
-  "Tamil Nadu",
-  "Telangana",
-  "Tripura",
-  "Uttar Pradesh",
-  "Uttarakhand",
-  "West Bengal",
-];
+// Single source of truth: also drives validation on the saved-address path and
+// the account address book.
+const INDIAN_STATES = STATES;
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 const PIN_RE = /^\d{6}$/;
@@ -798,10 +764,13 @@ export default function CheckoutPage() {
 
   const formAddressValid = Object.keys(formErrors).length === 0;
 
+  // A saved address is only usable as-is if the backend will accept it: the state
+  // decides CGST/SGST vs IGST on the invoice, so an unrecognised one is rejected
+  // here rather than silently falling back to IGST after the order is placed.
   const savedAddressValid =
     !!selectedSavedAddress &&
     selectedSavedAddress.city.trim() !== "" &&
-    selectedSavedAddress.state.trim() !== "" &&
+    isIndianState(selectedSavedAddress.state) &&
     PIN_RE.test(selectedSavedAddress.zipCode.trim());
 
   const deliveryAddressValid = usesAddressForm ? formAddressValid : savedAddressValid;

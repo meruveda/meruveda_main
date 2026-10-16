@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { orderService, pushOrderToShiprocket, retryFailedShiprocketPushes } from '../services/orderService';
-import { postOrderConfirmed } from '../services/postOrderConfirmed';
+import { postOrderConfirmed, isCodOrder, sendOrderConfirmationText } from '../services/postOrderConfirmed';
 import { invoiceDispatchService } from '../services/invoiceDispatchService';
 import { supabase } from '../database/supabase';
 import { normalizePhone } from '../services/whatsappService';
@@ -43,14 +43,26 @@ export const getOrderById = async (req: Request, res: Response, next: NextFuncti
 export const createOrder = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const data = await orderService.createOrder(req.body, req.user?.id);
-    // Cash on Delivery has no payment callback, so the shared post-confirmation
-    // hook (invoice delivery + Shiprocket push) runs here. Awaited inside its
-    // own try/catch — it never rejects, so order creation always succeeds.
-    try {
-      await postOrderConfirmed(data.id, { source: 'cod_placement' });
-    } catch (postErr: any) {
-      console.error('[Orders] postOrderConfirmed failed:', postErr?.message || postErr);
+
+    // Cash on Delivery is the ONLY method that reaches the post-confirmation
+    // hook from here. A prepaid order is invoiced exclusively from the verified
+    // PayU callback — firing here too used to produce a second invoice attempt
+    // (on an unverified, unpaid order) for every prepaid checkout.
+    if (isCodOrder(data)) {
+      const { data: confirmationOrder } = await supabase
+        .from('orders')
+        .select('*')
+        .eq('id', data.id)
+        .maybeSingle();
+      // Confirmation text is a courtesy; the invoice is the dispatcher's job.
+      sendOrderConfirmationText(confirmationOrder).catch((err: any) =>
+        console.error('[Orders] order confirmation text failed:', err?.message || err)
+      );
+      postOrderConfirmed(data.id, { source: 'cod_placement' }).catch((postErr: any) => {
+        console.error('[Orders] postOrderConfirmed failed:', postErr?.message || postErr);
+      });
     }
+
     res.status(201).json({ data });
   } catch (error) {
     next(error);
@@ -206,13 +218,23 @@ export const trackByAwb = async (req: Request, res: Response, next: NextFunction
   }
 };
 
-/** Download the fixed GST tax invoice PDF (same template used for WhatsApp). */
+/**
+ * Serve the invoice PDF for one order.
+ *
+ * The PDF stored in Supabase is returned whenever it exists — an issued invoice
+ * is a legal document and must never be re-rendered, because a regeneration
+ * after an amount change would silently produce a DIFFERENT document under the
+ * SAME invoice number.
+ *
+ * The render path is kept only as a fallback for orders invoiced before storage
+ * existed, and only when the order has no number yet (so nothing is issued).
+ */
 export const downloadInvoice = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
     const { data: orderRow } = await supabase
       .from('orders')
-      .select('id, user_id')
+      .select('id, user_id, order_number, invoice_url, invoice_number')
       .eq('id', id)
       .maybeSingle();
     if (!orderRow) {
@@ -221,14 +243,55 @@ export const downloadInvoice = async (req: Request, res: Response, next: NextFun
     if (req.user?.role !== 'admin' && orderRow.user_id !== req.user?.id) {
       return res.status(403).json({ error: { message: 'Forbidden' } });
     }
+
+    // The GST invoice number is the document's legal identity, so it wins over the
+    // order number in the filename. Slashes in the series must not create folders.
+    const safeInvoice = String(orderRow.invoice_number || orderRow.order_number).replace(
+      /[^A-Za-z0-9._-]+/g,
+      '_'
+    );
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename="Invoice-${safeInvoice}.pdf"`,
+      // Invoices contain PII — never let a shared proxy cache them.
+      'Cache-Control': 'private, no-store, max-age=0',
+      'X-Content-Type-Options': 'nosniff',
+    };
+
+    if (orderRow.invoice_url && config.invoiceStorageBucket) {
+      const { data, error } = await supabase.storage
+        .from(config.invoiceStorageBucket)
+        .download(orderRow.invoice_url);
+      if (!error && data) {
+        const bytes = Buffer.from(await data.arrayBuffer());
+        headers['Content-Length'] = String(bytes.length);
+        // Must set the PDF headers here too: without them Express sends a Buffer
+        // as application/octet-stream with no filename, so an anchor-based
+        // download (and any "open in new tab") loses the Content-Disposition.
+        res.set(headers);
+        return res.send(bytes);
+      }
+      console.warn(
+        `[Invoice] stored PDF unavailable for order ${orderRow.order_number} (${error?.message}) — ` +
+          (orderRow.invoice_number ? 'NOT regenerating: this invoice has already been issued.' : 'rendering a new one.')
+      );
+      // Already-issued invoices must not be re-rendered; tell the caller why.
+      if (orderRow.invoice_number) {
+        return res.status(410).json({
+          error: {
+            message:
+              'This invoice was already issued and its stored file is no longer available. Re-issue a copy from the admin order page.',
+          },
+        });
+      }
+    }
+
+    // Fallback: no stored file AND no number issued yet (legacy order).
     const order = await getOrderForInvoice(id as string);
     const pdf = await generateInvoicePdf(order);
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="Invoice-${order.order_number}.pdf"`);
-    // Invoices contain PII — never let a shared proxy cache them.
-    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.send(pdf);
+    headers['Content-Length'] = String(pdf.length);
+    res.set(headers);
+    return res.send(pdf);
   } catch (error: any) {
     if (error.status === 404) {
       return res.status(404).json({ error: { message: error.message } });

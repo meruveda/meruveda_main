@@ -113,14 +113,14 @@ export const config = {
   trustProxyHops: Number(process.env.TRUST_PROXY_HOPS ?? 1),
 
   // ---- Post-order automation flags ----
-  // BOTH DEFAULT OFF. With a flag off the app behaves exactly as before this
-  // feature existed (legacy WhatsApp invoice / legacy Shiprocket push paths).
-  // INVOICE_AUTO_SEND=true  -> postOrderConfirmed() sends the invoice itself
-  //                            (email attachment + WhatsApp document) with an
-  //                            atomic per-order claim and status bookkeeping.
   // SHIPROCKET_AUTO_PUSH=true -> postOrderConfirmed() becomes the single push
   //                            point for both COD placement and PayU success.
-  invoiceAutoSend: process.env.INVOICE_AUTO_SEND === 'true',
+  //                            (default false — Shiprocket behaviour is
+  //                             unchanged from before this work)
+  // INVOICE_AUTO_SEND is now ON by default — the flag only exists so an operator
+  // can pause invoice delivery during an incident. Set it to the literal string
+  // "false" to disable; anything else (including unset) means enabled.
+  invoiceAutoSend: process.env.INVOICE_AUTO_SEND !== 'false',
   shiprocketAutoPush: process.env.SHIPROCKET_AUTO_PUSH === 'true',
 
   // ---- Business identity printed on the tax invoice ----
@@ -129,6 +129,8 @@ export const config = {
   businessName: (process.env.BUSINESS_NAME || '').trim(),
   businessAddress: (process.env.BUSINESS_ADDRESS || '').trim(),
   businessGstin: (process.env.BUSINESS_GSTIN || process.env.GSTIN || '').trim(),
+  businessPhone: (process.env.BUSINESS_PHONE || '').trim(),
+  businessEmail: (process.env.BUSINESS_EMAIL || '').trim(),
 
   // ---- Invoice PDF storage (private bucket + 7-day signed URLs) ----
   invoiceStorageBucket: (process.env.INVOICE_STORAGE_BUCKET || 'invoices').trim(),

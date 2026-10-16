@@ -6,6 +6,7 @@ import { addressService, formatAddress } from "@/services/accountService";
 import type { AccountAddress, AddressType } from "@/types/account";
 import { isValidPhone, isValidPincode, normalizePhone10 } from "@/types/account";
 import { ConfirmDialog, EmptyState, Notice, SectionHeader } from "@/components/account/ui";
+import { INDIAN_STATES, isIndianState } from "@/constants/states";
 
 const EMPTY_FORM = {
   fullName: "",
@@ -70,6 +71,7 @@ export default function AddressesPage() {
     if (!form.street.trim()) e.street = "Street / lane is required.";
     if (!form.city.trim()) e.city = "City is required.";
     if (!form.state.trim()) e.state = "State is required.";
+    else if (!isIndianState(form.state)) e.state = "Select a state from the list.";
     if (!isValidPincode(form.pincode)) e.pincode = "Enter a valid 6-digit pincode.";
     if (!isValidPhone(form.phone)) e.phone = "Enter a valid 10-digit mobile number.";
     setErrors(e);
@@ -171,7 +173,12 @@ export default function AddressesPage() {
             </div>
             <div>
               <label className={label} htmlFor="ad-state">State *</label>
-              <input id="ad-state" className={input} value={form.state} onChange={set("state")} placeholder="Karnataka" autoComplete="address-level1" />
+              <select id="ad-state" className={input} value={form.state} onChange={set("state")} autoComplete="address-level1">
+                <option value="">Select a state</option>
+                {INDIAN_STATES.map((s) => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
               {errors.state && <p className={err}>{errors.state}</p>}
             </div>
             <div>

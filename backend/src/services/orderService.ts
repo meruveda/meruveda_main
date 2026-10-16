@@ -6,13 +6,45 @@ import { orderNotifyService } from './orderNotifyService';
 import { ShiprocketOrderPayload } from './shiprocket/types';
 import { hasColumn } from './schemaGuard';
 import { config } from '../config/env';
+import { computeOrderTotals, isRajasthan, round2 } from '@meruveda/shared';
 
-export function isRajasthan(state: string): boolean {
-  if (!state) return false;
-  const s = state.trim().toLowerCase();
-  const validMatches = ['rajasthan', 'rj', 'rajsthan', 'rajasthn', 'rajastan', 'rajasthna', 'rajastran', 'raj'];
-  if (validMatches.includes(s)) return true;
-  return s.startsWith('raj') && s.length >= 5;
+/**
+ * Re-exported so existing callers keep working; the single implementation now
+ * lives in @meruveda/shared and is used by the invoice renderer too.
+ *
+ * IMPORTANT behavioural change: an EMPTY/UNKNOWN state returns false (=> IGST).
+ * The old copy returned true for a blank state, which printed CGST+SGST on
+ * orders that had no usable state and under-declared IGST.
+ */
+export { isRajasthan };
+
+/** State codes we accept. Checkout validates against this list. */
+export const INDIAN_STATES = [
+  'Andhra Pradesh', 'Arunachal Pradesh', 'Assam', 'Bihar', 'Chhattisgarh', 'Goa', 'Gujarat',
+  'Haryana', 'Himachal Pradesh', 'Jharkhand', 'Karnataka', 'Kerala', 'Madhya Pradesh',
+  'Maharashtra', 'Manipur', 'Meghalaya', 'Mizoram', 'Nagaland', 'Odisha', 'Punjab', 'Rajasthan',
+  'Sikkim', 'Tamil Nadu', 'Telangana', 'Tripura', 'Uttar Pradesh', 'Uttarakhand', 'West Bengal',
+  'Andaman and Nicobar Islands', 'Chandigarh', 'Dadra and Nagar Haveli and Daman and Diu',
+  'Delhi', 'Jammu and Kashmir', 'Ladakh', 'Lakshadweep', 'Puducherry',
+] as const;
+
+/**
+ * An address is only usable for a tax invoice once state + pincode are known —
+ * both are required to decide CGST/SGST vs IGST and to push to Shiprocket.
+ */
+export function validateInvoiceAddress(addr: any): string[] {
+  const problems: string[] = [];
+  if (!addr || typeof addr !== 'object') return ['address is missing'];
+  if (!String(addr.addressLine || '').trim()) problems.push('address line');
+  if (!String(addr.city || '').trim()) problems.push('city');
+  if (!String(addr.state || '').trim()) {
+    problems.push('state (required to decide CGST/SGST vs IGST)');
+  } else if (!(INDIAN_STATES as readonly string[]).includes(String(addr.state).trim())) {
+    problems.push(`state "${addr.state}" is not a recognised Indian state`);
+  }
+  if (!/^\d{6}$/.test(String(addr.zipCode || '').trim())) problems.push('pincode (6 digits)');
+  if (!/^[1-9]\d{9}$/.test(String(addr.phone || '').replace(/\D/g, '').slice(-10))) problems.push('phone');
+  return problems;
 }
 
 export const orderService = {
@@ -88,10 +120,29 @@ export const orderService = {
     orderData.user_id = userId;
     orderData.order_number = `MV-${Math.floor(100000 + Math.random() * 900000)}`;
     orderData.status = 'pending';
-    
-    // Extract items to insert separately
+
+    // Line items are stored in their own table.
     const items = orderData.items;
     delete orderData.items;
+
+    // Recalculate subtotal and shipping cost server-side
+    const subtotal = round2(orderData.subtotal);
+    const discount = round2(orderData.discount);
+    const isCOD = orderData.payment_method === 'Cash On Delivery' || String(orderData.payment_method).toUpperCase() === 'COD';
+
+    // Base courier charge, GST-INCLUSIVE — this is the flat "shipping added on
+    // top" the reference invoice shows.
+    let shippingFee = subtotal >= 1000 ? 0 : 50;
+    if (isCOD) shippingFee += 50;
+
+    // SHIPPING_IS_TAXABLE=true opts into charging shipping GST on TOP of the
+    // base charge, so the total genuinely includes it (default false keeps the
+    // GST-inclusive flat charge, which is what the reference template shows).
+    if (config.shippingIsTaxable && shippingFee > 0) {
+      shippingFee = round2(shippingFee + (shippingFee * 18) / 100);
+    }
+    orderData.shipping_fee = shippingFee;
+    if (orderData.shipping_cost !== undefined) delete orderData.shipping_cost;
 
     // Fetch products to compute GST and get details
     let dbProducts: any[] = [];
@@ -100,67 +151,55 @@ export const orderService = {
       if (productIds.length > 0) {
         const { data } = await supabase
           .from('products')
-          .select('id, name, sku, images, seo_metadata')
+          .select('id, name, sku, images, seo_metadata, seoMetadata')
           .in('id', productIds);
         dbProducts = data || [];
       }
     }
 
-    // Recalculate subtotal and shipping cost server-side
-    const subtotal = Number(orderData.subtotal) || 0;
-    const discount = Number(orderData.discount) || 0;
-    let shippingFee = subtotal >= 1000 ? 0 : 50;
-    
-    if (orderData.payment_method === 'Cash On Delivery') {
-      shippingFee += 50;
-    }
-    
-    orderData.shipping_fee = shippingFee;
-    if (orderData.shipping_cost !== undefined) delete orderData.shipping_cost;
-    
-    // Recalculate GST/Tax dynamically per item based on products' GST rates
-    let gstAmount = 0;
-    if (items && items.length > 0) {
-      items.forEach((item: any) => {
-        const dbProduct = dbProducts.find((p: any) => p.id === item.product_id);
-        const itemPrice = Number(item.price) || 0;
-        const itemQty = Number(item.quantity) || 1;
-        const itemTotal = itemPrice * itemQty;
-        
-        const itemGstPercent = dbProduct?.seo_metadata?.gst_rate !== undefined 
-          ? Number(dbProduct.seo_metadata.gst_rate)
-          : (dbProduct?.seo_metadata?.gstRate !== undefined
-             ? Number(dbProduct.seo_metadata.gstRate)
-             : (dbProduct?.seo_metadata?.gst !== undefined 
-                ? Number(dbProduct.seo_metadata.gst) 
-                : (dbProduct?.seoMetadata?.gst !== undefined ? Number(dbProduct.seoMetadata.gst) : 5)));
-        const itemGstRate = itemGstPercent / 100;
-        
-        const itemDiscount = subtotal > 0 ? (discount * itemTotal) / subtotal : 0;
-        const itemTaxable = itemTotal - itemDiscount;
-        const itemGst = (itemTaxable * itemGstRate) / (1 + itemGstRate);
-        gstAmount += itemGst;
-      });
-    }
+    // One shared calculator for the order row AND the invoice, so `tax` on the
+    // order is by construction the same figure the PDF prints.
+    const gstLines = (items || []).map((item: any) => {
+      const dbProduct = dbProducts.find((p: any) => p.id === item.product_id);
+      const meta = dbProduct?.seo_metadata || dbProduct?.seoMetadata || {};
+      const raw = meta.gst_rate ?? meta.gstRate ?? meta.gst;
+      const ratePercent = Number.isFinite(Number(raw)) && Number(raw) > 0 ? Number(raw) : 5;
+      return {
+        gross: (Number(item.price) || 0) * (Number(item.quantity) || 1),
+        ratePercent,
+      };
+    });
 
-    // Apply GST on shipping charges if shippingIsTaxable config flag is true
-    if (config.shippingIsTaxable && shippingFee > 0) {
-      const shippingGstPercent = 18;
-      const shippingGstRate = shippingGstPercent / 100;
-      const shippingGst = (shippingFee * shippingGstRate) / (1 + shippingGstRate);
-      gstAmount += shippingGst;
-    }
+    const totals = computeOrderTotals({
+      subtotal,
+      discount,
+      shippingFee,
+      lines: gstLines,
+      shippingGstRatePercent: config.shippingIsTaxable ? 18 : 0,
+    });
+    orderData.tax = totals.gst;
 
-    orderData.tax = Number(gstAmount.toFixed(2));
-    
     // Recalculate total
-    orderData.total = Number((subtotal - discount + shippingFee).toFixed(2));
+    orderData.total = round2(subtotal - discount + shippingFee);
     
     // Ensure billing_address is set, fallback to shipping_address to satisfy NOT NULL constraint
     if (!orderData.billing_address) {
       orderData.billing_address = orderData.shipping_address;
     }
     const billingAddress = orderData.billing_address;
+
+    // A tax invoice needs a usable state to pick CGST+SGST vs IGST and a 6-digit
+    // pincode for the courier. Checkout already enforces both, but orders can
+    // also arrive from saved addresses or the API, so log loudly rather than
+    // failing the order — an invoice with an unknown state is still correct
+    // (it falls back to IGST, the conservative treatment).
+    const addrProblems = validateInvoiceAddress(orderData.shipping_address || billingAddress);
+    if (addrProblems.length > 0) {
+      console.warn(
+        `[Orders] order ${orderData.order_number} has an incomplete delivery address ` +
+          `(${addrProblems.join(', ')}). Checkout requires these; the invoice will use IGST.`
+      );
+    }
 
     const { data: order, error: orderError } = await supabase
       .from('orders')
@@ -479,61 +518,47 @@ export const orderService = {
       updateData.subtotal = newSubtotal;
       updateData.discount = newDiscount;
       let newShippingFee = newSubtotal >= 1000 ? 0 : 50;
-      
+
       const finalPaymentMethod = updates.payment_method !== undefined ? updates.payment_method : order.payment_method;
       if (finalPaymentMethod === 'Cash On Delivery') {
         newShippingFee += 50;
       }
-      
-      updateData.shipping_fee = newShippingFee;
-      
-      // Recalculate GST/Tax dynamically per item based on products' GST rates
-      let gstAmount = 0;
-      const { data: dbOrderItems } = await supabase
-        .from('order_items')
-        .select('*, products(seo_metadata)')
-        .eq('order_id', id);
-        
-      if (dbOrderItems && dbOrderItems.length > 0) {
-        dbOrderItems.forEach((item: any) => {
-          const itemPrice = Number(item.price) || 0;
-          const itemQty = Number(item.quantity) || 1;
-          const itemTotal = itemPrice * itemQty;
-          
-          const dbProduct = item.products;
-          const itemGstPercent = dbProduct?.seo_metadata?.gst_rate !== undefined 
-            ? Number(dbProduct.seo_metadata.gst_rate)
-            : (dbProduct?.seo_metadata?.gstRate !== undefined
-               ? Number(dbProduct.seo_metadata.gstRate)
-               : (dbProduct?.seo_metadata?.gst !== undefined 
-                  ? Number(dbProduct.seo_metadata.gst) 
-                  : (dbProduct?.seoMetadata?.gst !== undefined ? Number(dbProduct.seoMetadata.gst) : 5)));
-          const itemGstRate = itemGstPercent / 100;
-          
-          const itemDiscount = newSubtotal > 0 ? (newDiscount * itemTotal) / newSubtotal : 0;
-          const itemTaxable = itemTotal - itemDiscount;
-          const itemGst = (itemTaxable * itemGstRate) / (1 + itemGstRate);
-          gstAmount += itemGst;
-        });
-      } else {
-        // Fallback if no items found in DB
-        const taxableAmount = newSubtotal - newDiscount;
-        const gstRate = 0.05; // Fallback default rate of 5%
-        gstAmount = (taxableAmount * gstRate) / (1 + gstRate);
+      // Same shipping-GST rule as createOrder (see the comment there).
+      if (config.shippingIsTaxable && newShippingFee > 0) {
+        newShippingFee = round2(newShippingFee + (newShippingFee * 18) / 100);
       }
 
-      // Apply GST on shipping charges if shippingIsTaxable config flag is true
-      if (config.shippingIsTaxable && newShippingFee > 0) {
-        const shippingGstPercent = 18;
-        const shippingGstRate = shippingGstPercent / 100;
-        const shippingGst = (newShippingFee * shippingGstRate) / (1 + shippingGstRate);
-        gstAmount += shippingGst;
-      }
-      
-      updateData.tax = Number(gstAmount.toFixed(2));
-      
+      updateData.shipping_fee = newShippingFee;
+
+      // Recalculate GST through the SAME helper the invoice uses, so an admin
+      // edit can never leave `tax` disagreeing with the printed invoice.
+      const { data: dbOrderItems } = await supabase
+        .from('order_items')
+        .select('*, products(seo_metadata, seoMetadata)')
+        .eq('order_id', id);
+
+      const gstLines = (dbOrderItems || []).map((item: any) => {
+        const meta = item.products?.seo_metadata || item.products?.seoMetadata || {};
+        const raw = meta.gst_rate ?? meta.gstRate ?? meta.gst;
+        const ratePercent = Number.isFinite(Number(raw)) && Number(raw) > 0 ? Number(raw) : 5;
+        return {
+          gross: (Number(item.price) || 0) * (Number(item.quantity) || 1),
+          ratePercent,
+        };
+      });
+
+      const updatedTotals = computeOrderTotals({
+        subtotal: newSubtotal,
+        discount: newDiscount,
+        shippingFee: newShippingFee,
+        fallbackGst: Number(order.tax) || 0,
+        lines: gstLines,
+        shippingGstRatePercent: config.shippingIsTaxable ? 18 : 0,
+      });
+
+      updateData.tax = updatedTotals.gst;
       // Final total
-      updateData.total = Number((newSubtotal - newDiscount + newShippingFee).toFixed(2));
+      updateData.total = round2(newSubtotal - newDiscount + newShippingFee);
     }
 
     const { data: updatedOrder, error: updateError } = await supabase
