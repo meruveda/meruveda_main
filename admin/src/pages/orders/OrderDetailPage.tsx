@@ -196,6 +196,26 @@ export const OrderDetailPage: React.FC = () => {
       const data = await orderService.getOrderById(id)
       setOrder(data)
       setTrackingNo(data.trackingNumber || '')
+
+      // Invoice state lives in Storage, not on the order row, so the detail
+      // page is the one place it can be read. Read-only: this never sends.
+      try {
+        const inv = await orderService.getInvoiceStatus(id)
+        setOrder((prev) => prev && ({
+          ...prev,
+          invoiceNumber: inv.invoiceNumber,
+          invoiceIssuedAt: inv.issuedAt,
+          invoiceUrl: inv.invoiceUrl,
+          invoiceSentAt: inv.sentAt,
+          invoiceError: inv.error,
+          invoiceAttempts: inv.attempts,
+          invoiceWhatsappStatus: inv.whatsapp,
+          invoiceStatus: inv.status,
+        }))
+      } catch {
+        // A status read must never break the order page. A missing state.json
+        // simply leaves the card on "Pending".
+      }
     } catch (err) {
       toast.error('Order not found')
       navigate('/orders')
@@ -393,12 +413,12 @@ export const OrderDetailPage: React.FC = () => {
           {/* Invoice card — READ ONLY.
               One invoice, one template, everywhere: the PDF rendered by the
               backend generator is what goes out on WhatsApp, what the customer
-              downloads, and what is linked here. Delivery is automatic (COD at
-              placement, prepaid once PayU verifies payment) with a cron sweep
-              retrying failures, so there is deliberately no Send / Resend /
-              Download button: a manual trigger is a second way to deliver the
-              same tax document, and the once-only claim is what keeps the GST
-              series sound. */}
+              downloads, and what is linked here. Delivery is automatic — it
+              fires at order creation for every order — with a sweep retrying
+              failures, so there is deliberately no Send / Resend / Download
+              button: a manual trigger is a second way to deliver the same tax
+              document, and the once-only claim is what keeps the GST series
+              sound. */}
           <div className="card p-6 space-y-4">
             <h3 className="section-title flex items-center gap-1.5 font-bold">
               <FileText className="h-5 w-5 text-slate-400" /> Invoice
@@ -419,6 +439,15 @@ export const OrderDetailPage: React.FC = () => {
                 const whatsappStyles: Record<string, string> = {
                   sent: 'text-green-600',
                   failed: 'text-red-600',
+                }
+                // "Not configured" is a normal state, not a failure: Meta is not
+                // active yet, so WhatsApp was skipped quietly and the invoice
+                // was still issued and is still downloadable.
+                const whatsappLabel: Record<string, string> = {
+                  sent: 'Sent',
+                  failed: 'Failed',
+                  pending: 'Pending',
+                  not_configured: 'Not configured',
                 }
 
                 return (
@@ -454,11 +483,11 @@ export const OrderDetailPage: React.FC = () => {
                       <div className="flex justify-between items-center">
                         <span className="text-slate-500">WhatsApp</span>
                         <span
-                          className={`font-semibold capitalize ${
-                            whatsappStyles[whatsapp] || 'text-slate-600'
+                          className={`font-semibold ${
+                            whatsappStyles[whatsapp] || 'text-slate-500'
                           }`}
                         >
-                          {whatsapp}
+                          {whatsappLabel[whatsapp] || whatsapp}
                         </span>
                       </div>
                     )}
@@ -489,8 +518,7 @@ export const OrderDetailPage: React.FC = () => {
 
                     {status === 'pending' && !order.invoiceError && (
                       <p className="text-xs text-slate-400">
-                        Generated and sent automatically: on order placement for Cash on Delivery,
-                        or as soon as payment is verified for prepaid orders.
+                        Issued automatically when the order is placed, for every order.
                       </p>
                     )}
 

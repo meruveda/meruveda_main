@@ -9,15 +9,14 @@ WhatsApp without any human step.
 > ## NO DATABASE CHANGES REQUIRED
 >
 > The invoice pipeline runs on `SUPABASE_URL` + `SUPABASE_SERVICE_KEY` only —
-> existing tables via PostgREST plus the Storage API. There is **no migration to
-> run**, and there never will be. Every piece of invoice bookkeeping (the invoice
+> existing tables via PostgREST plus the Storage API. There is **nothing to run**,
+> and there never will be. Every piece of invoice bookkeeping (the invoice
 > number, the issue timestamp, the delivery state and the channel attempt
-> counters) lives in a private Storage object, not in a new column.
+> counters) lives in a private Storage object, not in a column.
 >
-> Objects such as `orders.invoice_number`, `invoice_sequences` or
-> `claim_invoice()` were never created in production and are **not required**.
-> The schema audit is therefore silent by design — absent optional objects are a
-> normal, supported state and never produce a boot warning or a health failure.
+> Because there is no schema requirement, there is nothing to audit either: the
+> boot-time audit is a silent no-op and absent objects are a normal state, never
+> a warning or a health failure.
 
 ---
 
@@ -27,7 +26,7 @@ All three presented as "the invoice button is broken". None were.
 
 **a) A missing column was reported as a missing order.**
 `GET /orders/:id/invoice` destructured only `data` from its query, so PostgREST's
-`42703 column orders.invoice_number does not exist` was indistinguishable from an
+a schema error was indistinguishable from an
 absent row — the endpoint answered **404 "Order not found" for orders that
 existed**, and the admin told the merchant their order had vanished. Schema
 failures now return **503** with an actionable message; only a genuinely missing
@@ -123,7 +122,7 @@ invoice. The substantive changes, not the cosmetics:
 ## 5. COD gating and non-blocking PayU redirect
 
 * **COD** only invoices on order confirmation.
-* **PayU** records `payu_mihpayid` and returns success to the browser **first**;
+* **PayU** records the reference in the order notes and returns success to the browser **first**;
   invoice dispatch runs afterwards and cannot delay or fail the redirect.
 
 ## 6. WhatsApp approved template
@@ -236,7 +235,7 @@ column, table and function and prints a loud boxed error naming the files to run
 It does not refuse to start (the rest of the store is unaffected), but set
 `INVOICE_SCHEMA_STRICT=true` to fail fast. This exists because every consumer of
 the missing objects degraded gracefully — the claim fell back to non-atomic
-numbering, the dedupe check silently returned false, and `invoice_error` writes
+numbering, the dedupe check silently returned false, and failure writes
 were guarded by a `hasColumn` check that was quietly false — so nothing surfaced.
 
 **Cron.** The retry sweep needs a 2-minute schedule. Vercel's Hobby plan allows

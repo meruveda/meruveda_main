@@ -207,37 +207,37 @@ export const handlePayUCallback = async (req: Request, res: Response, next: Next
         return res.redirect(`${storefrontBaseUrl(req)}/checkout/failed?order_id=${order.id}&reason=${encodeURIComponent('Payment amount mismatch. Please contact support if money was deducted.')}`);
       }
 
-      // Mark as paid / processing.
-      // payu_mihpayid gets its OWN column — the invoice notes box reads it
-      // directly instead of regex-parsing it back out of the notes blob.
-      const paidPatch: Record<string, unknown> = {
-        status: 'processing',
-        payment_status: 'paid',
-        notes: `${order.notes || ''} [PayU mihpayid: ${mihpayid}]`.trim(),
-      };
-      if (mihpayid && (await hasColumn('orders', 'payu_mihpayid'))) {
-        paidPatch.payu_mihpayid = mihpayid;
-      }
-      await supabase.from('orders').update(paidPatch).eq('id', order.id);
+      // Mark as paid / processing. The PayU reference is recorded in the notes
+      // marker, which is the only place it is stored — the invoice reads it back
+      // from there rather than depending on a dedicated column.
+      await supabase
+        .from('orders')
+        .update({
+          status: 'processing',
+          payment_status: 'paid',
+          notes: `${order.notes || ''} [PayU mihpayid: ${mihpayid}]`.trim(),
+        })
+        .eq('id', order.id);
 
       await upsertTransaction('success', 'captured');
 
-      // Redirect the customer FIRST. Invoice rendering, the Supabase upload and
-      // both delivery providers run afterwards in the background — awaiting them
-      // here used to stall the browser for up to ~30s and invited PayU callback
-      // retries. Idempotency no longer depends on waiting: the dispatcher's
-      // atomic claim_invoice() guarantees exactly one invoice per order no
-      // matter how many times PayU POSTs this endpoint.
+      // Redirect the customer FIRST. Shiprocket push runs afterwards in the
+      // background — awaiting it here used to stall the browser for up to ~30s
+      // and invited PayU callback retries.
+      //
+      // This callback does NOT issue an invoice. The invoice was already issued
+      // at order creation, for every order, COD and prepaid alike; all this
+      // callback does is record the payment. So there is nothing here that could
+      // produce a second tax document for one order.
       const successUrl = `${storefrontBaseUrl(req)}/checkout/success/${order.id}`;
       console.log(`[PayU] payment verified for order ${orderNumber}, redirecting to ${successUrl}`);
       res.redirect(successUrl);
 
-      // Post-confirmation background work: (1) invoice delivery, (2) Shiprocket
-      // push. The redirect above has already been sent, so this cannot delay the
-      // customer — but it MUST be registered with waitUntil() via keepAlive(),
-      // otherwise Vercel tears the invocation down when the response flushes and
-      // the invoice is never rendered or delivered.
-      keepAlive(postOrderConfirmed(order.id, { source: 'payu_success' }));
+      // Post-confirmation background work: the Shiprocket push. The redirect
+      // above has already been sent, so this cannot delay the customer — but it
+      // MUST be registered with waitUntil() via keepAlive(), otherwise Vercel
+      // tears the invocation down when the response flushes.
+      keepAlive(postOrderConfirmed(order.id, { source: 'payu_success', invoice: false }));
       return;
     } else {
       // Payment failed or cancelled

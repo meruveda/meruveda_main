@@ -1,4 +1,4 @@
-import { config } from '../config/env';
+import { config, invoiceWhatsapp } from '../config/env';
 import { supabase } from '../database/supabase';
 
 /**
@@ -502,6 +502,109 @@ export async function sendOnce(options: {
   return delivered;
 }
 
+/**
+ * Deliver a tax invoice over the approved UTILITY template.
+ *
+ * Outside the 24-hour customer-service window Meta only accepts a template
+ * message, so the PDF has to ride in the template's DOCUMENT header. We hand
+ * Meta a signed Storage URL (`document.link`) rather than uploading the bytes:
+ * the file is already stored, and this avoids a second copy of every invoice
+ * living in Meta's media library.
+ *
+ * Template body variables, in order:
+ *   {{1}} customer name  {{2}} order number  {{3}} invoice number  {{4}} amount
+ *
+ * Returns true only when Meta accepted the message. WHATSAPP_DRY_RUN=true logs
+ * the exact payload and returns true without calling Meta.
+ */
+export async function sendInvoiceDocumentTemplate(options: {
+  to: string;
+  customerName: string;
+  orderNumber: string;
+  invoiceNumber: string;
+  total: string;
+  signedUrl: string | null;
+  filename: string;
+}): Promise<boolean> {
+  const phone = normalizePhone(options.to);
+  if (!phone) return false;
+  if (!options.signedUrl) {
+    console.warn(`[WhatsApp] no signed invoice URL for ${options.invoiceNumber} — skipping.`);
+    return false;
+  }
+
+  const bodyParams = [
+    options.customerName,
+    options.orderNumber,
+    options.invoiceNumber,
+    options.total,
+  ];
+
+  const payload = {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to: phone,
+    type: 'template',
+    template: {
+      name: invoiceWhatsapp.templateName,
+      language: { code: invoiceWhatsapp.templateLang },
+      components: [
+        // Header MUST precede the body component.
+        {
+          type: 'header',
+          parameters: [
+            {
+              type: 'document',
+              document: { link: options.signedUrl, filename: options.filename },
+            },
+          ],
+        },
+        {
+          type: 'body',
+          parameters: bodyParams.map((value) => ({ type: 'text', text: String(value ?? '') })),
+        },
+      ],
+    },
+  };
+
+  if (invoiceWhatsapp.dryRun) {
+    console.log(
+      `[WhatsApp] DRY RUN — would send invoice ${options.invoiceNumber} to ${phone}:`,
+      JSON.stringify(payload)
+    );
+    return true;
+  }
+
+  const res = await fetch(`${graphBase()}/messages`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${config.whatsappApiToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  // Log the full Meta response: the HTTP status, the message id on success, and
+  // error.code / error.message on failure. Without error.code a template
+  // rejection and a rate-limit look identical in the logs.
+  const json: any = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    console.error(
+      `[WhatsApp] invoice send FAILED for ${phone} — HTTP ${res.status} ` +
+        `code=${json?.error?.code ?? 'n/a'} ` +
+        `message=${json?.error?.message ?? 'no message'} ` +
+        `detail=${JSON.stringify(json?.error?.error_data ?? null)}`
+    );
+    return false;
+  }
+
+  console.log(
+    `[WhatsApp] invoice ${options.invoiceNumber} accepted by Meta — ` +
+      `HTTP ${res.status} wamid=${json?.messages?.[0]?.id ?? 'n/a'}`
+  );
+  return true;
+}
+
 export const whatsappService = {
   isConfigured: isWhatsappConfigured,
   normalizePhone,
@@ -510,6 +613,7 @@ export const whatsappService = {
   sendDocument,
   sendDocumentTemplate,
   sendDocumentTemplateOnce,
+  sendInvoiceDocumentTemplate,
   sendOnce,
   wasSent,
 };

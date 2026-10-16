@@ -95,10 +95,10 @@ All of these are covered by `backend/database/PENDING_DELTAS.sql` (run once, ide
 | Admin "Feature on homepage" review toggle | `reviews.is_featured` | `PATCH /api/reviews/:id/feature` → 503 with the delta name |
 | Storefront reply under a review | `reviews.reply` | Same |
 | Admin Analytics traffic card | `page_views` table | Traffic section shows zeros |
-| OTP checkout + WhatsApp send-once dedup | `otps`, `whatsapp_message_log`, `review_requests` | OTP login unavailable; WhatsApp sends may duplicate |
+| OTP checkout + WhatsApp send-once dedup | `otps`, `review_requests` | OTP login unavailable; WhatsApp sends may duplicate |
 | Saved profile address, admin "last login" | `users.address`, `users.last_login_at` | Profile address empty; last login falls back to signup time |
 | Phone-verified gating for quick-login orders | `users.phone_verified` | Quick-login users keep full order-history access |
-| Automatic GST invoice (Part 1) | `orders.invoice_sent_at`, `orders.invoice_error` | Invoice hook cannot claim an order → logged, no send |
+ice hook cannot claim an order → logged, no send |
 | Automatic Shiprocket push (Part 2) | `orders.shiprocket_push_status`, `_error`, `_pushed_at`, `_push_started_at` | Push cannot be made single-flight → logged, no push |
 | Journal cover image + SEO | `blogs.featured_image`, `blogs.seo_metadata` | Those fields are dropped on save; rest of the post saves |
 | Category image + banner | `categories.image`, `categories.banner` | Those fields are dropped on save |

@@ -23,8 +23,22 @@ import {
   splitGst,
 } from '@meruveda/shared';
 import { supabase } from '../database/supabase';
-import { config } from '../config/env';
-import { hasColumn } from './schemaGuard';
+import { config, storefrontUrl } from '../config/env';
+import {
+  INVOICE_FONT_FILES,
+  INVOICE_LOGO_FILE,
+  invoiceAssetPaths,
+  readInvoiceAsset,
+} from './invoiceAssets';
+import {
+  allocateInvoiceNumber,
+  claimInvoice,
+  deleteInvoiceClaim,
+  freshChannelState,
+  patchChannel,
+  readInvoiceState,
+  writeInvoiceState,
+} from './invoiceStore';
 
 /** Per-channel outcome, mirroring ChannelStatus in invoiceDispatchService. */
 type ChannelOutcome = 'sent' | 'failed' | 'skipped' | 'disabled';
@@ -76,33 +90,13 @@ const TOTAL_X = 318.8;
 const TOTAL_LABEL_W = 138.8;
 const TOTAL_VAL_W = 136.5;
 
-/* =============================================================================
- * ASSETS — logo + fonts. All resolved relative to the running module so the
- * same paths work from src/ and from dist/ on Vercel.
- * ========================================================================== */
-function asset(candidates: string[]): Buffer | null {
-  for (const c of candidates) {
-    try {
-      return readFileSync(c);
-    } catch {
-      /* next */
-    }
-  }
-  return null;
-}
 
-// __dirname is backend/src/services or backend/dist/services.
-const assetRoot = (rel: string) => [
-  path.resolve(__dirname, `../assets/${rel}`), // dist/assets (copy-assets.cjs)
-  path.resolve(__dirname, `../../assets/${rel}`), // assets/ (source tree)
-];
-
-const FONT_FILES = {
-  serifBold: 'fonts/SourceSerif4-Bold.ttf', // stands in for Georgia Bold
-  sans: 'fonts/NotoSans-Regular.ttf',
-  sansBold: 'fonts/NotoSans-Bold.ttf',
-  mono: 'fonts/NotoSansMono-Regular.ttf', // stands in for Consolas
-  monoBold: 'fonts/NotoSansMono-Bold.ttf',
+const FONT_FILES: Record<string, string> = {
+  serifBold: INVOICE_FONT_FILES[0], // stands in for Georgia Bold
+  sans: INVOICE_FONT_FILES[1],
+  sansBold: INVOICE_FONT_FILES[2],
+  mono: INVOICE_FONT_FILES[3], // stands in for Consolas
+  monoBold: INVOICE_FONT_FILES[4],
 };
 
 interface Fonts {
@@ -118,7 +112,7 @@ async function loadFonts(doc: PDFDocument): Promise<Fonts | null> {
   const missing: string[] = [];
   const out: any = {};
   for (const [key, rel] of Object.entries(FONT_FILES)) {
-    const bytes = asset(assetRoot(rel));
+    const bytes = readInvoiceAsset(rel);
     if (!bytes) {
       missing.push(rel);
       continue;
@@ -132,7 +126,7 @@ async function loadFonts(doc: PDFDocument): Promise<Fonts | null> {
   if (missing.length) {
     console.error(
       `[Invoice] FONTS MISSING — the invoice will fall back to Helvetica/Courier and cannot draw ₹. ` +
-        `Missing or unreadable: ${missing.join(', ')}. Looked under: ${assetRoot('fonts/...').join(' , ')}`
+        `Missing or unreadable: ${missing.join(', ')}. Looked under: ${invoiceAssetPaths('fonts/...').join(' , ')}`
     );
     return null;
   }
@@ -151,9 +145,10 @@ const DEFAULT_SELLER = {
   ],
   phone: '+91 8097147463',
   email: 'customercare@meruvedawellness.com',
-  // Real production domain. Never FRONTEND_URL — that is localhost/staging and
-  // would print a dead website on a legal document.
-  website: 'meruvedawellness.com',
+  // Real production domain. `storefrontUrl` defaults to
+  // https://meruvedawellness.com and only honours FRONTEND_URL when it is set
+  // and is not a local dev host — a legal document must never print localhost.
+  website: storefrontUrl.replace(/^https?:\/\//, ''),
   gstin: '08BFPPS7045C1Z4',
 };
 
@@ -318,6 +313,65 @@ function gstRateOf(item: any): number {
  * untouched.
  */
 export async function generateInvoicePdf(order: any): Promise<Buffer> {
+  try {
+    return await renderInvoicePdf(order);
+  } catch (err: any) {
+    // The customer clicked Download. Whatever broke in the full template -- a
+    // missing font asset, a corrupt image, anything -- they still get a
+    // readable PDF. So we log loudly and fall back to a minimal document built
+    // from the standard fonts that are always present in pdf-lib.
+    console.error(
+      '[invoice] step=render-fallback order=' + String(order?.id || '') +
+        ' reason=' + (err?.message || err) + ' — drawing the minimal invoice instead',
+      err?.stack || err
+    );
+    return renderMinimalInvoicePdf(order);
+  }
+}
+
+/**
+ * Minimal, dependency-free invoice.
+ *
+ * Standard-14 fonts only: no custom asset is read, so this cannot fail for
+ * asset reasons. It carries the facts that matter on a tax invoice -- number,
+ * order, date, GSTIN, items, total -- and is enough for a customer who just needs
+ * the document. It prints "Rs." because the rupee glyph needs an embedded font.
+ */
+async function renderMinimalInvoicePdf(order: any): Promise<Buffer> {
+  const { StandardFonts } = await import('pdf-lib');
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([PAGE_W, PAGE_H]);
+  const helv = await doc.embedFont(StandardFonts.Helvetica);
+  const helvBold = await doc.embedFont(StandardFonts.HelveticaBold);
+  let y = PAGE_H - 60;
+  const line = (text: string, size = 10, bold = false) => {
+    if (y < 60) return;
+    page.drawText(text, { x: 40, y, size, font: bold ? helvBold : helv });
+    y -= size + 8;
+  };
+  line('INVOICE', 22, true);
+  line('Invoice #: ' + (order?.invoice_number || order?.order_number || ''), 11);
+  line('Order #: ' + (order?.order_number || ''), 11);
+  line('Date: ' + new Date().toISOString().slice(0, 10), 11);
+  y -= 8;
+  line('MERUVEDA WELLNESS', 12, true);
+  line('GSTIN: ' + getSellerIdentity().gstin, 10);
+  y -= 8;
+  const items: any[] = Array.isArray(order?.order_items) ? order.order_items : [];
+  line('Description                      Qty        Amount', 10, true);
+  for (const item of items) {
+    const name = String(item?.product_name || item?.name || 'Item').slice(0, 42);
+    const qty = Number(item?.quantity) || 1;
+    const amount = round2(Number(item?.total) || 0);
+    line(name + '  ' + qty + '  Rs. ' + formatInvoiceAmount(amount), 10);
+  }
+  y -= 10;
+  line('Total: Rs. ' + formatInvoiceAmount(Number(order?.total) || 0), 12, true);
+  line('Thank You For Your Business!', 10);
+  return Buffer.from(await doc.save({ useObjectStreams: false }));
+}
+
+async function renderInvoicePdf(order: any): Promise<Buffer> {
   const doc = await PDFDocument.create();
 
   const fonts = await loadFonts(doc);
@@ -345,6 +399,8 @@ export async function generateInvoicePdf(order: any): Promise<Buffer> {
   // ---- data ----
   const seller = getSellerIdentity();
   const orderNumber: string = order.order_number || 'MV-000000';
+  // The invoice number and issue timestamp come from the claim the caller won,
+  // stashed on the order object — never from an orders column.
   const invoiceNumber: string = order.invoice_number || buildInvoiceNumber(orderNumber);
   const issued = order.invoice_issued_at ? new Date(order.invoice_issued_at) : new Date();
   const orderDate = order.created_at ? new Date(order.created_at) : issued;
@@ -353,6 +409,11 @@ export async function generateInvoicePdf(order: any): Promise<Buffer> {
 
   const prepaid = isPrepaid(order);
   const paid = isPaid(order);
+  // The wording is frozen at issue time; `paidAtIssue` is what the PAYMENT
+  // DETAILS block may assert as PAID. An unpaid prepaid order prints neither a
+  // PAID stamp nor a PayU reference.
+  const payment = paymentWordingFor(order);
+  const paidAtIssue = payment.paid;
   const bill = order.billing_address && Object.keys(order.billing_address).length ? order.billing_address : {};
   const ship = order.shipping_address && Object.keys(order.shipping_address).length ? order.shipping_address : {};
   const addr: any = { ...ship, ...bill, state: bill.state || ship.state };
@@ -403,7 +464,7 @@ export async function generateInvoicePdf(order: any): Promise<Buffer> {
 
   /* ================= HEADER ================= */
   // Logo, reference size 99.8 x 42 at (18, 18).
-  const logoBytes = asset(assetRoot('meruveda-logo.png'));
+  const logoBytes = readInvoiceAsset(INVOICE_LOGO_FILE);
   if (logoBytes) {
     try {
       // Create BEFORE the fonts so every resource tag stays in sync (a font tag
@@ -420,7 +481,7 @@ export async function generateInvoicePdf(order: any): Promise<Buffer> {
     }
   } else {
     console.error(
-      `[Invoice] LOGO MISSING — the invoice will render without it. Looked in: ${assetRoot('meruveda-logo.png').join(' , ')}`
+      `[Invoice] LOGO MISSING — the invoice will render without it. Looked in: ${invoiceAssetPaths(INVOICE_LOGO_FILE).join(' , ')}`
     );
   }
 
@@ -614,10 +675,14 @@ export async function generateInvoicePdf(order: any): Promise<Buffer> {
   for (const n of numbered) listLines.push(...wrapText(f.sans, n, 9, NOTES_W - 20));
 
   // Payment reference / customer note. The raw "[PayU mihpayid: ...]" string must
-  // never be printed — it is an internal marker, and mihpayid has its own column.
+  // never be printed — it is an internal marker, and the reference it carries is
+  // surfaced separately below.
   const rawNote = String(order.notes || '').trim();
   const rawNoteClean = rawNote.replace(/\[PayU mihpayid:[^\]]*\]/gi, '').trim();
-  const refLine = prepaid && order.payu_mihpayid ? `Payment Ref: PayU ${order.payu_mihpayid}` : '';
+  // Only a reference that was genuinely recorded may be asserted. `paidAtIssue`
+  // is false for an unpaid prepaid order, which prints nothing.
+  const payuRef = paidAtIssue ? payuReferenceFor(order) : null;
+  const refLine = payuRef ? `Payment Ref: PayU ${payuRef}` : '';
   const noteText = refLine || rawNoteClean;
 
   const noteBoxH = noteText ? 27.8 : 0;
@@ -648,7 +713,7 @@ export async function generateInvoicePdf(order: any): Promise<Buffer> {
       color: hex('#fffbeb'),
     });
     const prefix = refLine ? 'Payment Ref: ' : 'Customer Note: ';
-    const body = refLine ? `PayU ${order.payu_mihpayid}` : noteText;
+    const body = refLine ? `PayU ${payuRef}` : noteText;
     const maxNoteW = nbW - 20;
     const italicFont = f.sansBold;
     const prefixW = italicFont.widthOfTextAtSize(prefix, 9);
@@ -775,9 +840,11 @@ export async function generateInvoicePdf(order: any): Promise<Buffer> {
  * ========================================================================== */
 
 /**
- * Legacy fallback used only when the claim RPC is unavailable (the SQL
- * migration has not been applied). Deterministic per order so a regeneration
- * never invents a second number, and shaped like the real series.
+ * Last-resort identifier when the FY series cannot be allocated at all.
+ *
+ * An order must never be left without an invoice, so we fall back to the order
+ * number rather than failing. It is not part of the `MV/<FY>/<000123>` series,
+ * it is logged loudly, and it is stable — a later sweep will not renumber it.
  */
 export function buildInvoiceNumber(orderNumber: string, issuedAt: Date = new Date()): string {
   const digest = Math.abs(
@@ -787,104 +854,195 @@ export function buildInvoiceNumber(orderNumber: string, issuedAt: Date = new Dat
 }
 
 /**
- * Claim this order atomically and take its invoice number from the FY series.
+ * Wording that must never claim something untrue.
  *
- * `claim_invoice()` does both in one transaction, so there is no window in which
- * an order is claimed but unnumbered, and no window in which a sequence value is
- * consumed but not persisted.
- *
- * Returns null when another worker already claimed the order — callers treat
- * that as "already handled", not as an error. That null is the whole once-only
- * guarantee: a PayU double-POST, a parallel cron sweep and the original trigger
- * all race here and exactly one of them wins.
+ * A tax invoice is a legal document: it may only state a payment fact that was
+ * actually true at the moment it was issued. So COD says the amount is due on
+ * delivery, a verified-paid prepaid order is stamped PAID with its PayU
+ * reference, and an unpaid prepaid order stays deliberately neutral — no PAID
+ * stamp and no reference, because neither is established yet.
  */
-export async function claimInvoiceNumber(order: {
-  id: string;
-  invoice_number?: string | null;
-}): Promise<string | null> {
-  try {
-    const { data, error } = await supabase.rpc('claim_invoice', { p_order_id: order.id });
-    if (error) throw new Error(error.message);
-    if (data) {
-      (order as any).invoice_number = data;
-      return String(data);
-    }
-    return null; // already claimed by someone else
-  } catch (err: any) {
-    console.error(
-      `[Invoice] claim_invoice RPC unavailable (${err?.message || err}) — is ` +
-        'backend/sql/migrations/2026-10-15_invoice_automation.sql applied? ' +
-        'Falling back to NON-ATOMIC legacy numbering; the once-only guarantee does not hold.'
-    );
-    const legacy = order.invoice_number || buildInvoiceNumber(String((order as any).order_number || ''));
-    (order as any).invoice_number = legacy;
-    try {
-      await supabase
-        .from('orders')
-        .update({ invoice_number: legacy, invoice_claimed_at: new Date().toISOString() })
-        .eq('id', order.id)
-        .is('invoice_number', null);
-    } catch (persistErr: any) {
-      console.error('[Invoice] could not persist fallback invoice number:', persistErr?.message || persistErr);
-    }
-    return legacy;
+export function paymentWordingFor(order: {
+  payment_method?: string | null;
+  payment_status?: string | null;
+  payu_mihpayid?: string | null;
+  notes?: string | null;
+}): { mode: 'cod' | 'prepaid'; paid: boolean; reference: string | null; wording: string } {
+  const isCod = isCodOrder(order);
+  if (isCod) {
+    return { mode: 'cod', paid: false, reference: null, wording: 'Amount due on delivery' };
+  }
+  const paid = isPaid(order);
+  if (paid) {
+    return {
+      mode: 'prepaid',
+      paid: true,
+      reference: payuReferenceFor(order),
+      wording: 'PAID',
+    };
+  }
+  return { mode: 'prepaid', paid: false, reference: null, wording: 'Payment: Online (via PayU)' };
+}
+
+/** COD decided on the exact stored `payment_method` value, case-insensitively. */
+export function isCodOrder(order: { payment_method?: string | null }): boolean {
+  return String(order?.payment_method || '').trim().toLowerCase() === 'cod';
+}
+
+/**
+ * The PayU reference, taken from whatever the success callback already stored.
+ *
+ * No dedicated column is assumed: `payu_mihpayid` is read when present, and
+ * otherwise the marker the callback writes into `notes` is parsed. Returns null
+ * rather than guessing when neither is available.
+ */
+export function payuReferenceFor(order: { notes?: string | null }): string | null {
+  const notes = String(order?.notes || '');
+  const match = notes.match(/\[PayU\s*mihpayid:\s*([^\]]+)\]/i);
+  return match ? match[1].trim() : null;
+}
+
+/**
+ * Claim this order and take its invoice number from the FY series.
+ *
+ * Atomicity comes from Storage, not from a database function: `claimInvoice()`
+ * creates `invoices/<order_id>/claim` with `upsert:false`, so when the order
+ * creation trigger, a PayU callback and the cron sweep all race, exactly one
+ * create succeeds. The losers read `state.json` and return the number already
+ * issued — never a second one.
+ *
+ * Returns null when another worker already claimed the order; callers treat
+ * that as "already handled", not as an error.
+ */
+/** Thrown when another worker holds a live claim. Not an error — a retry. */
+export class InvoiceBusyError extends Error {
+  constructor(public readonly retryAfterSeconds = 3) {
+    super('Invoice is being generated.');
   }
 }
 
-/** Release a failed claim so the retry sweep can run again. Number is KEPT. */
-export async function releaseInvoiceClaim(orderId: string, reason: string): Promise<void> {
-  const message = String(reason).slice(0, 500);
-  try {
-    await supabase.rpc('release_invoice_claim', { p_order_id: orderId, p_reason: message });
-  } catch {
-    await supabase
-      .from('orders')
-      .update({ invoice_claimed_at: null, invoice_error: message })
-      .eq('id', orderId);
+/** Thrown when issue cannot proceed; `reason` is safe to show the customer. */
+export class InvoiceIssueError extends Error {
+  constructor(public readonly step: string, public readonly reason: string) {
+    super(`${step}: ${reason}`);
   }
 }
 
 /**
- * Record the delivery outcome. This is the ONLY writer of invoice_sent_at, so
- * "Sent" in the admin panel means a channel really accepted the document.
+ * Claim this order and take its invoice number from the FY series.
+ *
+ * Atomicity comes from Storage: `claimInvoice` creates `invoices/<id>/claim`
+ * with `upsert:false`, so when the order-creation trigger, a PayU callback and
+ * the cron sweep all race, exactly one create succeeds.
+ *
+ * A claim with no state.json older than a minute is treated as dead (its worker
+ * crashed) and taken over, so a single failed attempt can never wedge an order
+ * in "being generated" forever.
+ *
+ * @throws InvoiceBusyError when another worker is mid-flight.
+ * @throws InvoiceIssueError when storage is unavailable.
  */
+export async function claimInvoiceNumber(order: {
+  id: string;
+  order_number?: string | null;
+  invoice_number?: string | null;
+}): Promise<string> {
+  const orderId = order.id;
+  const issuedAt = new Date();
+
+  const existing = await readInvoiceState(orderId);
+  if (existing?.invoiceNumber) return existing.invoiceNumber;
+
+  const outcome = await claimInvoice(
+    orderId,
+    { claimedAt: issuedAt.toISOString(), owner: `issue-${issuedAt.getTime()}` },
+    { existingState: Boolean(existing) }
+  );
+
+  if (!outcome.ok) {
+    if (outcome.busy) throw new InvoiceBusyError(outcome.retryAfterSeconds);
+    throw new InvoiceIssueError('claim', outcome.reason);
+  }
+
+  let invoiceNumber: string;
+  try {
+    invoiceNumber = await allocateInvoiceNumber(issuedAt);
+  } catch (err: any) {
+    // Never leave an order without an invoice: fall back to the order number.
+    invoiceNumber = String(order.order_number || '') || buildInvoiceNumber(String(order.order_number || ''));
+    console.error(
+      `[invoice] step=number-allocation order=${orderId} fell back to the order number ${invoiceNumber}`,
+      err?.stack || err?.message || err
+    );
+  }
+
+  (order as any).invoice_number = invoiceNumber;
+  return invoiceNumber;
+}
+
+/**
+ * Persist the issued invoice's identity and payment wording.
+ *
+ * Written after the claim and before delivery so a crash between the two still
+ * leaves a readable record of what the customer was issued.
+ */
+export async function writeInvoiceIssue(
+  orderId: string,
+  invoiceNumber: string,
+  order: any
+): Promise<boolean> {
+  const payment = paymentWordingFor(order);
+  const written = await writeInvoiceState(orderId, {
+    invoiceNumber,
+    orderNumber: String(order?.order_number || ''),
+    issuedAt: new Date().toISOString(),
+    pdfPath: null,
+    payment,
+    channels: { whatsapp: freshChannelState(), email: freshChannelState() },
+  });
+  if (written) (order as any).invoice_issued_at = new Date().toISOString();
+  return written;
+}
+
+/** Record the outcome of a delivery attempt on the channel it belongs to. */
 export async function markInvoiceSent(
   orderId: string,
   statuses: { whatsapp?: ChannelOutcome | null; email?: ChannelOutcome | null } = {}
 ): Promise<void> {
-  const whatsapp = statuses.whatsapp ?? null;
-  const email = statuses.email ?? null;
-  try {
-    await supabase.rpc('mark_invoice_sent', {
-      p_order_id: orderId,
-      p_whatsapp: whatsapp,
-      p_email: email,
+  const at = new Date().toISOString();
+  if (statuses.whatsapp) {
+    await patchChannel(orderId, 'whatsapp', {
+      status: statuses.whatsapp === 'sent' ? 'sent' : 'failed',
+      sentAt: statuses.whatsapp === 'sent' ? at : null,
+      lastAttemptAt: at,
     });
-  } catch {
-    await supabase
-      .from('orders')
-      .update({
-        invoice_sent_at: new Date().toISOString(),
-        invoice_error: null,
-        ...(whatsapp ? { invoice_whatsapp_status: whatsapp } : {}),
-        ...(email ? { invoice_email_status: email } : {}),
-      })
-      .eq('id', orderId);
   }
+  if (statuses.email) {
+    await patchChannel(orderId, 'email', {
+      status: statuses.email === 'sent' ? 'sent' : 'failed',
+      sentAt: statuses.email === 'sent' ? at : null,
+      lastAttemptAt: at,
+    });
+  }
+}
+
+/**
+ * Release a failed issue so the retry sweep can run again.
+ *
+ * The claim marker is deliberately KEPT: an invoice number, once printed, can
+ * never be reused or re-allocated, and keeping the claim is what stops a retry
+ * from issuing a second tax document for the same order.
+ */
+export async function releaseInvoiceClaim(orderId: string, reason: string): Promise<void> {
+  await patchChannel(orderId, 'whatsapp', { lastError: String(reason).slice(0, 500) });
+  await patchChannel(orderId, 'email', { lastError: String(reason).slice(0, 500) });
 }
 
 /** Persist the last failure reason so the admin card and the sweep can see it. */
 export async function recordInvoiceError(orderId: string, reason: string): Promise<void> {
-  try {
-    if (await hasColumn('orders', 'invoice_error')) {
-      await supabase
-        .from('orders')
-        .update({ invoice_error: String(reason).slice(0, 500) })
-        .eq('id', orderId);
-    }
-  } catch (err: any) {
-    console.error('[Invoice] could not persist invoice_error:', err?.message || err);
-  }
+  const message = String(reason).slice(0, 500);
+  await patchChannel(orderId, 'whatsapp', { lastError: message });
+  await patchChannel(orderId, 'email', { lastError: message });
 }
 
 export const invoiceService = {
@@ -892,10 +1050,14 @@ export const invoiceService = {
   generateInvoicePdf,
   buildInvoiceNumber,
   claimInvoiceNumber,
+  writeInvoiceIssue,
   releaseInvoiceClaim,
   markInvoiceSent,
   recordInvoiceError,
   getSellerIdentity,
   wrapText,
   formatINR,
+  isCodOrder,
+  paymentWordingFor,
+  payuReferenceFor,
 };

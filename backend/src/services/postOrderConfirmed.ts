@@ -3,9 +3,10 @@ import { supabase } from '../database/supabase';
 import { hasColumn } from './schemaGuard';
 import { orderNotifyService } from './orderNotifyService';
 import { invoiceDispatchService } from './invoiceDispatchService';
+import { recordInvoiceError } from './invoiceService';
 import { pushOrderToShiprocket } from './orderService';
 
-export type PostOrderSource = 'payu_success' | 'cod_placement';
+export type PostOrderSource = 'payu_success' | 'cod_placement' | 'order_placement';
 
 export interface PostOrderConfirmedResult {
   invoice: { ok: boolean; skipped?: boolean; reason?: string };
@@ -14,22 +15,22 @@ export interface PostOrderConfirmedResult {
 
 /** True when the order is paid on delivery (no payment callback exists). */
 export function isCodOrder(order: any): boolean {
-  const method = String(order?.payment_method || '');
-  return /cash|\bcod\b/i.test(method);
+  // Exact stored value, case-insensitive — not a substring match, which used to
+  // classify any method containing "cash" (e.g. "cashfree") as COD.
+  return String(order?.payment_method || '').trim().toLowerCase() === 'cod';
 }
 
 /**
  * Is this order genuinely billable RIGHT NOW?
  *
- * Prepaid orders are only billable once payment is verified (PayU hash + amount
- * match have already run and flipped payment_status to 'paid' before we get
- * here). COD orders are billable the moment the order is placed, because the
- * invoice states the amount due on delivery.
+ * Always true for an order that exists. There is no longer any payment gating:
+ * the invoice is issued at ORDER CREATION for every order, COD and prepaid
+ * alike, because a tax invoice documents the sale and the sale has already
+ * happened. The PayU callback only records payment — it never issues, so it
+ * cannot produce a second invoice for the same order.
  */
-export function isInvoiceEligible(order: any, source: PostOrderSource): boolean {
-  if (!order) return false;
-  if (isCodOrder(order)) return true;
-  return String(order.payment_status || '') === 'paid' && source === 'payu_success';
+export function isInvoiceEligible(order: any, _source?: PostOrderSource): boolean {
+  return Boolean(order);
 }
 
 /* ------------------------------------------------------------------ */
@@ -37,13 +38,8 @@ export function isInvoiceEligible(order: any, source: PostOrderSource): boolean 
 /* ------------------------------------------------------------------ */
 
 async function saveInvoiceError(orderId: string, message: string): Promise<void> {
-  try {
-    if (await hasColumn('orders', 'invoice_error')) {
-      await supabase.from('orders').update({ invoice_error: message.slice(0, 500) }).eq('id', orderId);
-    }
-  } catch (err: any) {
-    console.error('[PostOrder] could not persist invoice_error:', err?.message || err);
-  }
+  // Invoice bookkeeping lives in state.json, not in an orders column.
+  await recordInvoiceError(orderId, message);
 }
 
 async function saveShiprocketError(orderId: string, message: string): Promise<void> {
@@ -92,7 +88,7 @@ async function saveShiprocketError(orderId: string, message: string): Promise<vo
  */
 export function postOrderConfirmed(
   orderId: string,
-  { source, wait = false }: { source: PostOrderSource; wait?: boolean }
+  { source, wait = false, invoice = true }: { source: PostOrderSource; wait?: boolean; invoice?: boolean }
 ): Promise<PostOrderConfirmedResult> {
   const work = (async (): Promise<PostOrderConfirmedResult> => {
     const result: PostOrderConfirmedResult = {
@@ -108,25 +104,23 @@ export function postOrderConfirmed(
           .eq('id', orderId)
           .maybeSingle();
 
-        // Gate: never issue an invoice for an unverified prepaid order, and
-        // never issue one from a COD-placement trigger for a prepaid order.
-        if (!isInvoiceEligible(order, source)) {
-          console.warn(
-            `[PostOrder] invoice skipped for ${orderId} (source=${source}, ` +
-              `method=${order?.payment_method}, payment=${order?.payment_status}) — not billable yet.`
-          );
-          result.invoice = { ok: true, skipped: true, reason: 'order is not billable yet' };
-          return;
-        }
-
-        const dispatch = await invoiceDispatchService.sendInvoiceAuto(orderId);
-        result.invoice = {
-          ok: !dispatch.reason,
-          skipped: dispatch.skipped,
-          reason: dispatch.reason,
-        };
-        if (dispatch.reason) {
-          console.error(`[PostOrder] invoice dispatch failed for ${orderId}: ${dispatch.reason}`);
+// The PayU success callback records payment and must NOT issue: the invoice
+        // was already issued at order creation. Issuing again would risk a
+        // second tax document for one order.
+        if (!invoice) {
+          result.invoice = { ok: true, skipped: true, reason: 'invoice already issued at order creation' };
+        } else if (!isInvoiceEligible(order, source)) {
+          result.invoice = { ok: true, skipped: true, reason: 'order not found' };
+        } else {
+          const dispatch = await invoiceDispatchService.sendInvoiceAuto(orderId);
+          result.invoice = {
+            ok: !dispatch.reason,
+            skipped: dispatch.skipped,
+            reason: dispatch.reason,
+          };
+          if (dispatch.reason) {
+            console.error(`[PostOrder] invoice dispatch failed for ${orderId}: ${dispatch.reason}`);
+          }
         }
       } catch (err: any) {
         const message = err?.message || String(err);
@@ -146,7 +140,7 @@ export function postOrderConfirmed(
         //     and testMode both push unconditionally, column or no column.
         //   autoTriggerOnly — the NEW path where SHIPROCKET_AUTO_PUSH alone is
         //     asking for a push (i.e. not a PayU callback, not testMode).
-        const legacyTrigger = source === 'payu_success' || config.shiprocketTestMode;
+        const legacyTrigger = source !== 'order_placement' || config.shiprocketTestMode;
         const autoTriggerOnly = config.shiprocketAutoPush && !legacyTrigger;
 
         if (legacyTrigger) {

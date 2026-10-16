@@ -73,6 +73,7 @@ app.get('/api/health', async (req, res) => {
 });
 
 import authRoutes from './routes/authRoutes';
+import healthRoutes from './routes/healthRoutes';
 import productRoutes from './routes/productRoutes';
 import orderRoutes from './routes/orderRoutes';
 import cartRoutes from './routes/cartRoutes';

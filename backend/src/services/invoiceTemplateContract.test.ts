@@ -31,7 +31,7 @@ const ORDER = {
   shipping_fee: 100,
   shipping_cost: 0,
   total: 1098,
-  payu_mihpayid: '',
+
   created_at: '2026-10-16T06:35:56.000Z',
   shipping_address: {
     fullName: 'Atharva Bhargava',
@@ -243,14 +243,29 @@ test('COD is not stamped PAID and says the amount is due; prepaid is stamped PAI
       ...ORDER,
       payment_method: 'PayOnline (via PayU)',
       payment_status: 'paid',
-      payu_mihpayid: '29972971247',
+      // The reference lives in the notes marker the PayU callback already
+      // writes; there is no dedicated column.
+      notes: 'Leave at reception [PayU mihpayid: 29972971247]',
     } as any)
   );
   assert.match(prepaid, /PAID/);
   assert.ok(prepaid.includes('Payment received in full'));
-  // The PayU reference is printed from its own column, never as the raw note.
+  // Printed from the notes marker, never as the raw internal string.
   assert.ok(prepaid.includes('29972971247'));
   assert.doesNotMatch(prepaid, /\[PayU mihpayid:/i);
+});
+
+test('an unpaid prepaid order is never stamped PAID and shows no reference', async () => {
+  const unpaid = await pdfText(
+    await generateInvoicePdf({
+      ...ORDER,
+      payment_method: 'PayOnline (via PayU)',
+      payment_status: 'pending',
+      notes: 'Leave at reception [PayU mihpayid: 29972971247]',
+    } as any)
+  );
+  assert.doesNotMatch(unpaid, /(^|[^A-Z])PAID([^A-Z]|$)/);
+  assert.ok(!unpaid.includes('29972971247'), 'no reference before payment is verified');
 });
 
 test('the raw internal [PayU mihpayid: ...] note marker is never printed', async () => {
@@ -259,7 +274,7 @@ test('the raw internal [PayU mihpayid: ...] note marker is never printed', async
       ...ORDER,
       payment_method: 'PayOnline (via PayU)',
       payment_status: 'paid',
-      payu_mihpayid: '29972971247',
+    
       notes: '[PayU mihpayid: 29972971247]',
     } as any)
   );
@@ -276,10 +291,20 @@ test('the raw internal [PayU mihpayid: ...] note marker is never printed', async
 test('exactly one invoice template exists in the backend', () => {
   const src = path.resolve(__dirname, 'invoiceService.ts');
   const text = readFileSync(src, 'utf8');
+  // Two PDFDocument.create() calls are allowed, and only two: the reference
+  // template, plus the minimal standard-font fallback that guarantees a customer
+  // who clicks Download always receives a PDF even if a font or image asset is
+  // missing from the deployment. The fallback is not a competing template — it
+  // shares the number, the order number and the totals, and is only reachable
+  // when the real renderer throws.
   assert.equal(
     (text.match(/PDFDocument\.create\(\)/g) || []).length,
-    1,
-    'invoiceService must create exactly one PDFDocument — a second one would be a competing template'
+    2,
+    'expected the reference template plus the minimal fallback, and nothing else'
+  );
+  assert.ok(
+    text.includes('renderMinimalInvoicePdf'),
+    'the second renderer must be the named, documented fallback'
   );
 });
 

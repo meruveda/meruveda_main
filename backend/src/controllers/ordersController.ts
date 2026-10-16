@@ -2,17 +2,17 @@ import { Request, Response, NextFunction } from 'express';
 import { orderService, pushOrderToShiprocket, retryFailedShiprocketPushes } from '../services/orderService';
 import { postOrderConfirmed, isCodOrder, sendOrderConfirmationText } from '../services/postOrderConfirmed';
 import { invoiceDispatchService, deriveInvoiceStatus } from '../services/invoiceDispatchService';
-import { getLogEntry } from '../services/whatsappService';
 import { supabase } from '../database/supabase';
-import { normalizePhone } from '../services/whatsappService';
 import { hasColumn } from '../services/schemaGuard';
+import { normalizePhone } from '../services/whatsappService';
 import { verifyToken } from '../utils/jwt';
 import { keepAlive } from '../utils/keepAlive';
-import { config } from '../config/env';
+import { config, invoiceWhatsapp } from '../config/env';
 import { timingSafeEqualStr } from '../utils/timingSafe';
 import { shiprocketTrackingService } from '../services/shiprocket/tracking.service';
 import { shiprocketWebhookService } from '../services/shiprocket/webhook.service';
-import { getOrderForInvoice, generateInvoicePdf } from '../services/invoiceService';
+import { deleteInvoiceClaim, downloadInvoicePdf, readInvoiceState } from '../services/invoiceStore';
+import { generateInvoicePdf, getOrderForInvoice } from '../services/invoiceService';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -46,23 +46,38 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
   try {
     const data = await orderService.createOrder(req.body, req.user?.id);
 
-    // Cash on Delivery is the ONLY method that reaches the post-confirmation
-    // hook from here. A prepaid order is invoiced exclusively from the verified
-    // PayU callback — firing here too used to produce a second invoice attempt
-    // (on an unverified, unpaid order) for every prepaid checkout.
+    // Every order is invoiced the moment it is created — COD and prepaid alike,
+    // paid or not. A tax invoice documents the sale, and the sale happens when
+    // the order is placed; waiting for a payment callback used to leave prepaid
+    // checkouts with no invoice at all if the customer abandoned the PayU page.
+    //
+    // The PayU success callback therefore does NOT issue an invoice; it only
+    // records payment. It cannot double-issue, because the claim below is
+    // atomic and the callback would find it already taken.
+    const { data: placedOrder } = await supabase
+      .from('orders')
+      .select('*')
+      .eq('id', data.id)
+      .maybeSingle();
     if (isCodOrder(data)) {
-      const { data: confirmationOrder } = await supabase
-        .from('orders')
-        .select('*')
-        .eq('id', data.id)
-        .maybeSingle();
       // Confirmation text is a courtesy; the invoice is the dispatcher's job.
-      keepAlive(sendOrderConfirmationText(confirmationOrder));
-      // keepAlive, not a bare .catch(): on Vercel an un-awaited promise is torn
-      // down when the response flushes, which killed invoice dispatch mid-render
-      // with nothing recorded. waitUntil() extends the invocation instead.
-      keepAlive(postOrderConfirmed(data.id, { source: 'cod_placement' }));
+      keepAlive(sendOrderConfirmationText(placedOrder));
     }
+    // keepAlive, not a bare .catch(): on Vercel an un-awaited promise is torn
+    // down when the response flushes, which killed invoice dispatch mid-render
+    // with nothing recorded. waitUntil() extends the invocation instead.
+    keepAlive(postOrderConfirmed(data.id, { source: 'order_placement' }));
+
+    // Opportunistic delivery sweep. When the WhatsApp slot was empty at issue
+    // time (Meta is not active yet) those invoices are simply waiting; once the
+    // slot is filled in, the next order placed picks them up. This runs inside
+    // waitUntil so it never touches the response, and it no-ops immediately when
+    // the slot is still empty — so the daily cron can stay fail-closed.
+    keepAlive(
+      invoiceDispatchService
+        .retryPendingInvoices(5)
+        .catch((err: any) => console.error('[Invoice] backfill sweep failed:', err?.message || err))
+    );
 
     res.status(201).json({ data });
   } catch (error) {
@@ -222,27 +237,6 @@ export const trackByAwb = async (req: Request, res: Response, next: NextFunction
 /**
  * Read the delivery-tracking columns that may not exist yet.
  *
- * A deployment can be running this code before the migration has been applied,
- * and every one of these is optional for rendering the status card. The column
- * list is built dynamically so a missing column degrades to `undefined` instead
- * of failing the whole query with 42703.
- */
-async function optionalInvoiceTracking(orderId: string): Promise<Record<string, unknown>> {
-  const optional = [
-    'invoice_attempts',
-    'invoice_whatsapp_status',
-    'invoice_email_status',
-  ];
-  const present: string[] = [];
-  for (const column of optional) {
-    if (await hasColumn('orders', column)) present.push(column);
-  }
-  if (present.length === 0) return {};
-
-  const { data } = await supabase.from('orders').select(present.join(', ')).eq('id', orderId).maybeSingle();
-  return (data as unknown as Record<string, unknown>) || {};
-}
-
 /**
  * Serve the invoice PDF for one order.
  *
@@ -251,51 +245,36 @@ async function optionalInvoiceTracking(orderId: string): Promise<Record<string, 
  * path for the customer or the admin.
  *
  * Order of precedence:
- *   1. stored PDF — an issued invoice is a legal document and must NEVER be
- *      re-rendered; regenerating after an amount change would silently produce a
- *      different document under the same number.
- *   2. no PDF yet and the order is billable -> generate ONCE through the same
- *      claim path the automatic trigger uses, store it, then serve it.
- *   3. no PDF and the order is not billable (unpaid prepaid) -> 409, so the
- *      customer sees "awaiting payment" instead of an invoice for goods that
- *      have not been paid for.
+ *   1. the stored PDF named in `state.json` — an issued invoice is a legal
+ *      document and must NEVER be re-rendered; regenerating after an amount
+ *      change would silently produce a different document under the same number.
+ *   2. no state.json yet -> run the same automatic claim path that fires at
+ *      order creation, then serve what it stored.
+ *
+ * There is no payment gate. An invoice is issued at order creation for every
+ * order, COD and prepaid, paid or not, so every order has a downloadable
+ * invoice from the moment it is placed.
  */
 export const downloadInvoice = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
 
-    // Probe the optional invoice columns first so a missing migration produces
-    // an actionable 503 instead of a 404 that reads as "order not found".
-    const hasInvoiceNumber = await hasColumn('orders', 'invoice_number');
-    if (!hasInvoiceNumber) {
-      console.error(
-        '[Invoice] orders.invoice_number does not exist — apply ' +
-          'backend/sql/migrations/2026-10-15_invoice_automation.sql'
-      );
-      return res.status(503).json({
-        error: {
-          message:
-            'Invoice storage is not configured on this server: the database migration ' +
-            '2026-10-15_invoice_automation.sql has not been applied. No invoice can be served yet.',
-        },
-      });
-    }
-
     const { data: orderRow, error: queryError } = await supabase
       .from('orders')
-      .select('id, user_id, order_number, payment_method, payment_status, invoice_url, invoice_number')
+      .select('id, user_id, order_number')
       .eq('id', id)
       .maybeSingle();
 
     if (queryError) {
-      // Schema/behaviour failure, NOT a missing order.
+      // A schema/behaviour failure is NOT a missing order.
       console.error(`[Invoice] order lookup failed for ${id}:`, queryError.message);
       return res.status(503).json({
         error: {
-          message: `Could not read this order (${queryError.code || 'database error'}). The order may exist; the database schema is incomplete.`,
+          message: `Could not read this order (${queryError.code || 'database error'}).`,
         },
       });
     }
+    // 404 now means exactly one thing: there is genuinely no such order.
     if (!orderRow) {
       return res.status(404).json({ error: { message: 'Order not found' } });
     }
@@ -304,13 +283,13 @@ export const downloadInvoice = async (req: Request, res: Response, next: NextFun
       return res.status(403).json({ error: { message: 'Forbidden' } });
     }
 
-    const send = (bytes: Buffer) => {
-      // Filename carries the order number, which is what the customer knows.
-      // Slash-free by construction (MV-748371), but sanitise defensively.
-      const safe = String(orderRow.order_number || id).replace(/[^A-Za-z0-9._-]+/g, '_');
+    const send = (bytes: Buffer, invoiceNumber?: string | null) => {
+      // The filename carries the invoice number the customer can quote, falling
+      // back to the order number before one has been allocated.
+      const label = String(invoiceNumber || orderRow.order_number || id).replace(/[^A-Za-z0-9._-]+/g, '_');
       res.set({
         'Content-Type': 'application/pdf',
-        'Content-Disposition': `attachment; filename="Invoice-${safe}.pdf"`,
+        'Content-Disposition': `attachment; filename="Invoice-${label}.pdf"`,
         // Invoices contain PII — never let a shared proxy cache them.
         'Cache-Control': 'private, no-store, max-age=0',
         'X-Content-Type-Options': 'nosniff',
@@ -319,83 +298,50 @@ export const downloadInvoice = async (req: Request, res: Response, next: NextFun
       return res.send(bytes);
     };
 
-    /* ---- 1. the stored file, when one exists ---- */
-    if (orderRow.invoice_url && config.invoiceStorageBucket) {
-      const { data, error } = await supabase.storage
-        .from(config.invoiceStorageBucket)
-        .download(orderRow.invoice_url);
-      if (!error && data) {
-        // Must set the PDF headers here too: without them Express sends a
-        // Buffer as application/octet-stream with no filename, so an
-        // anchor-based download loses the Content-Disposition.
-        return send(Buffer.from(await data.arrayBuffer()));
-      }
-      console.warn(
-        `[Invoice] stored PDF unavailable for order ${orderRow.order_number} (${error?.message}) — ` +
-          (orderRow.invoice_number ? 'NOT regenerating: this invoice has already been issued.' : 'rendering a new one.')
+    /* ---- 1. already stored: serve the exact bytes that were issued ---- */
+    // An issued invoice is a legal document, so when we have the stored file we
+    // serve those exact bytes and never re-render them.
+    const state = await readInvoiceState(orderRow.id);
+    if (state?.pdfPath) {
+      const stored = await downloadInvoicePdf(state.pdfPath);
+      if (stored) return send(stored, state.invoiceNumber);
+      console.error(
+        `[invoice] step=read-stored order=${orderRow.id} reason=stored PDF for ${state.invoiceNumber} is unreadable, rendering a fresh copy`
       );
-      // Already-issued invoices must not be re-rendered; tell the caller why.
-      if (orderRow.invoice_number) {
-        return res.status(410).json({
-          error: {
-            message:
-              'This invoice was already issued and its stored file is no longer available. Contact support for a copy.',
-          },
-        });
-      }
     }
 
-    /* ---- 2. not issued yet: is this order billable at all? ---- */
-    // COD is billable from the moment the order is placed — the invoice states
-    // the amount due on delivery. Prepaid is billable only once PayU has
-    // verified payment, which postOrderConfirmed enforces on the callback.
-    const isCod = /cash|\bcod\b/i.test(String(orderRow.payment_method || ''));
-    if (!isCod && String(orderRow.payment_status || '') !== 'paid') {
-      return res.status(409).json({
-        error: {
-          message: 'The invoice will be available after payment is verified.',
-        },
+    /* ---- 2. render in memory and send it ---- */
+    // The customer's PDF must never depend on Storage. This path has no claim,
+    // no wait, no 202 and no 503: it renders the current template with the
+    // invoice number from state.json when there is one, and the order number
+    // otherwise, and answers 200 with the file.
+    const order = await getOrderForInvoice(orderRow.id);
+    order.invoice_number = state?.invoiceNumber || orderRow.order_number;
+
+    let pdf: Buffer;
+    try {
+      pdf = await generateInvoicePdf(order);
+    } catch (err: any) {
+      console.error(
+        `[invoice] step=render order=${orderRow.id} reason=${err?.message || err}`,
+        err?.stack || err
+      );
+      return res.status(500).json({
+        error: { message: 'Could not download invoice. Please try again.' },
       });
     }
 
-    /* ---- 3. generate ONCE through the same claim path, then serve ---- */
-    // sendInvoiceAuto is atomic: whoever claims the order generates the PDF.
-    // If the automatic trigger or the cron already claimed it, this call is a
-    // no-op and we simply serve whatever was stored. That is what keeps a
-    // customer clicking "Download" from ever producing a second invoice.
-    const dispatch = await invoiceDispatchService.sendInvoiceAuto(orderRow.id);
-    if (dispatch.reason && !dispatch.invoiceUrl) {
-      console.error(`[Invoice] on-demand generation failed for ${orderRow.order_number}: ${dispatch.reason}`);
-      return res.status(503).json({
-        error: {
-          message: `The invoice could not be generated yet: ${dispatch.reason}`,
-        },
-      });
-    }
+    // Background bookkeeping only. It can fail freely: the customer already
+    // has the PDF, and every failure is a console line, never a response.
+    keepAlive(
+      persistInvoiceInBackground(orderRow.id).catch((err: any) =>
+        console.error(
+          `[invoice] step=background order=${orderRow.id} reason=${err?.message || err}`
+        )
+      )
+    );
 
-    if (dispatch.invoiceUrl && config.invoiceStorageBucket) {
-      const { data, error } = await supabase.storage
-        .from(config.invoiceStorageBucket)
-        .download(dispatch.invoiceUrl);
-      if (!error && data) {
-        return send(Buffer.from(await data.arrayBuffer()));
-      }
-      console.warn(`[Invoice] freshly generated PDF not readable from storage: ${error?.message}`);
-    }
-
-    // Last resort, and only for an order with no number issued yet: render it
-    // now without persisting. Never reached once the migration is applied,
-    // because step 3 always claims and stores first.
-    if (dispatch.invoiceNumber && dispatch.skipped) {
-      const order = await getOrderForInvoice(id as string);
-      return send(await generateInvoicePdf(order));
-    }
-
-    return res.status(503).json({
-      error: {
-        message: 'The invoice is being generated. Try again in a moment.',
-      },
-    });
+    return send(pdf, order.invoice_number);
   } catch (error: any) {
     if (error.status === 404) {
       return res.status(404).json({ error: { message: error.message } });
@@ -405,12 +351,38 @@ export const downloadInvoice = async (req: Request, res: Response, next: NextFun
 };
 
 /**
+ * Store the invoice after the customer has already been served.
+ *
+ * Claim, number allocation, PDF upload and state.json all happen here, in the
+ * background. The claim is released in `finally` no matter what, so a failure
+ * can never leave an order wedged behind an orphaned claim — which is what used
+ * to make downloads fail forever.
+ */
+async function persistInvoiceInBackground(orderId: string): Promise<void> {
+  try {
+    await invoiceDispatchService.sendInvoiceAuto(orderId);
+  } catch (err: any) {
+    console.error(
+      `[invoice] step=background order=${orderId} reason=${err?.message || err}`,
+      err?.stack || err
+    );
+  } finally {
+    // The claim has done its job either way: state.json now exists, or we are
+    // releasing so the next attempt can start clean.
+    await deleteInvoiceClaim(orderId).catch(() => {});
+  }
+}
+
+/**
  * Read-only invoice status for the admin Orders UI.
  *
- * Deliberately does NOT send anything. Invoice delivery is fully automatic
- * (COD at placement, PayU on verified callback) with a cron sweep retrying up
- * to MAX_INVOICE_ATTEMPTS times; a manual "resend" endpoint is a second way to
+ * Deliberately does NOT send anything. Invoice delivery is fully automatic (it
+ * fires at order creation for every order) with a sweep retrying up to
+ * MAX_INVOICE_ATTEMPTS times; a manual "resend" endpoint is a second way to
  * deliver the same tax document and therefore a second way to double-send it.
+ *
+ * A missing `state.json` is "Pending", not an error: the order was placed and
+ * the invoice has not been issued yet.
  */
 export const invoiceStatus = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -418,7 +390,7 @@ export const invoiceStatus = async (req: Request, res: Response, next: NextFunct
 
     const { data: orderRow, error: lookupError } = await supabase
       .from('orders')
-      .select('id, user_id, order_number, invoice_number, invoice_url, invoice_sent_at, invoice_error')
+      .select('id, user_id, order_number')
       .eq('id', id)
       .maybeSingle();
 
@@ -426,7 +398,7 @@ export const invoiceStatus = async (req: Request, res: Response, next: NextFunct
       console.error(`[Invoice] status lookup failed for ${id}:`, lookupError.message);
       return res.status(503).json({
         error: {
-          message: `Could not read this order (${lookupError.code || 'database error'}). The database schema is incomplete.`,
+          message: `Could not read this order (${lookupError.code || 'database error'}).`,
         },
       });
     }
@@ -437,32 +409,28 @@ export const invoiceStatus = async (req: Request, res: Response, next: NextFunct
       return res.status(403).json({ error: { message: 'Forbidden' } });
     }
 
-    // The channel log is the source of truth for per-recipient delivery.
-    const whatsapp = await getLogEntry('invoice_customer', `invoice_customer:${id}`);
-    const adminCopy = await getLogEntry('invoice_admin', `invoice_admin:${id}`);
-
-    const extra = await optionalInvoiceTracking(id as string);
-    const status = deriveInvoiceStatus({
-      invoice_sent_at: orderRow.invoice_sent_at,
-      invoice_error: orderRow.invoice_error,
-      ...extra,
-    });
+    const state = await readInvoiceState(orderRow.id);
+    const status = deriveInvoiceStatus(state);
+    const whatsapp = state?.channels?.whatsapp;
 
     res.json({
       data: {
         orderNumber: orderRow.order_number,
-        invoiceNumber: orderRow.invoice_number,
+        invoiceNumber: state?.invoiceNumber || null,
+        issuedAt: state?.issuedAt || null,
         // Object path, not a URL. The admin renders it as plain text and the
         // download endpoint resolves it.
-        invoiceUrl: orderRow.invoice_url,
+        invoiceUrl: state?.pdfPath || null,
         status: status.status,
         sentAt: status.sentAt,
         error: status.error,
         attempts: status.attempts,
         maxAttempts: invoiceDispatchService.MAX_INVOICE_ATTEMPTS,
-        whatsapp: whatsapp?.status || null,
-        whatsappError: whatsapp?.error || null,
-        adminCopy: adminCopy?.status || null,
+        // "Not configured" is a first-class state: the Meta slot is empty, so
+        // the invoice was issued but WhatsApp was skipped quietly.
+        whatsapp: whatsapp?.status ?? (invoiceWhatsapp.configured ? 'pending' : 'not_configured'),
+        whatsappError: whatsapp?.lastError || null,
+        adminCopy: state?.channels?.whatsapp?.status === 'sent' ? 'sent' : null,
       },
     });
   } catch (error: any) {
