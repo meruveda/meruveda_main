@@ -18,10 +18,12 @@
       "framework": "express",
       "entrypoint": "src/server.ts",
       "buildCommand": "cd .. && npm run build -w @meruveda/shared && npm run build -w backend",
-      "maxDuration": 60,
-      "includeFiles": [
-        "assets/**"
-      ]
+      "functions": {
+        "**": {
+          "maxDuration": 30,
+          "includeFiles": "assets/**"
+        }
+      }
     },
     "admin": {
       "root": "admin",
