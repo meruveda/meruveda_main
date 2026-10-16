@@ -1,7 +1,12 @@
-import { config } from '../config/env';
 import { supabase } from '../database/supabase';
+import { config } from '../config/env';
 import { hasColumn } from './schemaGuard';
-import { assignInvoiceNumber, generateInvoicePdf, getOrderForInvoice } from './invoiceService';
+import {
+  claimInvoiceNumber,
+  generateInvoicePdf,
+  getOrderForInvoice,
+  releaseInvoiceClaim,
+} from './invoiceService';
 import { getInvoiceEmailTemplate, isEmailConfigured, sendEmailWithAttachments } from './emailService';
 import {
   WHATSAPP_TEMPLATES,
@@ -9,17 +14,17 @@ import {
   isWhatsappConfigured,
   logMessage,
   normalizePhone,
-  sendDocumentOnce,
+  sendDocumentTemplateOnce,
   wasSent,
 } from './whatsappService';
+import { formatInvoiceAmount } from '@meruveda/shared';
 
-const money = (v: any) => `Rs. ${Number(v || 0).toFixed(2)}`;
+const money = (v: unknown) => `Rs. ${formatInvoiceAmount(Number(v) || 0)}`;
 
 /**
  * Bound an external call so one stuck provider (Resend, Meta Graph) can never
- * stall the whole post-order callback. Rejects after `ms`; the underlying
- * request is left to finish or time out on its own — the caller just stops
- * waiting and records a failure instead of hanging.
+ * stall the post-order callback. Rejects after `ms`; the caller stops waiting
+ * and records a failure instead of hanging.
  */
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -37,14 +42,15 @@ const CHANNEL_TIMEOUT_MS = 10_000;
 export type ChannelStatus = 'sent' | 'skipped' | 'failed' | 'disabled';
 
 export interface InvoiceDispatchResult {
-  /** True when this call took the order-level claim (or there was no claim column). */
+  /** True when this call won the atomic order-level claim. */
   claimed: boolean;
-  /** True when another worker already sent the invoice for this order. */
+  /** True when another worker already handled this order. */
   skipped: boolean;
   email: ChannelStatus;
   whatsapp: ChannelStatus;
   adminCopy: ChannelStatus;
   invoiceNumber: string;
+  invoiceUrl?: string | null;
   reason?: string;
 }
 
@@ -55,60 +61,22 @@ const ADMIN_PURPOSE = 'invoice_admin';
 function customerPhone(order: any): string {
   return order?.shipping_address?.phone || order?.billing_address?.phone || '';
 }
-
 function customerEmail(order: any): string {
   return order?.users?.email || order?.user_email || '';
 }
-
 function customerFirstName(order: any): string {
   const full = order?.shipping_address?.fullName || order?.billing_address?.fullName || '';
   return String(full).split(' ').filter(Boolean)[0] || '';
 }
 
 /* ------------------------------------------------------------------ */
-/* Status bookkeeping (every write is guarded by hasColumn)            */
+/* Error bookkeeping                                                   */
 /* ------------------------------------------------------------------ */
-
-/** Atomically claim the order for invoicing. Returns false when already claimed. */
-async function claimInvoice(orderId: string): Promise<boolean | 'no-column'> {
-  if (!(await hasColumn('orders', 'invoice_sent_at'))) return 'no-column';
-  try {
-    const { data, error } = await supabase
-      .from('orders')
-      .update({ invoice_sent_at: new Date().toISOString() })
-      .eq('id', orderId)
-      .is('invoice_sent_at', null)
-      .select('id');
-    if (error) {
-      console.error('[Invoice] claim failed:', error.message);
-      // Degrade to "claimed" so a transient error never blocks a real send;
-      // the per-channel message log still dedupes.
-      return true;
-    }
-    return Boolean(data && data.length > 0);
-  } catch (err: any) {
-    console.error('[Invoice] claim failed:', err?.message || err);
-    return true;
-  }
-}
-
-async function releaseClaim(orderId: string, reason: string): Promise<void> {
-  try {
-    if (await hasColumn('orders', 'invoice_sent_at')) {
-      await supabase.from('orders').update({ invoice_sent_at: null }).eq('id', orderId);
-    }
-    if (await hasColumn('orders', 'invoice_error')) {
-      await supabase.from('orders').update({ invoice_error: reason.slice(0, 500) }).eq('id', orderId);
-    }
-  } catch (err: any) {
-    console.error('[Invoice] failed to release claim:', err?.message || err);
-  }
-}
 
 async function recordError(orderId: string, reason: string): Promise<void> {
   try {
     if (await hasColumn('orders', 'invoice_error')) {
-      await supabase.from('orders').update({ invoice_error: reason.slice(0, 500) }).eq('id', orderId);
+      await supabase.from('orders').update({ invoice_error: String(reason).slice(0, 500) }).eq('id', orderId);
     }
   } catch (err: any) {
     console.error('[Invoice] failed to record error:', err?.message || err);
@@ -127,7 +95,7 @@ async function clearError(orderId: string): Promise<void> {
 
 /**
  * Public snapshot used by the admin Orders UI.
- * Works even when delta 010 has not been applied (both columns absent).
+ * Works even when the invoice columns have not been created yet.
  */
 export function deriveInvoiceStatus(order: {
   invoice_sent_at?: string | null;
@@ -135,25 +103,36 @@ export function deriveInvoiceStatus(order: {
 }): { status: 'sent' | 'failed' | 'not_sent'; sentAt: string | null; error: string | null } {
   const sentAt = order?.invoice_sent_at || null;
   const error = order?.invoice_error || null;
-  if (sentAt && !error) return { status: 'sent', sentAt, error: null };
   if (error) return { status: 'failed', sentAt, error };
   if (sentAt) return { status: 'sent', sentAt, error: null };
   return { status: 'not_sent', sentAt: null, error: null };
 }
 
 /* ------------------------------------------------------------------ */
-/* Storage mirror (private bucket + 7-day signed URL)                  */
+/* Storage — the invoice is written ONCE and never regenerated         */
 /* ------------------------------------------------------------------ */
 
-async function mirrorPdfToStorage(orderNumber: string, pdf: Buffer): Promise<string | null> {
+/**
+ * Upload the PDF to the private Supabase bucket and persist its object path on
+ * the order.
+ *
+ * The returned value is a STORAGE OBJECT PATH, not a signed URL: signed URLs
+ * expire (7 days by default) and an invoice on a legal document must keep
+ * resolving years later. A fresh signed URL is minted on demand by whoever
+ * needs to open or forward the file.
+ */
+async function uploadInvoicePdf(
+  orderId: string,
+  orderNumber: string,
+  invoiceNumber: string,
+  pdf: Buffer
+): Promise<string | null> {
   const bucket = config.invoiceStorageBucket;
   if (!bucket) return null;
-  const objectPath = `${orderNumber}/Invoice-${orderNumber}.pdf`;
-  const uploadOpts = {
-    contentType: 'application/pdf',
-    cacheControl: '3600',
-    upsert: true,
-  } as const;
+  // Slashes in the invoice series would create extra folders; normalise them.
+  const safeInvoice = invoiceNumber.replace(/[^A-Za-z0-9._-]+/g, '_');
+  const objectPath = `${orderNumber}/Invoice-${safeInvoice}.pdf`;
+  const uploadOpts = { contentType: 'application/pdf', cacheControl: '3600', upsert: true } as const;
 
   try {
     let { error } = await supabase.storage.from(bucket).upload(objectPath, pdf, uploadOpts);
@@ -170,22 +149,35 @@ async function mirrorPdfToStorage(orderNumber: string, pdf: Buffer): Promise<str
       error = retry.error;
     }
     if (error) {
-      console.warn(`[Invoice] storage mirror skipped for ${orderNumber}:`, error.message);
+      console.warn(`[Invoice] storage upload failed for ${orderNumber}:`, error.message);
       return null;
     }
 
-    const { data, error: signErr } = await supabase.storage
-      .from(bucket)
-      .createSignedUrl(objectPath, config.invoiceSignedUrlExpirySeconds);
-    if (signErr || !data?.signedUrl) {
-      console.warn(`[Invoice] signed URL failed for ${orderNumber}:`, signErr?.message || 'no url');
-      return null;
+    // Persist the path so GET /orders/:id/invoice can serve this exact file
+    // forever instead of regenerating a second copy of the same invoice.
+    if (await hasColumn('orders', 'invoice_url')) {
+      await supabase.from('orders').update({ invoice_url: objectPath }).eq('id', orderId);
     }
-    return data.signedUrl;
+    return objectPath;
   } catch (err: any) {
-    console.warn(`[Invoice] storage mirror failed for ${orderNumber}:`, err?.message || err);
+    console.warn(`[Invoice] storage upload failed for ${orderNumber}:`, err?.message || err);
     return null;
   }
+}
+
+/** Mint a time-limited public-ish link for a stored invoice. */
+export async function createInvoiceSignedUrl(objectPath: string): Promise<string | null> {
+  if (!objectPath || !config.invoiceStorageBucket) return null;
+  // An absolute URL was stored by an older build — pass it through.
+  if (/^https?:\/\//i.test(objectPath)) return objectPath;
+  const { data, error } = await supabase.storage
+    .from(config.invoiceStorageBucket)
+    .createSignedUrl(objectPath, config.invoiceSignedUrlExpirySeconds);
+  if (error || !data?.signedUrl) {
+    console.warn('[Invoice] signed URL failed:', error?.message || 'no url');
+    return null;
+  }
+  return data.signedUrl;
 }
 
 /* ------------------------------------------------------------------ */
@@ -193,17 +185,17 @@ async function mirrorPdfToStorage(orderNumber: string, pdf: Buffer): Promise<str
 /* ------------------------------------------------------------------ */
 
 /**
- * Generate + deliver the invoice for one order.
+ * Generate + deliver the invoice for one order. This is the ONLY invoice path
+ * in the app — the legacy WhatsApp-only branch was removed.
  *
- * Idempotency, in order of strength:
- *   1. Atomic `UPDATE orders SET invoice_sent_at = now() WHERE invoice_sent_at
- *      IS NULL` — exactly one of N parallel PayU webhooks can win (delta 010).
- *   2. `whatsapp_message_log` UNIQUE(purpose, reference_id) per channel, which
- *      still dedupes when delta 010 has not been applied.
+ * Idempotency is a single atomic Postgres step: `claim_invoice()` claims the
+ * order AND allocates the FY-series number in one transaction. A parallel PayU
+ * callback that loses the race gets NULL back and stops; it never allocates a
+ * second number and never sends a second invoice.
  *
- * The two channels are independent: if only a phone exists the WhatsApp copy
- * goes out, if only an email exists the mail goes out, and if neither exists
- * the failure reason is recorded on the order.
+ * The three delivery channels are independent and run concurrently. A failing
+ * channel never blocks the others, and nothing here can fail the order flow:
+ * this function never throws.
  */
 export async function sendInvoiceDispatch(
   orderId: string,
@@ -213,7 +205,7 @@ export async function sendInvoiceDispatch(
   const order: any = await getOrderForInvoice(orderId);
 
   const result: InvoiceDispatchResult = {
-    claimed: true,
+    claimed: false,
     skipped: false,
     email: 'disabled',
     whatsapp: 'disabled',
@@ -221,64 +213,42 @@ export async function sendInvoiceDispatch(
     invoiceNumber: order.invoice_number || '',
   };
 
-  /* ---- 1. order-level atomic claim ---- */
-  if (!force) {
-    const claim = await claimInvoice(orderId);
-    if (claim === 'no-column') {
-      // Delta 010 not applied: there is no atomic invoice_sent_at claim. The
-      // whatsapp_message_log fallback below is check-then-act (read the log, then
-      // send), which is NOT race-safe — two parallel PayU webhooks could both see
-      // "not sent" and both dispatch. Rather than risk a duplicate invoice, skip
-      // the AUTO send until the column exists. force=true (admin Resend button)
-      // bypasses this whole block and still works.
-      const reason = 'auto-send skipped: needs delta 010 (orders.invoice_sent_at)';
-      console.warn(`[Invoice] ${reason} — order ${orderId}`);
-      result.skipped = true;
-      result.claimed = false;
-      result.reason = reason;
-      result.email = 'skipped';
-      result.whatsapp = 'skipped';
-      return result;
-    } else if (claim === false) {
-      result.skipped = true;
-      result.claimed = false;
-      result.email = 'skipped';
-      result.whatsapp = 'skipped';
-      return result;
-    } else {
-      result.claimed = true;
-    }
+  /* ---- 1. atomic claim + number allocation (one transaction) ---- */
+  const invoiceNumber = await claimInvoiceNumber(order, { force });
+  if (!invoiceNumber) {
+    // Someone else already claimed this order. Nothing to do.
+    result.skipped = true;
+    result.invoiceNumber = order.invoice_number || '';
+    return result;
   }
-
-  /* ---- 2. PDF ---- */
-  // GST series number (MV/25-26/000123), assigned in Postgres under row
-  // locks — only once the claim is won, so cancelled/failed orders that never
-  // reach dispatch consume nothing. Idempotent per order: a retry reuses the
-  // stored number. (If a PDF later fails permanently, the assigned number is
-  // retained rather than reused — issue a credit note if it was ever printed.)
-  const invoiceNumber = await assignInvoiceNumber(order);
+  result.claimed = true;
   result.invoiceNumber = invoiceNumber;
 
+  /* ---- 2. render the PDF ---- */
   let pdf: Buffer;
   try {
     pdf = await generateInvoicePdf(order);
   } catch (err: any) {
     const reason = `PDF generation failed: ${err?.message || err}`;
-    if (!force && result.claimed) await releaseClaim(orderId, reason);
+    if (!force) await releaseInvoiceClaim(orderId, reason);
     else await recordError(orderId, reason);
     result.reason = reason;
     return result;
   }
 
-  const filename = `Invoice-${order.order_number}.pdf`;
+  const filename = `Invoice-${order.order_number}-${invoiceNumber.replace(/[^A-Za-z0-9]+/g, '_')}.pdf`;
 
-  // Storage mirror starts now and runs concurrently with the three delivery
-  // channels below. Each channel awaits this same shared promise for the signed
-  // URL (embedded in the message when available); a slow/failed storage call only
-  // omits the link — it never blocks or fails a delivery.
-  const signedUrlPromise = mirrorPdfToStorage(order.order_number, pdf).catch(() => null);
+  /* ---- 3. upload once (concurrent with delivery) ---- */
+  const storagePromise = uploadInvoicePdf(order.id, order.order_number, invoiceNumber, pdf)
+    .then((p) => {
+      if (p) result.invoiceUrl = p;
+      return p;
+    })
+    .catch(() => null);
 
-  /* ---- 3. email channel (parallel) ---- */
+  const signedUrlPromise = storagePromise.then((p) => (p ? createInvoiceSignedUrl(p) : null)).catch(() => null);
+
+  /* ---- 4. email channel ---- */
   const runEmailChannel = async (): Promise<ChannelStatus> => {
     const toEmail = customerEmail(order);
     const emailRef = `${EMAIL_PURPOSE}:${orderId}`;
@@ -290,19 +260,17 @@ export async function sendInvoiceDispatch(
     if (!force && (await wasSent(EMAIL_PURPOSE, emailRef))) return 'skipped';
 
     const signedUrl = await signedUrlPromise;
-    const subject = `Your MeruVeda order #${order.order_number} invoice`;
-    const html = getInvoiceEmailTemplate({
-      firstName: customerFirstName(order),
-      orderNumber: order.order_number,
-      invoiceNumber,
-      total: money(order.total),
-      signedUrl,
-    });
     const delivered = await withTimeout(
       sendEmailWithAttachments({
         to: toEmail,
-        subject,
-        html,
+        subject: `Your MeruVeda order #${order.order_number} invoice ${invoiceNumber}`,
+        html: getInvoiceEmailTemplate({
+          firstName: customerFirstName(order),
+          orderNumber: order.order_number,
+          invoiceNumber,
+          total: money(order.total),
+          signedUrl,
+        }),
         attachments: [{ filename, content: pdf, contentType: 'application/pdf' }],
       }),
       CHANNEL_TIMEOUT_MS,
@@ -323,30 +291,29 @@ export async function sendInvoiceDispatch(
     return delivered ? 'sent' : 'failed';
   };
 
-  /* ---- 4. WhatsApp channel — document first, approved template as fallback (parallel) ---- */
+  /* ---- 5. WhatsApp channel — APPROVED TEMPLATE with a document header ---- */
+  // Outside the 24h customer-service window Meta only accepts a template
+  // message. A free-form `type: document` send is rejected with error 131047,
+  // so the PDF must be sent as a template whose first component is a document
+  // header. See WHATSAPP_INVOICE_TEMPLATE below.
   const runWhatsappChannel = async (): Promise<ChannelStatus> => {
     const phone = customerPhone(order);
     if (!phone) return 'disabled';
     if (!isWhatsappConfigured()) return 'disabled';
 
     const signedUrl = await signedUrlPromise;
-    const whatsRef = force
-      ? `${WHATSAPP_PURPOSE}:${orderId}:resent:${Date.now()}`
-      : `${WHATSAPP_PURPOSE}:${orderId}`;
+    const whatsRef = force ? `${WHATSAPP_PURPOSE}:${orderId}:resent:${Date.now()}` : `${WHATSAPP_PURPOSE}:${orderId}`;
     const delivered = await withTimeout(
-      sendDocumentOnce({
+      sendDocumentTemplateOnce({
         to: phone,
         purpose: WHATSAPP_PURPOSE,
         referenceId: whatsRef,
         base64: pdf.toString('base64'),
         filename,
-        caption:
-          `Tax invoice ${invoiceNumber} for MeruVeda order ${order.order_number} — ${money(order.total)}` +
-          (signedUrl ? `\nOpen (7 days): ${signedUrl}` : ''),
-        fallback: {
-          template: WHATSAPP_TEMPLATES.INVOICE_SHARED,
-          params: [order.order_number, money(order.total)],
-        },
+        invoiceNumber,
+        orderNumber: order.order_number,
+        total: money(order.total),
+        signedUrl,
         payload: { order_number: order.order_number, invoice_number: invoiceNumber, resent: force },
       }),
       CHANNEL_TIMEOUT_MS,
@@ -358,28 +325,24 @@ export async function sendInvoiceDispatch(
     return delivered ? 'sent' : 'failed';
   };
 
-  /* ---- 5. copy to the store owner — best effort, never blocks success (parallel) ---- */
+  /* ---- 6. copy to the store owner — best effort ---- */
   const runAdminCopyChannel = async (): Promise<ChannelStatus> => {
     const adminPhone = normalizePhone(config.adminWhatsappNumber);
     if (!adminPhone || !isWhatsappConfigured()) return 'disabled';
 
-    const signedUrl = await signedUrlPromise;
+    const whatsRef = force ? `${ADMIN_PURPOSE}:${orderId}:resent:${Date.now()}` : `${ADMIN_PURPOSE}:${orderId}`;
     const delivered = await withTimeout(
-      sendDocumentOnce({
+      sendDocumentTemplateOnce({
         to: adminPhone,
         purpose: ADMIN_PURPOSE,
-        referenceId: force
-          ? `${ADMIN_PURPOSE}:${orderId}:resent:${Date.now()}`
-          : `${ADMIN_PURPOSE}:${orderId}`,
+        referenceId: whatsRef,
         base64: pdf.toString('base64'),
         filename,
-        caption: `Invoice ${invoiceNumber} — order ${order.order_number} — ${money(order.total)}` +
-          (signedUrl ? `\nOpen (7 days): ${signedUrl}` : ''),
-        fallback: {
-          template: WHATSAPP_TEMPLATES.INVOICE_SHARED,
-          params: [order.order_number, money(order.total)],
-        },
-        payload: { order_number: order.order_number, recipient: 'admin', resent: force },
+        invoiceNumber,
+        orderNumber: order.order_number,
+        total: money(order.total),
+        signedUrl: null,
+        payload: { order_number: order.order_number, invoice_number: invoiceNumber, recipient: 'admin', resent: force },
       }),
       CHANNEL_TIMEOUT_MS,
       'admin whatsapp copy'
@@ -390,7 +353,6 @@ export async function sendInvoiceDispatch(
     return delivered ? 'sent' : 'failed';
   };
 
-  // Run the three delivery channels (and the storage mirror they share) together.
   const [emailOutcome, whatsappOutcome, adminOutcome] = await Promise.allSettled([
     runEmailChannel(),
     runWhatsappChannel(),
@@ -408,8 +370,9 @@ export async function sendInvoiceDispatch(
   result.email = emailOutcome.status === 'fulfilled' ? emailOutcome.value : 'failed';
   result.whatsapp = whatsappOutcome.status === 'fulfilled' ? whatsappOutcome.value : 'failed';
   result.adminCopy = adminOutcome.status === 'fulfilled' ? adminOutcome.value : 'disabled';
+  result.invoiceUrl = result.invoiceUrl || order.invoice_url || null;
 
-  /* ---- 6. finalise ---- */
+  /* ---- 7. finalise ---- */
   const anyDelivered = result.email === 'sent' || result.whatsapp === 'sent';
   const anyChannelTried = result.email !== 'disabled' || result.whatsapp !== 'disabled';
 
@@ -427,9 +390,10 @@ export async function sendInvoiceDispatch(
     : 'WhatsApp delivery failed.';
 
   result.reason = reason;
-  if (!force && result.claimed) {
-    // Release the claim so the daily retry cron can pick it up again.
-    await releaseClaim(orderId, reason);
+  if (!force) {
+    // Release the claim so the daily retry sweep can try again. The invoice
+    // NUMBER is kept — an issued GST number is never reused.
+    await releaseInvoiceClaim(orderId, reason);
   } else {
     await recordError(orderId, reason);
   }
@@ -442,18 +406,15 @@ export async function sendInvoiceAuto(orderId: string): Promise<InvoiceDispatchR
 }
 
 /**
- * Admin/owner "Resend invoice" — bypasses the order-level claim and the
- * per-channel dedupe so the customer really receives it again. The message log
- * keeps a separate `*:resent:<ts>` reference and `resent: true` payload.
+ * Admin/owner "Resend invoice" — bypasses the claim so the customer really
+ * receives it again. Reuses the SAME invoice number; it never issues a second
+ * tax document number.
  */
 export async function resendInvoiceDispatch(orderId: string): Promise<InvoiceDispatchResult> {
   return sendInvoiceDispatch(orderId, { force: true });
 }
 
-/**
- * Read the delivery outcome straight from the message log — used by the daily
- * retry cron to decide whether an order still needs an invoice.
- */
+/** True when a delivery for this order is already recorded as sent. */
 export async function invoiceAlreadyLogged(orderId: string): Promise<boolean> {
   const w = await getLogEntry(WHATSAPP_PURPOSE, `${WHATSAPP_PURPOSE}:${orderId}`);
   const e = await getLogEntry(EMAIL_PURPOSE, `${EMAIL_PURPOSE}:${orderId}`);
@@ -462,10 +423,11 @@ export async function invoiceAlreadyLogged(orderId: string): Promise<boolean> {
 
 /**
  * Daily retry sweep for invoices that never went out (channel outage, missing
- * email at the time, Resend quota, WhatsApp template rejection...).
+ * email at the time, provider quota, template rejection...).
  *
- * Only the last 14 days are considered and a 10-minute minimum age is enforced
- * so the sweep can never race the live post-confirmation dispatch.
+ * Only orders that are genuinely billable are considered: paid prepaid orders
+ * and COD orders (which are unpaid until delivery). Unpaid prepaid checkouts
+ * are skipped so no invoice can ever precede a verified payment.
  */
 export async function retryPendingInvoices(limit = 15): Promise<
   Array<{ orderId: string; orderNumber: string; ok: boolean; skipped?: boolean; error?: string }>
@@ -477,17 +439,10 @@ export async function retryPendingInvoices(limit = 15): Promise<
   const hasSentAt = await hasColumn('orders', 'invoice_sent_at');
   const hasErrorCol = await hasColumn('orders', 'invoice_error');
   const selectCols = [
-    'id',
-    'order_number',
-    'status',
-    'payment_status',
-    'payment_method',
-    'created_at',
+    'id', 'order_number', 'status', 'payment_status', 'payment_method', 'created_at',
     hasSentAt ? 'invoice_sent_at' : '',
     hasErrorCol ? 'invoice_error' : '',
-  ]
-    .filter(Boolean)
-    .join(', ');
+  ].filter(Boolean).join(', ');
 
   let query = supabase
     .from('orders')
@@ -531,6 +486,8 @@ export async function retryPendingInvoices(limit = 15): Promise<
   return results;
 }
 
+export const WHATSAPP_INVOICE_TEMPLATE = WHATSAPP_TEMPLATES.INVOICE_WITH_DOCUMENT;
+
 export const invoiceDispatchService = {
   sendInvoiceDispatch,
   sendInvoiceAuto,
@@ -538,4 +495,6 @@ export const invoiceDispatchService = {
   deriveInvoiceStatus,
   invoiceAlreadyLogged,
   retryPendingInvoices,
+  createInvoiceSignedUrl,
+  WHATSAPP_INVOICE_TEMPLATE,
 };

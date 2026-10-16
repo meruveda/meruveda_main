@@ -4,10 +4,8 @@ import {
   WHATSAPP_TEMPLATES,
   normalizePhone,
   sendOnce,
-  sendDocumentOnce,
   sendTemplate,
 } from './whatsappService';
-import { getOrderForInvoice, generateInvoicePdf } from './invoiceService';
 
 const money = (v: any) => `Rs. ${Number(v || 0).toFixed(2)}`;
 
@@ -61,66 +59,27 @@ export const orderNotifyService = {
   },
 
   /**
-   * Generate the PDF invoice and send it to the customer AND the admin.
-   * Every send is deduplicated, so retrying is always safe.
+   * Order confirmation text only.
+   *
+   * The PDF invoice used to be sent from here as well, which created a SECOND,
+   * divergent invoice path next to invoiceDispatchService (WhatsApp-only, no
+   * email, no storage, no atomic claim). It has been removed: invoice
+   * generation and delivery now live exclusively in invoiceDispatchService.
    */
-  async sendInvoice(orderId: string): Promise<{ customer: boolean; admin: boolean }> {
-    const result = { customer: false, admin: false };
-    try {
-      const order = await getOrderForInvoice(orderId);
-      const pdf = await generateInvoicePdf(order);
-      const base64 = pdf.toString('base64');
-      const filename = `Invoice-${order.order_number}.pdf`;
-      const caption = `Tax invoice for MeruVeda order ${order.order_number} — ${money(order.total)}`;
-      const phone = customerPhone(order);
-
-      result.customer = await sendDocumentOnce({
-        to: phone,
-        purpose: 'invoice_customer',
-        referenceId: `invoice_customer:${order.id}`,
-        base64,
-        filename,
-        caption,
-        fallback: {
-          template: WHATSAPP_TEMPLATES.INVOICE_SHARED,
-          params: [order.order_number, money(order.total)],
-        },
-        payload: { order_number: order.order_number },
-      });
-
-      const adminPhone = config.adminWhatsappNumber;
-      if (normalizePhone(adminPhone)) {
-        result.admin = await sendDocumentOnce({
-          to: adminPhone,
-          purpose: 'invoice_admin',
-          referenceId: `invoice_admin:${order.id}`,
-          base64,
-          filename,
-          caption: `New order ${order.order_number} — ${money(order.total)} — invoice attached`,
-          fallback: {
-            template: WHATSAPP_TEMPLATES.INVOICE_SHARED,
-            params: [order.order_number, money(order.total)],
-          },
-          payload: { order_number: order.order_number, recipient: 'admin' },
-        });
-      } else {
-        console.warn('[OrderNotify] ADMIN_WHATSAPP_NUMBER is not set — invoice not copied to admin.');
-      }
-    } catch (err: any) {
-      console.error('[OrderNotify] invoice send failed:', err?.message || err);
-    }
-    return result;
+  async sendInvoice(): Promise<never> {
+    throw new Error(
+      'orderNotifyService.sendInvoice was removed — use invoiceDispatchService.sendInvoiceAuto() instead.'
+    );
   },
 
   /**
-   * Full post-purchase sequence: confirmation + invoice (customer & admin).
-   * Safe to call more than once.
+   * Full post-purchase sequence: confirmation text (invoice is handled by
+   * invoiceDispatchService, which runs in parallel).
    */
   async sendPostPurchaseMessages(orderId: string) {
     const order = await loadOrder(orderId);
     if (!order) return;
     await this.sendOrderConfirmation(order);
-    await this.sendInvoice(orderId);
   },
 
   /**
@@ -157,10 +116,10 @@ export const orderNotifyService = {
   },
 
   /** Manually resend the invoice (admin action / resend-invoice endpoint). */
-  async resendInvoice(orderId: string) {
-    const order = await loadOrder(orderId);
-    if (!order) throw Object.assign(new Error('Order not found'), { status: 404 });
-    return this.sendInvoice(orderId);
+  async resendInvoice(orderId: string): Promise<never> {
+    throw new Error(
+      'orderNotifyService.resendInvoice was removed — use invoiceDispatchService.resendInvoiceDispatch() instead.'
+    );
   },
 };
 

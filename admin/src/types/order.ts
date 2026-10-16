@@ -64,10 +64,14 @@ export interface Order {
   shippingCost?: number
   manifestUrl?: string
   labelUrl?: string
-  invoiceUrl?: string
+  invoiceUrl?: string | null
   lastTrackingSync?: string
   notes?: string
-  /** Delta 010 — null/undefined when that migration has not been applied yet. */
+  /** GST-series number, e.g. MV/26-27/000123. Null until an invoice is issued. */
+  invoiceNumber?: string | null
+  /** PayU's payment reference (mihpayid), printed in the invoice notes box. */
+  payuMihpayid?: string | null
+  /** Null/undefined when the invoice-automation migration has not been applied yet. */
   invoiceSentAt?: string | null
   invoiceError?: string | null
   invoiceStatus?: 'sent' | 'failed' | 'not_sent'

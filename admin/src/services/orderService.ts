@@ -90,10 +90,12 @@ const mapOrder = (o: any): Order => ({
   shippingCost: o.shipping_cost,
   manifestUrl: o.manifest_url,
   labelUrl: o.label_url,
-  invoiceUrl: o.invoice_url,
   lastTrackingSync: o.last_tracking_sync,
   notes: o.notes,
-  // --- delta 010 columns (null when that migration has not been applied) ---
+  // --- invoice-automation columns (null before the migration) ---
+  invoiceNumber: o.invoice_number ?? null,
+  invoiceUrl: o.invoice_url ?? null,
+  payuMihpayid: o.payu_mihpayid ?? null,
   invoiceSentAt: o.invoice_sent_at ?? null,
   invoiceError: o.invoice_error ?? null,
   invoiceStatus: deriveInvoiceStatus(o),
@@ -183,14 +185,17 @@ class OrderService {
   }
 
   /** Download the GST invoice PDF for one order (auth handled by axiosInstance). */
-  async downloadInvoice(id: string, orderNumber: string): Promise<void> {
+  async downloadInvoice(id: string, invoiceNumber?: string | null, orderNumber?: string | null): Promise<void> {
     const res = await axiosInstance.get(`/orders/${id}/invoice`, { responseType: 'blob' });
     const blob = res.data as Blob;
     const url = URL.createObjectURL(blob);
+    // Prefer the GST series number; fall back to the order number for orders
+    // invoiced before the series existed.
+    const name = (invoiceNumber || orderNumber || id).replace(/[^A-Za-z0-9._-]+/g, '_');
     try {
       const anchor = document.createElement('a');
       anchor.href = url;
-      anchor.download = `Invoice-${orderNumber || id}.pdf`;
+      anchor.download = `Invoice-${name}.pdf`;
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();

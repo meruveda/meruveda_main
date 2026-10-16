@@ -44,6 +44,14 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+# `tsc -b` emits the compiled vite.config next to the source (admin build)
+admin/vite.config.js
+admin/vite.config.d.ts
+admin/vite.config.js.map
+admin/vite.config.d.ts.map
+
+# stray invoice PDFs rendered during manual testing — samples live in docs/samples/
+/*.pdf
 
 # agents
 .agents/

@@ -3,6 +3,7 @@ import { payuService } from '../services/payuService';
 import { orderService } from '../services/orderService';
 import { postOrderConfirmed } from '../services/postOrderConfirmed';
 import { supabase } from '../database/supabase';
+import { hasColumn } from '../services/schemaGuard';
 import { config } from '../config/env';
 
 /**
@@ -205,28 +206,38 @@ export const handlePayUCallback = async (req: Request, res: Response, next: Next
         return res.redirect(`${storefrontBaseUrl(req)}/checkout/failed?order_id=${order.id}&reason=${encodeURIComponent('Payment amount mismatch. Please contact support if money was deducted.')}`);
       }
 
-      // Mark as paid / processing
-      await supabase.from('orders').update({
+      // Mark as paid / processing.
+      // payu_mihpayid gets its OWN column — the invoice notes box reads it
+      // directly instead of regex-parsing it back out of the notes blob.
+      const paidPatch: Record<string, unknown> = {
         status: 'processing',
         payment_status: 'paid',
-        notes: `${order.notes || ''} [PayU mihpayid: ${mihpayid}]`.trim()
-      }).eq('id', order.id);
+        notes: `${order.notes || ''} [PayU mihpayid: ${mihpayid}]`.trim(),
+      };
+      if (mihpayid && (await hasColumn('orders', 'payu_mihpayid'))) {
+        paidPatch.payu_mihpayid = mihpayid;
+      }
+      await supabase.from('orders').update(paidPatch).eq('id', order.id);
 
       await upsertTransaction('success', 'captured');
 
-      // Post-confirmation background work: (1) invoice delivery, (2) Shiprocket
-      // push. Awaited (never fire-and-forget — Vercel kills the function right
-      // after the response) and fully wrapped so a failure here can never break
-      // the payment redirect: the order stays paid either way.
-      try {
-        await postOrderConfirmed(order.id, { source: 'payu_success' });
-      } catch (postErr: any) {
-        console.error('[PayU Callback] postOrderConfirmed failed:', postErr?.message || postErr);
-      }
-
+      // Redirect the customer FIRST. Invoice rendering, the Supabase upload and
+      // both delivery providers run afterwards in the background — awaiting them
+      // here used to stall the browser for up to ~30s and invited PayU callback
+      // retries. Idempotency no longer depends on waiting: the dispatcher's
+      // atomic claim_invoice() guarantees exactly one invoice per order no
+      // matter how many times PayU POSTs this endpoint.
       const successUrl = `${storefrontBaseUrl(req)}/checkout/success/${order.id}`;
       console.log(`[PayU] payment verified for order ${orderNumber}, redirecting to ${successUrl}`);
-      return res.redirect(successUrl);
+      res.redirect(successUrl);
+
+      // Post-confirmation background work: (1) invoice delivery, (2) Shiprocket
+      // push. Fire-and-return — every failure is caught and logged, and the
+      // order stays paid regardless.
+      postOrderConfirmed(order.id, { source: 'payu_success' }).catch((postErr: any) => {
+        console.error('[PayU Callback] postOrderConfirmed failed:', postErr?.message || postErr);
+      });
+      return;
     } else {
       // Payment failed or cancelled
       await supabase.from('orders').update({

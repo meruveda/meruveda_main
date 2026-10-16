@@ -9,13 +9,22 @@ import { supabase } from '../database/supabase';
  *
  * Template names below MUST match the ones approved in Meta Business Manager:
  *   order_confirmation, order_shipped, order_delivered, order_cancelled,
- *   invoice_shared, otp_verification, welcome, shipping_update, review_request
+ *   invoice_shared, invoice_with_document, otp_verification, welcome,
+ *   shipping_update, review_request
  */
 export const WHATSAPP_TEMPLATES = {
   OTP: 'otp_verification',
   WELCOME: 'welcome',
   ORDER_CONFIRMATION: 'order_confirmation',
   INVOICE_SHARED: 'invoice_shared',
+  /**
+   * Business-initiated send with an attachment. Required for invoices: outside
+   * the 24h customer-service window Meta rejects a free-form document message
+   * (error 131047 "message failed to send because more than 24 hours have
+   * passed"), so the PDF rides on an approved template that declares a
+   * `document` header component.
+   */
+  INVOICE_WITH_DOCUMENT: 'invoice_with_document',
   ORDER_SHIPPED: 'order_shipped',
   SHIPPING_UPDATE: 'shipping_update',
   ORDER_DELIVERED: 'order_delivered',
@@ -247,6 +256,145 @@ export async function sendDocument(
   }
 }
 
+/**
+ * Send the invoice PDF as an APPROVED TEMPLATE whose first component is a
+ * document header.
+ *
+ * Why not a plain `type: document` message: invoices go out long after the
+ * customer's last inbound message (often days), which puts them outside
+ * WhatsApp's 24-hour customer service window. In that window Meta accepts only
+ * template messages, and a template may carry a `document` header component —
+ * so this is the only compliant way to attach a PDF.
+ *
+ * Template shape that must be approved in Meta Business Manager:
+ *   name     : invoice_with_document
+ *   category : UTILITY
+ *   header   : DOCUMENT  (no sample media required)
+ *   body     : "Hi {{1}}, your invoice {{2}} for MeruVeda order {{3}} of
+ *               {{4}} is attached. View online: {{5}}"
+ *   footer   : "Thank You For Your Business!"
+ *
+ * `{{5}}` (the signed link) is appended to the body by us, so the template body
+ * must contain that fifth placeholder.
+ */
+export async function sendDocumentTemplate(options: {
+  to: string;
+  base64: string;
+  filename: string;
+  templateName?: string;
+  bodyParams: string[];
+}): Promise<boolean> {
+  const phone = normalizePhone(options.to);
+  if (!phone || !isWhatsappConfigured()) return false;
+
+  let mediaId: string;
+  try {
+    mediaId = await uploadMedia(options.base64, options.filename, 'application/pdf');
+  } catch (err: any) {
+    console.error(`[WhatsApp] Invoice media upload failed for ${phone}:`, err?.message || err);
+    return false;
+  }
+
+  try {
+    await graphPost(`${graphBase()}/messages`, {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: phone,
+      type: 'template',
+      template: {
+        name: options.templateName || WHATSAPP_TEMPLATES.INVOICE_WITH_DOCUMENT,
+        language: { code: 'en' },
+        components: [
+          // Header component MUST come before the body component.
+          { type: 'header', parameters: [{ type: 'document', document: { id: mediaId } }] },
+          {
+            type: 'body',
+            parameters: options.bodyParams.map((value) => ({ type: 'text', text: String(value ?? '') })),
+          },
+        ],
+      },
+    });
+    return true;
+  } catch (err: any) {
+    console.error(
+      `[WhatsApp] Template "${options.templateName || WHATSAPP_TEMPLATES.INVOICE_WITH_DOCUMENT}" send failed for ${phone}:`,
+      err?.message || err
+    );
+    return false;
+  }
+}
+
+/**
+ * Send the invoice template at most once per (purpose, referenceId).
+ * Falls back to the plain-text invoice_shared template when the document
+ * template is not yet approved, so the customer still hears from us.
+ */
+export async function sendDocumentTemplateOnce(options: {
+  to: string;
+  purpose: string;
+  referenceId: string;
+  base64: string;
+  filename: string;
+  invoiceNumber: string;
+  orderNumber: string;
+  total: string;
+  signedUrl?: string | null;
+  payload?: unknown;
+}): Promise<boolean> {
+  const { to, purpose, referenceId, invoiceNumber, orderNumber, total, signedUrl, payload } = options;
+
+  if (await wasSent(purpose, referenceId)) return false;
+  const phone = normalizePhone(to);
+  if (!phone) {
+    await logSend({
+      recipient: to || 'unknown',
+      messageType: 'document',
+      purpose,
+      referenceId,
+      status: 'failed',
+      error: 'No WhatsApp number available',
+      payload,
+    });
+    return false;
+  }
+
+  const bodyParams = [
+    orderNumber,
+    invoiceNumber,
+    orderNumber,
+    total,
+    signedUrl || 'Not available',
+  ];
+
+  let delivered = await sendDocumentTemplate({
+    to: phone,
+    base64: options.base64,
+    filename: options.filename,
+    bodyParams,
+  });
+
+  // The document template is new; if Meta has not approved it yet, fall back to
+  // the text-only invoice template so the customer is not left in silence.
+  let usedTemplate: string = WHATSAPP_TEMPLATES.INVOICE_WITH_DOCUMENT;
+  if (!delivered) {
+    delivered = await sendTemplate(phone, WHATSAPP_TEMPLATES.INVOICE_SHARED, [orderNumber, total]);
+    usedTemplate = WHATSAPP_TEMPLATES.INVOICE_SHARED;
+  }
+
+  await logSend({
+    recipient: phone,
+    templateName: usedTemplate,
+    messageType: delivered ? 'template' : 'failed',
+    purpose,
+    referenceId,
+    status: delivered ? 'sent' : 'failed',
+    error: delivered ? undefined : 'Delivery attempt failed',
+    payload,
+  });
+
+  return delivered;
+}
+
 /** Send a document (used for the PDF invoice) at most once per purpose/reference. */
 export async function sendDocumentOnce(options: {
   to: string;
@@ -360,6 +508,8 @@ export const whatsappService = {
   sendText,
   sendTemplate,
   sendDocument,
+  sendDocumentTemplate,
+  sendDocumentTemplateOnce,
   sendOnce,
   wasSent,
 };

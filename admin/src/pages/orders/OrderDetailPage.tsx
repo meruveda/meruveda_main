@@ -125,10 +125,24 @@ export const OrderDetailPage: React.FC = () => {
     // Fixed GST tax invoice (backend pdf-lib template) - same file sent on WhatsApp/email.
     setIsDownloadingInvoice(true);
     try {
-      await orderService.downloadInvoice(order.id, (order as any).order_number || order.orderNumber);
+      await orderService.downloadInvoice(order.id, order.invoiceNumber, order.orderNumber);
       toast.success('Invoice downloaded');
     } catch (err: any) {
-      toast.error(err?.message || 'Failed to download invoice');
+      // The endpoint answers errors as JSON, but we asked for a blob — so the
+      // message has to be pulled back out of the blob before it can be shown.
+      let message = err?.message || 'Failed to download invoice';
+      const body = err?.response?.data;
+      if (body instanceof Blob) {
+        try {
+          const parsed = JSON.parse(await body.text());
+          if (parsed?.error?.message) message = parsed.error.message;
+        } catch {
+          /* not JSON — keep the generic message */
+        }
+      } else if (body?.error?.message) {
+        message = body.error.message;
+      }
+      toast.error(message);
     } finally {
       setIsDownloadingInvoice(false);
     }
@@ -438,6 +452,12 @@ export const OrderDetailPage: React.FC = () => {
               <FileText className="h-5 w-5 text-slate-400" /> Invoice
             </h3>
             <div className="space-y-3 text-sm">
+              {order.invoiceNumber && (
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-500">Invoice #</span>
+                  <span className="font-semibold font-mono">{order.invoiceNumber}</span>
+                </div>
+              )}
               <div className="flex justify-between items-center">
                 <span className="text-slate-500">Status</span>
                 {(() => {
@@ -468,7 +488,8 @@ export const OrderDetailPage: React.FC = () => {
               )}
               {order.invoiceStatus === 'not_sent' && !order.invoiceError && (
                 <p className="text-xs text-slate-400">
-                  The automatic invoice hook is off or has not run yet. Use Resend to send it now.
+                  No invoice has been issued yet. One is generated automatically once payment is
+                  verified (or on order confirmation for COD). Use Resend to generate it now.
                 </p>
               )}
               <div className="grid grid-cols-2 gap-2 pt-1">
@@ -476,6 +497,13 @@ export const OrderDetailPage: React.FC = () => {
                   disabled={isDownloadingInvoice}
                   className="btn-outline text-xs py-1.5 justify-center"
                   onClick={handleDownloadInvoice}
+                  title={
+                    order.invoiceUrl
+                      ? 'Download the stored invoice PDF'
+                      : order.invoiceNumber
+                      ? 'No stored file for this invoice yet — one will be generated'
+                      : 'Generate and download the invoice PDF'
+                  }
                 >
                   {isDownloadingInvoice ? 'Downloading…' : 'Download invoice'}
                 </button>
@@ -483,7 +511,7 @@ export const OrderDetailPage: React.FC = () => {
                   disabled={isResendingInvoice}
                   className="btn-outline text-xs py-1.5 justify-center"
                   onClick={handleResendInvoice}
-                  title="Send the PDF invoice again by email + WhatsApp (bypasses the once-only guard)"
+                  title="Send the same invoice again by email + WhatsApp (reuses the invoice number)"
                 >
                   {isResendingInvoice ? 'Sending…' : 'Resend invoice'}
                 </button>
@@ -721,8 +749,14 @@ export const OrderDetailPage: React.FC = () => {
                 </tr>
                 <tr>
                   <td className="px-3 py-1.5 border border-slate-200 font-semibold bg-slate-100 uppercase">Invoice #</td>
-                  <td className="px-3 py-1.5 border border-slate-200 text-right font-mono">{order.orderNumber}</td>
+                  <td className="px-3 py-1.5 border border-slate-200 text-right font-mono">{order.invoiceNumber || order.orderNumber}</td>
                 </tr>
+                {order.invoiceNumber ? (
+                  <tr>
+                    <td className="px-3 py-1.5 border border-slate-200 font-semibold bg-slate-100 uppercase">Order #</td>
+                    <td className="px-3 py-1.5 border border-slate-200 text-right font-mono">{order.orderNumber}</td>
+                  </tr>
+                ) : null}
                 {(order.awbCode || order.trackingNumber || (order as any).awb_code) ? (
                   <tr>
                     <td className="px-3 py-1.5 border border-slate-200 font-semibold bg-slate-100 uppercase">AWB / Tracking #</td>
