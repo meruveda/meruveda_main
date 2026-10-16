@@ -315,28 +315,49 @@ export const downloadInvoice = async (req: Request, res: Response, next: NextFun
       });
     }
 
-    /* ---- 2. not issued yet: run the automatic path, then serve ---- */
-    // sendInvoiceAuto is atomic: whoever claims the order generates the PDF.
-    // If the automatic trigger already claimed it, this call is a no-op and we
-    // simply serve whatever was stored. That is what keeps a customer clicking
-    // "Download" from ever producing a second invoice.
-    const dispatch = await invoiceDispatchService.sendInvoiceAuto(orderRow.id);
+    /* ---- 2. not issued yet: generate synchronously, then serve ---- */
+    // Generation happens INSIDE this request, not fire-and-forget. On Vercel an
+    // un-awaited background promise is torn down when the response flushes, so
+    // "kick it off and hope" left orders with a claim and no invoice. Now the
+    // first click either returns the PDF or returns the real reason.
+    let dispatch;
+    try {
+      dispatch = await invoiceDispatchService.sendInvoiceAuto(orderRow.id);
+    } catch (err: any) {
+      const reason = err?.reason || err?.message || 'The invoice could not be generated.';
+      console.error(`[invoice] step=dispatch order=${orderRow.id} reason=${reason}`, err?.stack || err);
+      return res.status(500).json({ error: { message: reason } });
+    }
 
-    const freshState = dispatch.invoiceNumber ? await readInvoiceState(orderRow.id) : null;
+    // Another worker is rendering this exact invoice right now. That is a retry,
+    // not a failure, so it must not surface as an error toast.
+    if (dispatch.busy) {
+      res.set('Retry-After', String(dispatch.retryAfterSeconds ?? 3));
+      return res.status(202).json({
+        error: {
+          message: `Your invoice is being prepared. Please try again in ${dispatch.retryAfterSeconds ?? 3} seconds.`,
+          retryable: true,
+        },
+      });
+    }
+
+    const freshState = await readInvoiceState(orderRow.id);
     if (freshState?.pdfPath) {
       const stored = await downloadInvoicePdf(freshState.pdfPath);
       if (stored) return send(stored, freshState.invoiceNumber);
     }
 
+    // A real, specific reason — "Font file missing", "Storage upload failed" —
+    // rather than a generic message the customer can do nothing about.
     if (dispatch.reason) {
-      console.error(`[Invoice] on-demand generation failed for ${orderRow.order_number}: ${dispatch.reason}`);
-      return res.status(503).json({
-        error: { message: `The invoice could not be generated yet: ${dispatch.reason}` },
-      });
+      console.error(
+        `[invoice] step=${dispatch.step || 'unknown'} order=${orderRow.id} reason=${dispatch.reason}`
+      );
+      return res.status(500).json({ error: { message: dispatch.reason } });
     }
 
-    return res.status(503).json({
-      error: { message: 'The invoice is being generated. Try again in a moment.' },
+    return res.status(500).json({
+      error: { message: 'The invoice could not be generated. Please try again.' },
     });
   } catch (error: any) {
     if (error.status === 404) {

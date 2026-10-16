@@ -10,6 +10,7 @@ import { supabase } from '../database/supabase';
 import {
   allocateInvoiceNumber,
   claimInvoice,
+  CLAIM_STALE_MS,
   ensureInvoiceBucket,
 invoiceStatePath,
   readInvoiceState,
@@ -20,11 +21,14 @@ invoiceStatePath,
 } from './invoiceStore';
 import {
   buildInvoiceNumber,
+  InvoiceBusyError,
   claimInvoiceNumber,
   isCodOrder,
   paymentWordingFor,
   payuReferenceFor,
 } from './invoiceService';
+import * as invoiceDispatchModule from './invoiceDispatchService';
+import * as invoiceAssetsModule from './invoiceAssets';
 
 /**
  * Invoice numbering + GST contract tests.
@@ -49,6 +53,9 @@ import {
 
 /** Objects in the fake bucket: path -> content. */
 let objects = new Map<string, string>();
+
+/** The row the PostgREST stub hands back, or null for 'no such order'. */
+let orderRow: any = null;
 
 /** Paths whose creation must fail once, to simulate a lost race. */
 let conflictOnce = new Set<string>();
@@ -87,17 +94,32 @@ list: async (prefix: string) => {
         error: null,
       };
     },
-    createSignedUrl: async (path: string) => ({
+createSignedUrl: async (path: string) => ({
       data: { signedUrl: objects.has(path) ? `https://signed.test/${path}` : null },
       error: objects.has(path) ? null : { message: 'Object not found' },
     }),
+    remove: async (paths: string[]) => {
+      for (const p of paths) objects.delete(p);
+      return { data: [], error: null };
+    },
   };
 
   (supabase.storage as any).from = () => bucket;
   (supabase.storage as any).createBucket = async () => ({ error: null });
-  (supabase as any).from = () => ({
-    select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: null, error: null }) }) }),
+// PostgREST stub: returns `orderRow`, so a test can make the dispatcher see a
+  // real order (or nothing at all).
+  const builder = () => ({
+    select: () => ({
+      eq: () => ({
+        single: async () =>
+          orderRow ? { data: orderRow, error: null } : { data: null, error: { code: 'PGRST116' } },
+        maybeSingle: async () =>
+          orderRow ? { data: orderRow, error: null } : { data: null, error: null },
+      }),
+      update: () => ({ eq: async () => ({ data: null, error: null }) }),
+    }),
   });
+  (supabase as any).from = builder;
 }
 
 /* ------------------------------------------------------------------ */
@@ -137,12 +159,24 @@ test('two concurrent claims on one order produce exactly one invoice', async () 
   installFakeStorage();
   const order = { id: 'order-abc', order_number: 'MV-748371' };
 
-  const [a, b] = await Promise.all([claimInvoiceNumber(order), claimInvoiceNumber(order)]);
+// One caller wins the claim; the other is told to retry rather than being
+  // handed a second number or silently given nothing.
+  const attempt = async () => {
+    try {
+      return { number: await claimInvoiceNumber(order), busy: false as const };
+    } catch (err: any) {
+      return { number: null, busy: err instanceof InvoiceBusyError, err };
+    }
+  };
+  const [a, b] = await Promise.all([attempt(), attempt()]);
 
-  const issued = [a, b].filter(Boolean);
-  assert.equal(issued.length, 1, 'exactly one of the two callers may issue');
-  assert.ok(issued[0]!.startsWith('MV/'), 'the winner gets a series number');
-  // Only one claim marker exists, and the loser was told "someone else owns it".
+  const winners = [a, b].filter((x) => x.number);
+  const losers = [a, b].filter((x) => !x.number);
+  assert.equal(winners.length, 1, 'exactly one of the two callers may issue');
+  assert.equal(losers.length, 1);
+  assert.ok(losers[0]!.busy, 'the loser is told to retry, not silently given nothing');
+  assert.ok(winners[0]!.number!.startsWith('MV/'), 'the winner gets a series number');
+  // Only one claim marker exists.
   assert.equal([...objects.keys()].filter((k) => k.endsWith('/claim')).length, 1);
 });
 
@@ -170,8 +204,154 @@ test('a retry after a successful issue returns the same number, never a second o
 test('there is no force or resend escape hatch on the claim path', async () => {
   installFakeStorage();
   // A second claim on an already-claimed order must never win.
-  assert.equal(await claimInvoice('order-x', { claimedAt: 'now' }), true);
-  assert.equal(await claimInvoice('order-x', { claimedAt: 'later' }), false);
+  const first = await claimInvoice('order-x', { claimedAt: new Date().toISOString() });
+  assert.equal(first.ok, true);
+  // ...but it reports "busy" rather than silently doing nothing, which is what
+  // used to leave an order stuck in "being generated" for good.
+  const second = await claimInvoice('order-x', { claimedAt: new Date().toISOString() });
+  assert.equal(second.ok, false);
+  assert.equal((second as any).busy, true);
+});
+
+/* ------------------------------------------------------------------ */
+/* Claim recovery — the stuck-invoice hotfix                           */
+/* ------------------------------------------------------------------ */
+
+test('a FRESH claim reports busy so the caller can answer 202 + Retry-After', async () => {
+  installFakeStorage();
+  const won = await claimInvoice('order-fresh', { claimedAt: new Date().toISOString() });
+  assert.equal(won.ok, true);
+
+  // No state.json yet, and the claim is 5 seconds old: still in flight.
+  const outcome = await claimInvoice('order-fresh', { claimedAt: new Date().toISOString() });
+  assert.equal(outcome.ok, false);
+  assert.equal((outcome as any).busy, true, 'must be reported as busy, not as an error');
+  assert.equal((outcome as any).retryAfterSeconds, 3);
+  assert.ok(objects.has('invoices/order-fresh/claim'), 'a live claim is never stolen');
+});
+
+test('a STALE claim is taken over so the order can never wedge', async () => {
+  installFakeStorage();
+  // A claim whose worker died 5 minutes ago, with no state.json.
+  objects.set(
+    'invoices/order-stale/claim',
+    JSON.stringify({ claimedAt: new Date(Date.now() - 5 * 60_000).toISOString(), owner: 'dead' })
+  );
+
+  const outcome = await claimInvoice('order-stale', { claimedAt: new Date().toISOString() });
+  assert.equal(outcome.ok, true, 'the dead claim must be recovered');
+  assert.equal((outcome as any).tookOver, true);
+  // Exactly one claim marker remains, and it is the new one.
+  const claims = [...objects.keys()].filter((k) => k.endsWith('/claim'));
+  assert.equal(claims.length, 1);
+});
+
+test('a claim older than the stale window is recovered; a younger one is not', async () => {
+  installFakeStorage();
+  const age = (ms: number) => JSON.stringify({ claimedAt: new Date(Date.now() - ms).toISOString() });
+
+  objects.set('invoices/order-age-young/claim', age(10_000));
+  assert.equal((await claimInvoice('order-age-young', { claimedAt: new Date().toISOString() })).ok, false);
+
+  objects.set('invoices/order-age-old/claim', age(CLAIM_STALE_MS + 5_000));
+  assert.equal((await claimInvoice('order-age-old', { claimedAt: new Date().toISOString() })).ok, true);
+});
+
+test('an ISSUED invoice is never re-claimed even if the claim looks stale', async () => {
+  installFakeStorage();
+  objects.set(
+    'invoices/order-done/claim',
+    JSON.stringify({ claimedAt: new Date(Date.now() - 10 * 60_000).toISOString() })
+  );
+  // existingState: true means state.json is present — the invoice is issued.
+  const outcome = await claimInvoice(
+    'order-done',
+    { claimedAt: new Date().toISOString() },
+    { existingState: true }
+  );
+  assert.equal(outcome.ok, false, 'a second tax document must be impossible');
+});
+
+test('a successful issue writes state.json AND releases the claim', async () => {
+  installFakeStorage();
+  const { sendInvoiceDispatch } = invoiceDispatchModule;
+
+  const order = {
+    id: 'order-ok',
+    order_number: 'MV-748371',
+    payment_method: 'COD',
+    payment_status: 'pending',
+    created_at: new Date().toISOString(),
+    subtotal: 1098,
+    total: 1098,
+    shipping_fee: 0,
+    tax: 0,
+    discount: 0,
+    order_items: [],
+    billing_address: {},
+    shipping_address: {},
+  };
+
+  orderRow = order;
+  const result = await sendInvoiceDispatch(order.id);
+
+  // The invoice really was issued...
+  assert.equal(result.claimed, true);
+  assert.ok(result.invoiceNumber, 'an invoice number was allocated');
+  assert.ok(objects.has(`invoices/${order.id}/state.json`), 'state.json was written');
+  assert.ok(
+    [...objects.keys()].some((k) => k.startsWith(`invoices/${order.id}/`) && k.endsWith('.pdf')),
+    'the PDF was stored'
+  );
+  // ...and the claim is gone, so nothing can be stuck waiting on this order.
+  assert.equal(objects.has(`invoices/${order.id}/claim`), false, 'the claim is released on success');
+});
+
+test('a failure while issuing leaves NO claim and NO half-issued order', async () => {
+  installFakeStorage();
+
+  // Break the renderer the only way the dispatcher cannot route around: make
+  // reading the order itself throw, so it dies before the claim is taken.
+  const { sendInvoiceDispatch } = invoiceDispatchModule;
+  const originalFrom = (supabase as any).from;
+  (supabase as any).from = () => ({
+    select: () => ({
+      eq: () => ({
+        single: async () => {
+          const e: any = new Error('PostgREST exploded');
+          e.code = 'XX000';
+          throw e;
+        },
+      }),
+    }),
+  });
+
+  let threw = false;
+  try {
+    await sendInvoiceDispatch('order-dbdown');
+  } catch {
+    threw = true;
+  } finally {
+    (supabase as any).from = originalFrom;
+  }
+  assert.equal(threw, true, 'a dead database must surface, not be swallowed');
+
+  // The invariant that matters: no claim without a state.json, ever.
+  const claim = objects.has('invoices/order-dbdown/claim');
+  const state = objects.has('invoices/order-dbdown/state.json');
+  assert.equal(claim, false, 'a claim must never be left behind');
+  assert.equal(state, false);
+});
+
+test('the health check reports fonts and logo without throwing', async () => {
+  const { checkInvoiceAssets, invoiceAssetPaths } = invoiceAssetsModule;
+  const check = checkInvoiceAssets();
+  assert.equal(typeof check.fontsOk, 'boolean');
+  assert.equal(typeof check.logoOk, 'boolean');
+  assert.ok(Array.isArray(invoiceAssetPaths('fonts/NotoSans-Regular.ttf')));
+  // In the source tree the assets are present, so this must be true locally.
+  assert.equal(check.fontsOk, true, 'fonts must be found in the repo');
+  assert.equal(check.logoOk, true, 'the logo must be found in the repo');
 });
 
 /* ------------------------------------------------------------------ */

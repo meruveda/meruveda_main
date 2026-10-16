@@ -1,10 +1,13 @@
 import { config, invoiceWhatsapp } from '../config/env';
 import {
+  InvoiceBusyError,
+  InvoiceIssueError,
   claimInvoiceNumber,
   generateInvoicePdf,
   getOrderForInvoice,
   isCodOrder,
   markInvoiceSent,
+  releaseInvoiceClaim as _release,
   paymentWordingFor,
   payuReferenceFor,
   releaseInvoiceClaim,
@@ -14,6 +17,7 @@ import { getInvoiceEmailTemplate, isEmailConfigured, sendEmailWithAttachments } 
 import { normalizePhone, sendInvoiceDocumentTemplate } from './whatsappService';
 import {
   createInvoiceSignedUrl,
+  deleteInvoiceClaim,
   downloadInvoicePdf,
   listRecentInvoiceStates,
   readInvoiceState,
@@ -57,6 +61,11 @@ export interface InvoiceDispatchResult {
   invoiceNumber: string;
   invoiceUrl?: string | null;
   reason?: string;
+  /** Which step failed, for the log line and the customer message. */
+  step?: string;
+  /** True when another worker is mid-issue: reply 202, not an error. */
+  busy?: boolean;
+  retryAfterSeconds?: number;
 }
 
 const EMAIL_PURPOSE = 'invoice_email';
@@ -188,31 +197,50 @@ export async function sendInvoiceDispatch(orderId: string): Promise<InvoiceDispa
     invoiceNumber: '',
   };
 
-  /* ---- 1. atomic claim + number allocation (Storage, upsert:false) ---- */
-  const invoiceNumber = await claimInvoiceNumber(order);
-  if (!invoiceNumber) {
-    // Someone else owns this order, or storage is unavailable. Either way we
-    // must not issue a second tax document.
-    const state = await readInvoiceState(orderId);
-    result.skipped = true;
-    result.invoiceNumber = state?.invoiceNumber || '';
-    return result;
+  /* ---- 1. atomic claim + number allocation ---- */
+  // Throws InvoiceBusyError when another worker is mid-flight, and
+  // InvoiceIssueError when storage is unavailable. Both are handled by the
+  // caller's catch, which releases the claim so a failure can never wedge the
+  // order in "being generated".
+  let invoiceNumber: string;
+  try {
+    invoiceNumber = await claimInvoiceNumber(order);
+  } catch (err: any) {
+    if (err instanceof InvoiceBusyError) {
+      result.skipped = true;
+      result.busy = true;
+      result.retryAfterSeconds = err.retryAfterSeconds;
+      return result;
+    }
+    throw err;
   }
   result.claimed = true;
   result.invoiceNumber = invoiceNumber;
 
   // Freeze the invoice identity + payment wording so a later payment update
   // cannot rewrite what the customer was told on a document they already hold.
-  await writeInvoiceIssue(orderId, invoiceNumber, order);
+  try {
+    const written = await writeInvoiceIssue(orderId, invoiceNumber, order);
+    if (!written) {
+      throw new InvoiceIssueError('state-write', 'Could not save the invoice record in storage.');
+    }
+  } catch (err: any) {
+    console.error(`[invoice] step=state-write order=${orderId}`, err?.stack || err);
+    await deleteInvoiceClaim(orderId);
+    throw new InvoiceIssueError('state-write', err?.reason || 'Could not save the invoice record.');
+  }
 
   /* ---- 2. render the PDF ---- */
   let pdf: Buffer;
   try {
     pdf = await generateInvoicePdf(order);
   } catch (err: any) {
-    const reason = `PDF generation failed: ${err?.message || err}`;
-    await releaseInvoiceClaim(orderId, reason);
+    const reason = err?.reason || err?.message || 'PDF rendering failed';
+    console.error(`[invoice] step=pdf-render order=${orderId} reason=${reason}`, err?.stack || err);
+    // The claim MUST go: leaving it behind is exactly what strands the order.
+    await deleteInvoiceClaim(orderId);
     result.reason = reason;
+    result.step = 'pdf-render';
     return result;
   }
 
@@ -223,16 +251,23 @@ export async function sendInvoiceDispatch(orderId: string): Promise<InvoiceDispa
     .then(async (path) => {
       if (path) {
         result.invoiceUrl = path;
-        const state = await readInvoiceState(orderId);
-        if (state) await patchInvoiceState(orderId, { pdfPath: path });
+        await patchInvoiceState(orderId, { pdfPath: path });
       }
       return path;
     })
-    .catch(() => null);
+    .catch((err: any) => {
+      console.error(`[invoice] step=storage-upload order=${orderId}`, err?.stack || err);
+      return null;
+    });
 
   const signedUrlPromise = storagePromise
     .then((p) => (p ? createInvoiceSignedUrl(p) : null))
     .catch(() => null);
+
+  // The PDF is already issued and state.json exists, so the claim has done its
+  // job. Release it now: from this point on the order is invoiced and a later
+  // request reads state.json instead of trying to claim.
+  await deleteInvoiceClaim(orderId);
 
   const payment = paymentWordingFor(order);
   const reference = payuReferenceFor(order);

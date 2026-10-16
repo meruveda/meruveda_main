@@ -25,8 +25,15 @@ import {
 import { supabase } from '../database/supabase';
 import { config, storefrontUrl } from '../config/env';
 import {
+  INVOICE_FONT_FILES,
+  INVOICE_LOGO_FILE,
+  invoiceAssetPaths,
+  readInvoiceAsset,
+} from './invoiceAssets';
+import {
   allocateInvoiceNumber,
   claimInvoice,
+  deleteInvoiceClaim,
   freshChannelState,
   patchChannel,
   readInvoiceState,
@@ -83,33 +90,13 @@ const TOTAL_X = 318.8;
 const TOTAL_LABEL_W = 138.8;
 const TOTAL_VAL_W = 136.5;
 
-/* =============================================================================
- * ASSETS — logo + fonts. All resolved relative to the running module so the
- * same paths work from src/ and from dist/ on Vercel.
- * ========================================================================== */
-function asset(candidates: string[]): Buffer | null {
-  for (const c of candidates) {
-    try {
-      return readFileSync(c);
-    } catch {
-      /* next */
-    }
-  }
-  return null;
-}
 
-// __dirname is backend/src/services or backend/dist/services.
-const assetRoot = (rel: string) => [
-  path.resolve(__dirname, `../assets/${rel}`), // dist/assets (copy-assets.cjs)
-  path.resolve(__dirname, `../../assets/${rel}`), // assets/ (source tree)
-];
-
-const FONT_FILES = {
-  serifBold: 'fonts/SourceSerif4-Bold.ttf', // stands in for Georgia Bold
-  sans: 'fonts/NotoSans-Regular.ttf',
-  sansBold: 'fonts/NotoSans-Bold.ttf',
-  mono: 'fonts/NotoSansMono-Regular.ttf', // stands in for Consolas
-  monoBold: 'fonts/NotoSansMono-Bold.ttf',
+const FONT_FILES: Record<string, string> = {
+  serifBold: INVOICE_FONT_FILES[0], // stands in for Georgia Bold
+  sans: INVOICE_FONT_FILES[1],
+  sansBold: INVOICE_FONT_FILES[2],
+  mono: INVOICE_FONT_FILES[3], // stands in for Consolas
+  monoBold: INVOICE_FONT_FILES[4],
 };
 
 interface Fonts {
@@ -125,7 +112,7 @@ async function loadFonts(doc: PDFDocument): Promise<Fonts | null> {
   const missing: string[] = [];
   const out: any = {};
   for (const [key, rel] of Object.entries(FONT_FILES)) {
-    const bytes = asset(assetRoot(rel));
+    const bytes = readInvoiceAsset(rel);
     if (!bytes) {
       missing.push(rel);
       continue;
@@ -139,7 +126,7 @@ async function loadFonts(doc: PDFDocument): Promise<Fonts | null> {
   if (missing.length) {
     console.error(
       `[Invoice] FONTS MISSING — the invoice will fall back to Helvetica/Courier and cannot draw ₹. ` +
-        `Missing or unreadable: ${missing.join(', ')}. Looked under: ${assetRoot('fonts/...').join(' , ')}`
+        `Missing or unreadable: ${missing.join(', ')}. Looked under: ${invoiceAssetPaths('fonts/...').join(' , ')}`
     );
     return null;
   }
@@ -418,7 +405,7 @@ export async function generateInvoicePdf(order: any): Promise<Buffer> {
 
   /* ================= HEADER ================= */
   // Logo, reference size 99.8 x 42 at (18, 18).
-  const logoBytes = asset(assetRoot('meruveda-logo.png'));
+  const logoBytes = readInvoiceAsset(INVOICE_LOGO_FILE);
   if (logoBytes) {
     try {
       // Create BEFORE the fonts so every resource tag stays in sync (a font tag
@@ -435,7 +422,7 @@ export async function generateInvoicePdf(order: any): Promise<Buffer> {
     }
   } else {
     console.error(
-      `[Invoice] LOGO MISSING — the invoice will render without it. Looked in: ${assetRoot('meruveda-logo.png').join(' , ')}`
+      `[Invoice] LOGO MISSING — the invoice will render without it. Looked in: ${invoiceAssetPaths(INVOICE_LOGO_FILE).join(' , ')}`
     );
   }
 
@@ -868,25 +855,54 @@ export function payuReferenceFor(order: { notes?: string | null }): string | nul
  * Returns null when another worker already claimed the order; callers treat
  * that as "already handled", not as an error.
  */
+/** Thrown when another worker holds a live claim. Not an error — a retry. */
+export class InvoiceBusyError extends Error {
+  constructor(public readonly retryAfterSeconds = 3) {
+    super('Invoice is being generated.');
+  }
+}
+
+/** Thrown when issue cannot proceed; `reason` is safe to show the customer. */
+export class InvoiceIssueError extends Error {
+  constructor(public readonly step: string, public readonly reason: string) {
+    super(`${step}: ${reason}`);
+  }
+}
+
+/**
+ * Claim this order and take its invoice number from the FY series.
+ *
+ * Atomicity comes from Storage: `claimInvoice` creates `invoices/<id>/claim`
+ * with `upsert:false`, so when the order-creation trigger, a PayU callback and
+ * the cron sweep all race, exactly one create succeeds.
+ *
+ * A claim with no state.json older than a minute is treated as dead (its worker
+ * crashed) and taken over, so a single failed attempt can never wedge an order
+ * in "being generated" forever.
+ *
+ * @throws InvoiceBusyError when another worker is mid-flight.
+ * @throws InvoiceIssueError when storage is unavailable.
+ */
 export async function claimInvoiceNumber(order: {
   id: string;
   order_number?: string | null;
   invoice_number?: string | null;
-}): Promise<string | null> {
+}): Promise<string> {
   const orderId = order.id;
   const issuedAt = new Date();
 
   const existing = await readInvoiceState(orderId);
   if (existing?.invoiceNumber) return existing.invoiceNumber;
 
-  const won = await claimInvoice(orderId, {
-    orderNumber: order.order_number || null,
-    claimedAt: issuedAt.toISOString(),
-  });
-  if (!won) {
-    // Lost the race, or storage is unavailable. Either way: do NOT issue.
-    const settled = await readInvoiceState(orderId);
-    return settled?.invoiceNumber ?? null;
+  const outcome = await claimInvoice(
+    orderId,
+    { claimedAt: issuedAt.toISOString(), owner: `issue-${issuedAt.getTime()}` },
+    { existingState: Boolean(existing) }
+  );
+
+  if (!outcome.ok) {
+    if (outcome.busy) throw new InvoiceBusyError(outcome.retryAfterSeconds);
+    throw new InvoiceIssueError('claim', outcome.reason);
   }
 
   let invoiceNumber: string;
@@ -896,8 +912,8 @@ export async function claimInvoiceNumber(order: {
     // Never leave an order without an invoice: fall back to the order number.
     invoiceNumber = String(order.order_number || '') || buildInvoiceNumber(String(order.order_number || ''));
     console.error(
-      `[Invoice] FY series allocation failed for order ${orderId} (${err?.message || err}) — ` +
-        `falling back to the order number ${invoiceNumber} as the invoice number.`
+      `[invoice] step=number-allocation order=${orderId} fell back to the order number ${invoiceNumber}`,
+      err?.stack || err?.message || err
     );
   }
 

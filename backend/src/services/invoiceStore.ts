@@ -216,35 +216,125 @@ export async function patchInvoiceState(
 /* Once-only claim                                                     */
 /* ------------------------------------------------------------------ */
 
-/**
- * Atomically claim the right to issue an invoice for this order.
- *
- * `upsert: false` means Storage creates the object only if it is absent. If two
- * workers race, exactly one create succeeds and the loser gets `false`. That is
- * the entire once-only guarantee — there is no force flag, because a force path
- * would mint a second tax document for one order.
- *
- * @returns true when this caller owns the issue, false when someone else does.
- */
-export async function claimInvoice(orderId: string, marker: Record<string, unknown>): Promise<boolean> {
-  if (!(await ensureInvoiceBucket())) {
-    // Without storage there is no atomic primitive, so refuse to guess: issuing
-    // an un-claimable invoice risks two documents per order.
-    console.error(`[InvoiceStore] cannot claim order ${orderId}: invoice bucket unavailable.`);
-    return false;
-  }
-  const { error } = await supabase.storage
+/* ------------------------------------------------------------------ */
+/* Claim recovery                                                      */
+/* ------------------------------------------------------------------ */
+
+/** How long a claim may sit without a state.json before it is considered dead. */
+export const CLAIM_STALE_MS = 60_000;
+
+/** The claim marker, as written. Small on purpose: it is bookkeeping, not state. */
+export interface InvoiceClaim {
+  claimedAt: string;
+  /** Free-form: which worker took it. */
+  owner?: string;
+}
+
+/** Read the claim marker. `null` when there is no claim. */
+export async function readInvoiceClaim(orderId: string): Promise<InvoiceClaim | null> {
+  if (!(await ensureInvoiceBucket())) return null;
+  const { data, error } = await supabase.storage
     .from(config.invoiceStorageBucket)
-    .upload(invoiceClaimPath(orderId), JSON.stringify(marker), {
+    .download(invoiceClaimPath(orderId));
+  if (error || !data) return null;
+  try {
+    const parsed = JSON.parse(await data.text());
+    // A marker written before this shape existed has no timestamp: treat the
+    // file's own mtime as the claim time so it is still recoverable.
+    if (parsed && typeof parsed.claimedAt === 'string') return parsed as InvoiceClaim;
+    return { claimedAt: new Date().toISOString(), owner: 'legacy' };
+  } catch {
+    // Unparseable marker: the epoch makes it stale immediately, which is the
+    // safe direction (we would rather re-issue than stay wedged).
+    return { claimedAt: new Date(0).toISOString(), owner: 'unparseable' };
+  }
+}
+
+/** Remove a claim so the order can be claimed again. Best-effort. */
+export async function deleteInvoiceClaim(orderId: string): Promise<void> {
+  if (!(await ensureInvoiceBucket())) return;
+  try {
+    await supabase.storage.from(config.invoiceStorageBucket).remove([invoiceClaimPath(orderId)]);
+  } catch (err: any) {
+    console.warn(`[invoice] step=release-claim order=${orderId}`, err?.message || err);
+  }
+}
+
+export type ClaimOutcome =
+  /** We own it and may issue. */
+  | { ok: true }
+  /** Someone else owns it and is still working. Caller should return 202. */
+  | { ok: false; busy: true; retryAfterSeconds: number }
+  /** A dead claim was cleared and we now own it. */
+  | { ok: true; tookOver: true }
+  /** Storage is unavailable, so we cannot safely issue at all. */
+  | { ok: false; busy: false; reason: string };
+
+/**
+ * Claim the right to issue an invoice for this order, recovering from a claim
+ * that outlived its worker.
+ *
+ * A worker can die between taking the claim and writing `state.json` (a cold
+ * start, an OOM, a crash in the renderer). The claim then outlives its owner and
+ * the order is invoiced never. So:
+ *
+ *   - no claim            -> create it (upsert:false) and own it
+ *   - claim + no state    -> younger than CLAIM_STALE_MS: it is in flight
+ *   - claim + no state    -> older: the worker is gone. Delete the dead claim
+ *     and create a new one, again with upsert:false, so if two requests both
+ *     decide to take over, exactly one create wins.
+ *
+ * @param existingState true when state.json is present, which means the invoice
+ *   was issued and must never be claimed again.
+ */
+export async function claimInvoice(
+  orderId: string,
+  marker: Record<string, unknown>,
+  opts: { existingState?: boolean } = {}
+): Promise<ClaimOutcome> {
+  if (!(await ensureInvoiceBucket())) {
+    return { ok: false, busy: false, reason: 'Invoice storage is unavailable right now.' };
+  }
+
+  const client = supabase.storage.from(config.invoiceStorageBucket);
+  const tryCreate = async (): Promise<boolean> => {
+    const { error } = await client.upload(invoiceClaimPath(orderId), JSON.stringify(marker), {
       contentType: 'application/json',
       cacheControl: '3600',
       upsert: false,
     });
-  if (!error) return true;
-  // 409/duplicate means another worker holds the claim — the expected race.
-  if (/exists|duplicate|already/i.test(error.message || '')) return false;
-  console.warn(`[InvoiceStore] claim failed for order ${orderId}:`, error.message);
-  return false;
+    if (!error) return true;
+    if (/exists|duplicate|already/i.test(error.message || '')) return false;
+    console.warn(`[invoice] step=claim order=${orderId}`, error.message);
+    return false;
+  };
+
+  if (await tryCreate()) return { ok: true };
+
+  // The claim already exists. An issued invoice is never re-claimed.
+  if (opts.existingState) return { ok: false, busy: false, reason: 'Invoice already issued.' };
+
+  const claim = await readInvoiceClaim(orderId);
+  if (!claim) {
+    // It vanished between our create and this read (another worker cleaned up).
+    // One more create attempt settles it.
+    return (await tryCreate()) ? { ok: true } : { ok: false, busy: true, retryAfterSeconds: 3 };
+  }
+
+  const age = Date.now() - new Date(claim.claimedAt).getTime();
+  if (age < CLAIM_STALE_MS) {
+    // Still in flight: the other worker is rendering. Do not steal, do not
+    // re-issue — just tell the caller to come back.
+    return { ok: false, busy: true, retryAfterSeconds: 3 };
+  }
+
+  // Stale: the owner is gone. Clear it and re-claim. The second create is the
+  // atomic step that stops two takers from both winning.
+  console.error(
+    `[invoice] step=stale-claim order=${orderId} ageMs=${age} — the previous worker never wrote state.json, taking over`
+  );
+  await client.remove([invoiceClaimPath(orderId)]);
+  return (await tryCreate()) ? { ok: true, tookOver: true } : { ok: false, busy: true, retryAfterSeconds: 3 };
 }
 
 /* ------------------------------------------------------------------ */
