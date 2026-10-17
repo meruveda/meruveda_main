@@ -18,6 +18,10 @@
     "db:migrate:dry": "node scripts/migrate.js --dry-run",
     "db:verify": "node scripts/verify-schema.js",
     "db:verify:all": "node scripts/verify-schema.js --all",
+    "db:bundle": "node scripts/build-migration-bundle.js",
+    "db:bundle:check": "node scripts/build-migration-bundle.js --check",
+    "db:backup": "node scripts/backup-data.js",
+    "db:verify:backup": "node scripts/verify-backup.js --latest",
     "wa:verify": "node scripts/verify-whatsapp.js",
     "wa:verify:send": "node scripts/verify-whatsapp.js --send"
   },

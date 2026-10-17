@@ -123,29 +123,55 @@ async function main() {
     console.log('\n  WHATSAPP_BUSINESS_ACCOUNT_ID is not set - cannot list templates.');
   }
 
-  // ---- 5. Does the hardcoded OTP template line up? -----------------------
+  // ---- 4. Does the hardcoded OTP template line up? -----------------------
   console.log(`\n  The code sends template name "${OTP_TEMPLATE}" (whatsappService.ts WHATSAPP_TEMPLATES.OTP)`);
   console.log('  with language "en" and exactly 2 body params: {{1}} = code, {{2}} = TTL minutes.');
-  if (wabaId) {
+
+  // Send is gated on this outcome: firing at Meta with an unapproved or
+  // mis-shaped template just burns the customer's 45s resend cooldown and
+  // proves nothing. Nothing is sent until the template is confirmed usable.
+  let templateReady = false;
+  let templateDetail = 'template inventory unavailable (WHATSAPP_BUSINESS_ACCOUNT_ID not set)';
+
+  if (!wabaId) {
+    line(false, 'WHATSAPP_BUSINESS_ACCOUNT_ID', 'not set — cannot verify the template, so --send is blocked');
+  } else {
     const tpl = await api(`/${wabaId}/message_templates?fields=name,status,language,parameter_count`);
-    const match = (tpl.json?.data || []).find((t) => t.name === OTP_TEMPLATE);
+    const list = tpl.json?.data || [];
+    const match = list.find((t) => t.name === OTP_TEMPLATE);
     if (!match) {
-      line(false, `Template "${OTP_TEMPLATE}" exists`, 'no template with that exact name - OTP sends WILL fail');
+      line(false, `Template "${OTP_TEMPLATE}" exists`, 'no template with that exact name');
+      templateDetail =
+        `No template named "${OTP_TEMPLATE}". Approved templates on this account: ` +
+        (list.length ? list.map((t) => `"${t.name}" (${t.status})`).join(', ') : 'none listed');
     } else {
-      line(match.status === 'APPROVED', `Template "${OTP_TEMPLATE}" is APPROVED`, `status=${match.status} lang=${match.language} params=${match.parameter_count}`);
-      if (Number(match.parameter_count) !== 2) {
-        console.log(`        WARNING: template declares ${match.parameter_count} variable(s); the code sends 2.`);
-      }
-      if (match.language !== 'en') {
-        console.log(`        WARNING: template language is "${match.language}"; the code sends "en".`);
+      const approved = match.status === 'APPROVED';
+      line(approved, `Template "${OTP_TEMPLATE}" is APPROVED`, `status=${match.status} lang=${match.language} params=${match.parameter_count}`);
+      const problems = [];
+      if (!approved) problems.push(`status is ${match.status}, not APPROVED`);
+      if (Number(match.parameter_count) !== 2) problems.push(`declares ${match.parameter_count} variables, code sends 2`);
+      if (match.language !== 'en') problems.push(`language is "${match.language}", code sends "en"`);
+      if (problems.length) {
+        templateDetail = `Template "${OTP_TEMPLATE}" is not usable: ${problems.join('; ')}`;
+        console.log(`        BLOCKING: ${templateDetail}`);
+      } else {
+        templateReady = true;
+        templateDetail = `${OTP_TEMPLATE} approved, en, 2 variables`;
       }
     }
   }
 
   // ---- 6. Optional real send ---------------------------------------------
   if (send) {
-    if (!testRecipient) {
+    if (!templateReady) {
+      console.log('\n  NOT SENDING. --send requires a confirmed, APPROVED template first.');
+      console.log(`  Reason: ${templateDetail}`);
+      console.log('  Set WHATSAPP_BUSINESS_ACCOUNT_ID, fix the template in Meta Business Manager,');
+      console.log('  then re-run. Nothing was sent and no cooldown was consumed.');
+      process.exitCode = 1;
+    } else if (!testRecipient) {
       line(false, 'ADMIN_WHATSAPP_NUMBER', 'not set - refusing to guess a recipient');
+      process.exitCode = 1;
     } else {
       const res = await api(`/${phoneId}/messages`, {
         method: 'POST',
@@ -168,6 +194,7 @@ async function main() {
     }
   } else {
     console.log('\n  Re-run with --send to deliver one real test message to ADMIN_WHATSAPP_NUMBER.');
+    console.log('  (--send refuses to fire unless the template above is APPROVED and correctly shaped.)');
   }
 
   void tokenOk;
