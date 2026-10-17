@@ -225,6 +225,37 @@ async function runBaseline() {
   }
 }
 
+/**
+ * Turn a driver error into something actionable. "password authentication
+ * failed" and "getaddrinfo ENOTFOUND" need completely different fixes, and the
+ * raw pg message does not make that obvious.
+ */
+function classifyConnectionError(err) {
+  const msg = String(err?.message || err);
+  if (/password authentication failed|no pg_hba\.conf entry|authentication/i.test(msg)) {
+    return [
+      'AUTHENTICATED AS, BUT REJECTED. The host is reachable and the credentials are wrong.',
+      '',
+      'Supabase does NOT accept the service-role key as a database password — that key is',
+      'for the REST API only. Use the project database password instead:',
+      '  Supabase dashboard -> Project Settings -> Database -> Reset database password',
+      '  (or the password from the original project-setup email)',
+      '',
+      'Then set SUPABASE_DB_PASSWORD (or DATABASE_URL) in backend/.env and re-run.',
+    ].join('\n');
+  }
+  if (/ENOTFOUND|EAI_AGAIN/i.test(msg)) {
+    return 'HOST NOT RESOLVABLE. Check the project ref in SUPABASE_URL.';
+  }
+  if (/ECONNREFUSED/i.test(msg)) {
+    return 'CONNECTION REFUSED. Supabase direct connections are TCP/5432 only.';
+  }
+  if (/timeout|ETIMEDOUT/i.test(msg)) {
+    return 'TIMED OUT reaching the database. Likely a firewall blocking port 5432 outbound.';
+  }
+  return msg;
+}
+
 async function main() {
   loadDotEnv();
 
@@ -316,6 +347,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(err.message);
+  console.error(classifyConnectionError(err));
   process.exit(1);
 });
