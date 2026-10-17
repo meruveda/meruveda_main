@@ -43,7 +43,7 @@ export const config = {
   port: process.env.PORT || 5000,
   nodeEnv: process.env.NODE_ENV || 'development',
   supabaseUrl: process.env.SUPABASE_URL || '',
-  supabaseServiceKey: process.env.SUPABASE_SERVICE_KEY || '',
+  supabaseServiceKey: process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '',
   jwtSecret: process.env.JWT_SECRET,
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '30d',
   shiprocketTestMode: process.env.SHIPROCKET_TEST_MODE === 'true',
@@ -85,10 +85,24 @@ export const config = {
   // Composite supply rule suggests shipping is taxable, defaulting to false.
   shippingIsTaxable: process.env.SHIPPING_IS_TAXABLE === 'true',
   // ---- WhatsApp Cloud API (Meta) ----
-  whatsappApiToken: process.env.WHATSAPP_API_TOKEN || '',
+  // Each of these accepts two spellings so a .env written against either the
+  // original names or the shorter documented ones works with no code change.
+  // The first non-empty value wins; the legacy name is checked first because it
+  // is what already running deployments set.
+  whatsappApiToken: process.env.WHATSAPP_API_TOKEN || process.env.WHATSAPP_TOKEN || '',
   whatsappPhoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || '',
   whatsappBusinessAccountId: process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || '',
   whatsappWebhookVerifyToken: process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || '',
+  // Template names + language for the three transactional sends. A template
+  // name must match an APPROVED template in Meta exactly, including language.
+  whatsappOtpTemplateName: (process.env.WHATSAPP_OTP_TEMPLATE_NAME || '').trim(),
+  whatsappOrderTemplateName: (process.env.WHATSAPP_ORDER_TEMPLATE_NAME || '').trim(),
+  whatsappReviewTemplateName: (process.env.WHATSAPP_REVIEW_TEMPLATE_NAME || '').trim(),
+  whatsappTemplateLang: (process.env.WHATSAPP_TEMPLATE_LANG || 'en').trim(),
+  // When true (or when no token is configured), sends are logged instead of
+  // dispatched and the OTP is printed to the server console. Never enables
+  // itself in production — see the devOtp gate in otpService.
+  whatsappDryRun: process.env.WHATSAPP_DRY_RUN === 'true',
   // Meta App Dashboard > Settings > Basic > App Secret. Used to verify the
   // X-Hub-Signature-256 header on inbound webhook POSTs.
   whatsappAppSecret: process.env.WHATSAPP_APP_SECRET || '',
@@ -125,7 +139,8 @@ export const config = {
   // Server-side pepper for OTP digests (src/utils/otpHash.ts). Must never be
   // sent to a client or stored in the database. Changing it invalidates every
   // outstanding OTP, which is acceptable because they live 5 minutes.
-  otpHashPepper: process.env.OTP_HASH_PEPPER || '',
+  // Accepts either spelling; OTP_HASH_PEPPER is the deployed name.
+  otpHashPepper: process.env.OTP_HASH_PEPPER || process.env.OTP_HASH_SECRET || '',
 
   // ---- Business identity printed on the tax invoice ----
   // Read from env only — never commit real values. `GSTIN` is the legacy name
@@ -228,7 +243,7 @@ if (nodeEnv === 'production') {
   }
 
   // Database.
-  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY) {
+  if (!process.env.SUPABASE_URL || !(process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY)) {
     fatal.push('SUPABASE_URL + SUPABASE_SERVICE_KEY — every read/write goes through these');
   }
 

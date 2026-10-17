@@ -1,32 +1,38 @@
 /**
- * Customer reviews — a static, human-curated list.
+ * Customer reviews — static, human-curated, loaded from reviews.json.
  *
- * ONLY add reviews from real customers who gave permission to publish them.
- * Do not invent names, cities, ratings or review text — not here, not in tests,
- * not in fixtures, not in docs. A fabricated review is a false statement about
- * a real business and it is not worth the page it sits on.
+ * The data lives in ./reviews.json so it can be edited without touching code,
+ * and so a build check can inspect it directly.
  *
- * This file intentionally ships EMPTY. The product page shows a "Be the first
- * to review" state, the home page hides its reviews section, and the
- * aggregateRating structured data is omitted entirely, until real entries are
- * added here. Empty is a correct, honest state — please keep it that way rather
- * than filling it in with something invented.
+ * RULE, unchanged and non-negotiable: ONLY add reviews from real customers who
+ * gave permission to publish them. Do not invent names, cities, ratings, dates
+ * or review text — not here, not in tests, not in fixtures. A fabricated review
+ * is a false statement about a real business.
  *
- * How to add a real one:
- *   - `productSlug`: the product's slug, or the literal "all" to show it on
- *     every product page as well.
- *   - `rating`: an integer 1-5. Every rating is displayed; none are hidden and
- *     none are filtered out, because a review wall that hides the bad reviews
- *     is marketing, not evidence.
+ * The shipped file holds an empty array plus two entries flagged
+ * "placeholder": true. Those are layout fixtures only:
+ *   - they are filtered out of every rendered section and out of aggregateRating
+ *   - `npm run build` in production FAILS while any placeholder is present
+ *     (see scripts/check-reviews.mjs)
+ * So "no real reviews yet" remains the visible, honest state.
+ *
+ * How to add a real one to reviews.json:
+ *   - `productId`: the product id/slug, or the literal "all" to show it on every
+ *     product page as well.
+ *   - `rating`: an integer 1-5. Every rating is displayed; none are hidden or
+ *     filtered out, because a review wall that hides the bad reviews is
+ *     marketing, not evidence.
  *   - `date`: ISO 8601 (YYYY-MM-DD), the date the customer gave the review.
  *   - `verified`: true only when we have confirmed they are a real customer.
- *   - `source`: optional provenance, e.g. 'whatsapp', 'email', 'in-store'.
+ *   - `source`: optional provenance, e.g. "whatsapp", "email", "in-store".
+ *   - Do NOT set `placeholder`. Production builds reject it.
  */
+import raw from './reviews.json';
 
 export interface Review {
   id: string;
-  /** Product slug, or "all" to appear on every product page. */
-  productSlug: string;
+  /** Product id/slug, or "all" to appear on every product page. */
+  productId: string;
   name: string;
   city?: string;
   /** Integer 1-5. */
@@ -37,30 +43,37 @@ export interface Review {
   date: string;
   verified?: boolean;
   source?: string;
+  /** Layout fixture. Excluded from render + structured data; fails a prod build. */
+  placeholder?: boolean;
 }
 
-// EXAMPLE — DELETE THIS COMMENT BLOCK WHEN YOU ADD A REAL ENTRY.
-// This is illustrative only. Do NOT copy it into the array below, and do not
-// reuse this name, city, rating or text — every field here is fake.
-// {
-//   id: 'r-example-do-not-use',
-//   productSlug: 'ashwagandha-capsules',
-//   name: 'EXAMPLE NAME — replace with the real customer',
-//   city: 'EXAMPLE CITY — replace or omit',
-//   rating: 5,
-//   title: 'EXAMPLE TITLE — replace or omit',
-//   text: 'EXAMPLE REVIEW TEXT — replace with what the customer actually wrote.',
-//   date: '2026-01-01',
-//   verified: true,
-//   source: 'whatsapp',
-// },
+interface ReviewFile {
+  _comment?: string;
+  reviews?: Array<Omit<Review, 'productId'> & { productId?: string; productSlug?: string }>;
+}
 
-/** Real, permissioned customer reviews. Currently none. */
-export const reviews: Review[] = [];
+const file = raw as ReviewFile;
 
-/** Reviews for one product, including the site-wide ("all") ones. */
-export function reviewsForProduct(slug: string): Review[] {
-  return reviews.filter((r) => r.productSlug === slug || r.productSlug === 'all');
+/**
+ * Real, permissioned reviews only. Placeholder fixtures are dropped here, once,
+ * so no render path has to remember to filter them.
+ */
+export const reviews: Review[] = (file.reviews ?? [])
+  .filter((r) => !r.placeholder)
+  .map((r) => ({ ...r, productId: r.productId ?? r.productSlug ?? 'all' }) as Review);
+
+/** Placeholder count, surfaced by the build check. Not exported to the UI. */
+export const placeholderCount = (file.reviews ?? []).filter((r) => r.placeholder).length;
+
+/**
+ * Reviews for one product, including the site-wide ("all") ones.
+ *
+ * `source` is injectable so the filtering rule can be unit tested against a
+ * fixture list without mutating the bundled data. Production callers pass one
+ * argument and get the real reviews.
+ */
+export function reviewsForProduct(slug: string, source: Review[] = reviews): Review[] {
+  return source.filter((r) => r.productId === slug || r.productId === 'all');
 }
 
 export type RatingBreakdown = Record<1 | 2 | 3 | 4 | 5, number>;

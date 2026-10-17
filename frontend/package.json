@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "node scripts/check-reviews.cjs --strict && next build",
+    "check:reviews": "node scripts/check-reviews.cjs",
     "start": "next start",
     "lint": "eslint . --report-unused-disable-directives --no-error-on-unmatched-pattern",
     "test": "vitest run"

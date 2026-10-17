@@ -98,7 +98,7 @@ function getHomepageReviews() {
     .map((r) => ({
       text: r.text,
       author: r.name,
-      product: r.productSlug === 'all' ? '' : r.productSlug,
+      product: r.productId === 'all' ? '' : r.productId,
       rating: r.rating,
       verified: r.verified === true,
     }));

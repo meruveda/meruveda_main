@@ -7,15 +7,15 @@ import { supabase } from '../database/supabase';
  * All sends are best-effort: a failure is logged and swallowed so that an
  * OTP / payment / order flow can never be broken by a WhatsApp outage.
  *
- * Template names below MUST match the ones approved in Meta Business Manager:
- *   order_confirmation, order_shipped, order_delivered, order_cancelled,
- *   invoice_shared, invoice_with_document, otp_verification, welcome,
- *   shipping_update, review_request
+ * Template names resolve from the environment so a .env written for one Meta
+ * account works unchanged against another; the literals are only the fallback.
+ *
+ * A template name must match an APPROVED template in Meta exactly, and so must the
  */
 export const WHATSAPP_TEMPLATES = {
-  OTP: 'otp_verification',
+  OTP: config.whatsappOtpTemplateName || 'otp_verification',
   WELCOME: 'welcome',
-  ORDER_CONFIRMATION: 'order_confirmation',
+  ORDER_CONFIRMATION: config.whatsappOrderTemplateName || 'order_confirmation',
   INVOICE_SHARED: 'invoice_shared',
   /**
    * Business-initiated send with an attachment. Required for invoices: outside
@@ -29,7 +29,7 @@ export const WHATSAPP_TEMPLATES = {
   SHIPPING_UPDATE: 'shipping_update',
   ORDER_DELIVERED: 'order_delivered',
   ORDER_CANCELLED: 'order_cancelled',
-  REVIEW_REQUEST: 'review_request',
+  REVIEW_REQUEST: config.whatsappReviewTemplateName || 'review_request',
 } as const;
 
 export type WhatsappTemplate = (typeof WHATSAPP_TEMPLATES)[keyof typeof WHATSAPP_TEMPLATES];
@@ -195,6 +195,17 @@ export async function sendTemplate(
   const phone = normalizePhone(to);
   if (!phone || !isWhatsappConfigured()) return false;
 
+  // Dry run: log the exact payload and report success without calling Meta.
+  // Used for local development so a real OTP can be exercised without spending
+  // message quota. Never a substitute for a real send in production.
+  if (config.whatsappDryRun) {
+    console.log(
+      `[WhatsApp] DRY RUN — would send template "${templateName}" to ${phone} ` +
+        `with params ${JSON.stringify(params)}`
+    );
+    return true;
+  }
+
   const components: any[] = [];
   if (params.length > 0) {
     components.push({
@@ -210,7 +221,7 @@ export async function sendTemplate(
       type: 'template',
       template: {
         name: templateName,
-        language: { code: 'en' },
+        language: { code: config.whatsappTemplateLang || 'en' },
         ...(components.length ? { components } : {}),
       },
     });
