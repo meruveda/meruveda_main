@@ -78,6 +78,7 @@ import productRoutes from './routes/productRoutes';
 import orderRoutes from './routes/orderRoutes';
 import cartRoutes from './routes/cartRoutes';
 import wishlistRoutes from './routes/wishlistRoutes';
+import addressRoutes from './routes/addressRoutes';
 import categoryRoutes from './routes/categoryRoutes';
 import settingsRoutes from './routes/settingsRoutes';
 
@@ -105,6 +106,7 @@ app.use('/api/products', productRoutes);
 app.use('/api/orders', orderRoutes);
 app.use('/api/cart', cartRoutes);
 app.use('/api/wishlist', wishlistRoutes);
+app.use('/api/addresses', addressRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/customers', customerRoutes);

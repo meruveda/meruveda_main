@@ -79,16 +79,125 @@ export function formatAddress(a: AccountAddress): string {
 
 // ----------------------------------------------------------------- addresses
 
+// --------------------------------------------------------------- address map
+//
+// The API stores an address in `user_addresses`, whose shape is
+//   id, user_id, title, first_name, last_name, phone, street_address, apartment,
+//   city, state, postal_code, country, is_default, created_at, updated_at
+// while the UI works in AccountAddress. These two functions are the only place
+// that knows the difference.
+
+interface DbAddress {
+  id: string;
+  title?: string | null;
+  first_name: string;
+  last_name?: string | null;
+  phone: string;
+  street_address: string;
+  apartment?: string | null;
+  city: string;
+  state: string;
+  postal_code: string;
+  country?: string | null;
+  is_default: boolean;
+  created_at?: string;
+}
+
+function dbToAccount(d: DbAddress): AccountAddress {
+  const [first = "", ...rest] = String(`${d.first_name || ""} ${d.last_name || ""}`.trim()).split(/\s+/);
+  const line = String(d.street_address || "");
+  // Best-effort split back into house/street for the two-field form.
+  const cut = line.indexOf(",");
+  const houseFlat = cut === -1 ? line : line.slice(0, cut).trim();
+  const street = cut === -1 ? "" : line.slice(cut + 1).trim();
+  return {
+    id: d.id,
+    fullName: `${d.first_name || ""}${(d.last_name || "") ? " " + d.last_name : ""}`.trim() || first,
+    houseFlat,
+    street,
+    landmark: d.apartment || undefined,
+    city: d.city || "",
+    state: d.state || "",
+    pincode: d.postal_code || "",
+    phone: d.phone || "",
+    type: (d.title as AddressType) || "home",
+    isDefault: Boolean(d.is_default),
+    createdAt: d.created_at,
+  };
+}
+
+function accountToDb(a: Partial<AccountAddress>): Record<string, unknown> {
+  const parts = String(a.fullName || "").trim().split(/\s+/);
+  const street = [a.houseFlat, a.street].filter(Boolean).join(", ");
+  return {
+    title: a.type || "home",
+    first_name: parts[0] || "",
+    last_name: parts.slice(1).join(" "),
+    phone: a.phone || "",
+    street_address: street,
+    apartment: a.landmark || null,
+    city: a.city || "",
+    state: a.state || "",
+    postal_code: a.pincode || "",
+    country: "India",
+    is_default: Boolean(a.isDefault),
+  };
+}
+
+/**
+ * The address book, backed by the API.
+ *
+ * Every method falls back to the previous localStorage book if the API is
+ * unreachable, so a backend outage degrades the account page rather than
+ * emptying the customer's addresses. The localStorage mirror is kept in sync
+ * because checkout still reads `meruveda_addresses`.
+ */
 export const addressService = {
-  list(): AccountAddress[] {
+  async list(): Promise<AccountAddress[]> {
+    try {
+      const { data } = await axiosInstance.get("/addresses");
+      const items = (data?.addresses ?? []).map(dbToAccount);
+      if (items.length) {
+        addressService.saveAll(items);
+        return items;
+      }
+      // An empty server-side book is authoritative: do NOT resurrect local rows.
+      return [];
+    } catch {
+      return addressService.listLocal();
+    }
+  },
+
+  async create(input: Omit<AccountAddress, "id">): Promise<AccountAddress> {
+    const { data } = await axiosInstance.post("/addresses", accountToDb(input));
+    const created = dbToAccount(data.address);
+    await addressService.list();
+    return created;
+  },
+
+  async update(id: string, patch: Partial<AccountAddress>): Promise<AccountAddress[]> {
+    await axiosInstance.patch(`/addresses/${id}`, accountToDb(patch));
+    return addressService.list();
+  },
+
+  async remove(id: string): Promise<AccountAddress[]> {
+    await axiosInstance.delete(`/addresses/${id}`);
+    return addressService.list();
+  },
+
+  async setDefault(id: string): Promise<AccountAddress[]> {
+    await axiosInstance.post(`/addresses/${id}/default`);
+    return addressService.list();
+  },
+
+  /** The pre-API, localStorage-only book. Used only as an offline fallback. */
+  listLocal(): AccountAddress[] {
     const raw = readLS<Array<AccountAddress | LegacyAddress>>(LS.addresses, []);
-    // Migrate legacy keys once.
     if (raw.length === 0 && typeof window !== "undefined") {
       const legacy = localStorage.getItem("meruveda_addresses");
       if (legacy) {
         try {
-          const items = JSON.parse(legacy) as LegacyAddress[];
-          const migrated = items.map(legacyToAccount);
+          const migrated = (JSON.parse(legacy) as LegacyAddress[]).map(legacyToAccount);
           writeLS(LS.addresses, migrated);
           return migrated;
         } catch {
@@ -102,9 +211,10 @@ export const addressService = {
         : legacyToAccount(a as LegacyAddress),
     );
   },
+
+  /** Mirror to localStorage so checkout keeps reading a saved address. */
   saveAll(items: AccountAddress[]) {
     writeLS(LS.addresses, items);
-    // Keep the old key in sync for checkout code that still reads it.
     if (typeof window !== "undefined") {
       localStorage.setItem(
         "meruveda_addresses",
@@ -124,34 +234,7 @@ export const addressService = {
       );
     }
   },
-  create(input: Omit<AccountAddress, "id">): AccountAddress {
-    const items = addressService.list();
-    const created: AccountAddress = { ...input, id: uid("addr"), isDefault: items.length === 0 ? true : input.isDefault };
-    const next = created.isDefault ? items.map((a) => ({ ...a, isDefault: false })) : items;
-    const updated = [...next, created];
-    addressService.saveAll(updated);
-    return created;
-  },
-  update(id: string, patch: Partial<AccountAddress>): AccountAddress[] {
-    const items = addressService.list();
-    const next = items.map((a) => {
-      if (a.id !== id) return patch.isDefault ? { ...a, isDefault: false } : a;
-      return { ...a, ...patch };
-    });
-    addressService.saveAll(next);
-    return next;
-  },
-  remove(id: string): AccountAddress[] {
-    const items = addressService.list().filter((a) => a.id !== id);
-    if (items.length > 0 && !items.some((a) => a.isDefault)) items[0].isDefault = true;
-    addressService.saveAll(items);
-    return items;
-  },
-  setDefault(id: string): AccountAddress[] {
-    return addressService.update(id, { isDefault: true });
-  },
 };
-
 // -------------------------------------------------------------------- orders
 
 export function normalizeOrderStatus(status: unknown): string {

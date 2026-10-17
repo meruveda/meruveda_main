@@ -1,27 +1,4 @@
 {
-  "_comment": "Customer reviews are static and human-curated. ONLY add a review from a real customer who gave permission to publish it. Never invent a name, city, rating, date or text. Entries marked \"placeholder\": true are layout fixtures: they are excluded from every rendered section and from aggregateRating markup, and the PRODUCTION BUILD FAILS if any placeholder is still present. Production builds must contain only real, permissioned entries.",
-  "reviews": [
-    {
-      "id": "placeholder-1",
-      "productId": "all",
-      "name": "PLACEHOLDER NAME",
-      "city": "PLACEHOLDER CITY",
-      "rating": 5,
-      "text": "PLACEHOLDER REVIEW TEXT — layout fixture only, never shown to customers and never indexed.",
-      "date": "2026-01-01",
-      "verified": false,
-      "placeholder": true
-    },
-    {
-      "id": "placeholder-2",
-      "productId": "all",
-      "name": "PLACEHOLDER NAME",
-      "city": "PLACEHOLDER CITY",
-      "rating": 4,
-      "text": "PLACEHOLDER REVIEW TEXT — layout fixture only, never shown to customers and never indexed.",
-      "date": "2026-01-01",
-      "verified": false,
-      "placeholder": true
-    }
-  ]
+  "_comment": "Customer reviews are static and human-curated. ONLY add a review from a real customer who gave permission to publish it. Never invent a name, city, rating, date or review text. An empty reviews array is the correct, honest state: the product page shows a 'Be the first to review' empty state, the home page hides its reviews section, and aggregateRating structured data is omitted entirely. Layout fixtures may be added with \"placeholder\": true for local work only — they are filtered out of every render and npm run build REFUSES a production build while any remain.",
+  "reviews": []
 }

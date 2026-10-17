@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Briefcase, Home, MapPin, Pencil, Plus } from "lucide-react";
 import { addressService, formatAddress } from "@/services/accountService";
 import type { AccountAddress, AddressType } from "@/types/account";
@@ -32,9 +32,17 @@ export default function AddressesPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [confirmId, setConfirmId] = useState<string | null>(null);
 
-  useEffect(() => {
-    setAddresses(addressService.list());
+  const load = useCallback(async () => {
+    try {
+      setAddresses(await addressService.list());
+    } catch (err) {
+      setNotice("Could not load your addresses.");
+    }
   }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   const openAdd = () => {
     setEditingId(null);
@@ -78,7 +86,7 @@ export default function AddressesPage() {
     return Object.keys(e).length === 0;
   };
 
-  const submit = (ev: React.FormEvent) => {
+  const submit = async (ev: React.FormEvent) => {
     ev.preventDefault();
     if (!validate()) return;
     const payload = {
@@ -94,11 +102,11 @@ export default function AddressesPage() {
       isDefault: form.isDefault,
     };
     if (editingId) {
-      setAddresses(addressService.update(editingId, payload));
+      setAddresses(await addressService.update(editingId, payload));
       setNotice("Address updated.");
     } else {
-      addressService.create(payload);
-      setAddresses(addressService.list());
+      await addressService.create(payload);
+      setAddresses(await addressService.list());
       setNotice("New address saved.");
     }
     setFormOpen(false);
@@ -106,9 +114,9 @@ export default function AddressesPage() {
     setTimeout(() => setNotice(null), 3000);
   };
 
-  const confirmDelete = () => {
+  const confirmDelete = async () => {
     if (!confirmId) return;
-    setAddresses(addressService.remove(confirmId));
+    setAddresses(await addressService.remove(confirmId));
     setConfirmId(null);
     setNotice("Address deleted.");
     setTimeout(() => setNotice(null), 3000);
@@ -244,7 +252,7 @@ export default function AddressesPage() {
               </div>
               <div className="mt-5 pt-4 border-t border-gray-100 flex items-center justify-between gap-2 flex-wrap">
                 {!addr.isDefault ? (
-                  <button onClick={() => setAddresses(addressService.setDefault(addr.id))} className="text-xs text-gold hover:underline font-bold">
+                  <button onClick={async () => setAddresses(await addressService.setDefault(addr.id))} className="text-xs text-gold hover:underline font-bold">
                     Set as Default
                   </button>
                 ) : (

@@ -1,4 +1,5 @@
 import { supabase } from '../database/supabase';
+import { addressService } from './addressService';
 import { shiprocketOrderService } from './shiprocket/order.service';
 import { shiprocketTrackingService } from './shiprocket/tracking.service';
 import { shiprocketWebhookService } from './shiprocket/webhook.service';
@@ -304,6 +305,12 @@ export const orderService = {
         // Retry via POST /orders/:id/push-shiprocket or the failed-push cron.
       }
     }
+
+    // File the shipping address in the customer's address book so the next
+    // order does not have to be typed again. Deliberately after the order row
+    // exists and deliberately non-fatal: captureFromOrder never throws, so a
+    // missing address book can never fail an order that was already accepted.
+    await addressService.captureFromOrder(userId, order.shipping_address);
 
     return order;
   },
