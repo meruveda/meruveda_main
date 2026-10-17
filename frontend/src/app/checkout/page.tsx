@@ -1099,9 +1099,14 @@ export default function CheckoutPage() {
               Contact Details
             </h2>
 
-            {/* OTP DISABLED — original: <form onSubmit={handleSendOtp}>. Enter-key
-                submit neutralized while the OTP feature is commented out. */}
-            <form onSubmit={(e) => e.preventDefault()} className="space-y-4">
+            {/* The form only owns submission while the OTP flow is active: the
+                Send button is type="submit", so Enter in a text field sends the
+                code. With OTP off there is no submit button in this form and
+                Enter must not reload the page. */}
+            <form
+              onSubmit={OTP_ENABLED ? handleSendOtp : (e) => e.preventDefault()}
+              className="space-y-4"
+            >
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
                   <label className={labelClass}>Full Name</label>
@@ -1127,29 +1132,21 @@ export default function CheckoutPage() {
                       className={`${inputClass} ${mobileError ? "border-red-400" : ""}`}
                       placeholder="98765 43210"
                     />
-                    {/* OTP DISABLED TEMPORARILY - re-enable by setting OTP_ENABLED=true.
-                        When the flag is off, the Sign up button below runs the no-OTP
-                        quick-login flow (login-if-exists / auto-register). */}
+                    {/* WhatsApp OTP entry point. Requires OTP_ENABLED=true on BOTH sides:
+                NEXT_PUBLIC_OTP_ENABLED (this file) and OTP_ENABLED (backend,
+                which 503s /auth/otp/* when off). When off, the Sign up button
+                runs the no-OTP quick-login flow instead. */}
                     {OTP_ENABLED ? (
-                      /*
-                      {!otpVerified && (
+                      !otpVerified && (
                         <button
                           type="submit"
                           disabled={isSendingOtp || (otpResendIn > 0 && otpSent)}
-                          className="shrink-0 bg-deep-purple text-white px-4 text-xs font-bold rounded-lg hover:bg-deep-purple/90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+                          className="shrink-0 bg-deep-purple text-white px-4 py-2 text-xs font-bold rounded-lg hover:bg-deep-purple/90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
                         >
                           {isSendingOtp ? <Loader2 size={14} className="animate-spin" /> : <Smartphone size={14} />}
                           {otpSent ? "Resend" : "Send OTP"}
                         </button>
-                      )}
-                      */
-                      <span
-                        title="Verification codes are temporarily unavailable"
-                        className="shrink-0 bg-gray-100 text-gray-400 px-4 py-2 text-xs font-bold rounded-lg flex items-center gap-1.5 cursor-not-allowed"
-                      >
-                        <Smartphone size={14} />
-                        Unavailable
-                      </span>
+                      )
                     ) : (
                       <button
                         type="button"
@@ -1172,9 +1169,6 @@ export default function CheckoutPage() {
                 </div>
               </div>
 
-              {/* OTP DISABLED — OTP entry / Verify / Resend block commented out
-                  (kept below for re-enable). */}
-              {/*
               {otpSent && !otpVerified && (
                 <div className="border border-gold/30 bg-gold/5 rounded-xl p-4 space-y-3">
                   <div className="flex flex-col sm:flex-row sm:items-end gap-3">
@@ -1225,7 +1219,6 @@ export default function CheckoutPage() {
                   </div>
                 </div>
               )}
-              */}
 
               {otpError && <p className="text-[11px] text-red-500 font-medium">{otpError}</p>}
 

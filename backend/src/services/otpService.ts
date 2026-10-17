@@ -65,14 +65,16 @@ export const otpService = {
     const code = String(crypto.randomInt(100000, 1000000));
     const expiresAt = new Date(Date.now() + OTP_TTL_MINUTES * 60 * 1000).toISOString();
 
-    const { error } = await supabase.from('otps').insert({
+    const { data: inserted, error } = await supabase.from('otps').insert({
       phone,
       code_hash: hashOtpCode(code, phone),
       purpose: PURPOSE,
       attempts: 0,
       max_attempts: OTP_MAX_ATTEMPTS,
       expires_at: expiresAt,
-    });
+    })
+      .select('id')
+      .single();
     if (error) throw error;
 
     const delivered = await sendOnce({
@@ -85,9 +87,30 @@ export const otpService = {
     });
 
     if (!delivered) {
-      // Surface a clear message when WhatsApp credentials are missing/unapproved so
-      // the checkout team can see exactly what is misconfigured.
-      console.warn('[OTP] WhatsApp delivery failed — check WHATSAPP_* env vars and Meta template approval.');
+      // Meta rejected the message (bad token, unapproved template, malformed
+      // phone, rate limit) or WhatsApp is not configured at all. Reporting
+      // success here would show the customer "we sent a code" for a message that
+      // will never arrive, and the failure would only surface as an unexplained
+      // timeout at verify time. Fail loudly instead.
+      //
+      // The stored row is rolled back too: the code never left the building, so
+      // leaving it would make the resend cooldown block a retry that could
+      // actually succeed.
+      await supabase.from('otps').delete().eq('id', inserted.id).then(
+        () => undefined,
+        () => undefined
+      );
+      console.error(
+        '[OTP] WhatsApp delivery failed — the code was NOT sent. Check WHATSAPP_API_TOKEN, ' +
+          'WHATSAPP_PHONE_NUMBER_ID and that the Meta template is approved. ' +
+          'otpService.sendOtp is now returning 503 to the client.'
+      );
+      throw Object.assign(
+        new Error(
+          'We could not send the verification code on WhatsApp. Please check the number and try again.'
+        ),
+        { status: 503 }
+      );
     }
 
     return {

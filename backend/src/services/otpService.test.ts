@@ -19,12 +19,13 @@ type Row = Record<string, any>;
 interface Fake {
   inserts: Row[];
   updates: Row[];
+  deletes: number;
 }
 
 const originalFrom = (supabase as any).from;
 
 function installFake(t: any, rows: Row[] = []) {
-  const state: Fake = { inserts: [], updates: [] };
+  const state: Fake = { inserts: [], updates: [], deletes: 0 };
   let result = rows;
 
   (supabase as any).from = () => {
@@ -33,10 +34,21 @@ function installFake(t: any, rows: Row[] = []) {
       select: () => b,
       insert: (payload: any) => {
         state.inserts.push(...(Array.isArray(payload) ? payload : [payload]));
-        return Promise.resolve({ data: null, error: null });
+        const single = { id: 'otp-inserted' };
+        b._selectSingle = single;
+        return {
+          ...b,
+          select: () => ({
+            single: () => Promise.resolve({ data: single, error: null }),
+          }),
+        };
       },
       update: (payload: any) => {
         state.updates.push(payload);
+        return b;
+      },
+      delete: () => {
+        state.deletes += 1;
         return b;
       },
       eq: (col: string, val: any) => {
@@ -67,6 +79,44 @@ function installFake(t: any, rows: Row[] = []) {
 
 const PHONE = '918424819027';
 
+/**
+ * Stub the Graph API transport so delivery success/failure is deterministic and
+ * no test ever makes a real Meta call. whatsappService posts through global
+ * fetch, so intercepting it is enough.
+ */
+function stubMeta(t: any, accept: boolean) {
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (input: any, init: any) => {
+    const url = typeof input === 'string' ? input : input?.url;
+    if (typeof url === 'string' && url.includes('graph.facebook.com')) {
+      if (accept) {
+        return new Response(JSON.stringify({ messages: [{ id: 'wamid.TEST' }] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(
+        JSON.stringify({ error: { message: 'Template name does not exist', code: 132001, type: 'OAuthException' } }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    return real(input, init);
+  }) as any;
+  t.after(() => {
+    globalThis.fetch = real;
+  });
+}
+
+function configureWhatsapp(t: any) {
+  const before = { tok: config.whatsappApiToken, pid: config.whatsappPhoneNumberId };
+  (config as any).whatsappApiToken = 'EAAtest-token-not-real';
+  (config as any).whatsappPhoneNumberId = '1428537175270606';
+  t.after(() => {
+    (config as any).whatsappApiToken = before.tok;
+    (config as any).whatsappPhoneNumberId = before.pid;
+  });
+}
+
 function makeRow(over: Partial<Row> = {}): Row {
   return {
     id: 'otp-1',
@@ -90,6 +140,8 @@ test('sendOtp rejects a number that is too short', async (t) => {
 });
 
 test('sendOtp persists a hash and never the plaintext code', async (t) => {
+  configureWhatsapp(t);
+  stubMeta(t, true);
   const fake = installFake(t);
   const res = await otpService.sendOtp(PHONE);
 
@@ -109,6 +161,8 @@ test('sendOtp enforces the resend cooldown', async (t) => {
 });
 
 test('sendOtp allows a resend once the cooldown has elapsed', async (t) => {
+  configureWhatsapp(t);
+  stubMeta(t, true);
   const fake = installFake(t, [makeRow({ created_at: new Date(Date.now() - 120_000).toISOString() })]);
   const res = await otpService.sendOtp(PHONE);
   assert.ok(res.expiresInSeconds > 0);
@@ -175,6 +229,50 @@ test('an empty submission is rejected without touching the store', async (t) => 
   const fake = installFake(t, [makeRow()]);
   assert.equal((await otpService.verifyOtp(PHONE, '')).ok, false);
   assert.equal(fake.updates.length, 0);
+});
+
+// --- delivery failure must not look like success --------------------------
+
+test('a rejected WhatsApp send throws 503 instead of reporting success', async (t) => {
+  // No WhatsApp credentials configured => sendOnce returns false, exactly as it
+  // does when Meta rejects an unapproved template or an invalid token.
+  const fake = installFake(t);
+  const before = { t: config.whatsappApiToken, p: config.whatsappPhoneNumberId };
+  try {
+    (config as any).whatsappApiToken = '';
+    (config as any).whatsappPhoneNumberId = '';
+    await assert.rejects(
+      () => otpService.sendOtp(PHONE),
+      (err: any) => {
+        assert.equal(err.status, 503);
+        assert.match(err.message, /could not send the verification code/i);
+        return true;
+      }
+    );
+  } finally {
+    (config as any).whatsappApiToken = before.t;
+    (config as any).whatsappPhoneNumberId = before.p;
+  }
+  // A code the customer never received must not linger and burn the cooldown.
+  assert.equal(fake.deletes, 1, 'the undelivered OTP row must be rolled back');
+});
+
+test('Meta rejecting the template is reported as a failure, not a send', async (t) => {
+  // Credentials look valid, but Meta answers 400 "Template name does not exist".
+  // This is the failure that must never reach the customer as "we sent a code".
+  configureWhatsapp(t);
+  stubMeta(t, false);
+  const fake = installFake(t);
+
+  await assert.rejects(
+    () => otpService.sendOtp(PHONE),
+    (err: any) => {
+      assert.equal(err.status, 503);
+      return true;
+    }
+  );
+  assert.equal(fake.deletes, 1, 'the undelivered row must be rolled back');
+  assert.equal(fake.updates.length, 0, 'no partial state is written on a failed send');
 });
 
 // --- configuration guards -------------------------------------------------

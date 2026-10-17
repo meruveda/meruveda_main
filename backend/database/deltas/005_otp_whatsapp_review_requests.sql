@@ -59,3 +59,28 @@ CREATE INDEX IF NOT EXISTS idx_review_requests_status ON public.review_requests(
 -- 4. Saved profile fields for OTP-created customers (users.email already exists).
 ALTER TABLE public.users ADD COLUMN IF NOT EXISTS address JSONB;
 ALTER TABLE public.users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ;
+
+-- 5. Row Level Security: these three tables are server-only.
+--
+-- They hold mobile numbers, OTP digests and outbound message history. The app
+-- reaches Supabase exclusively through the backend service-role key, and no
+-- browser bundle contains a Supabase client, so no end user ever needs a direct
+-- policy on these tables.
+--
+-- Enabling RLS with NO policies is therefore the correct posture, not an
+-- omission: it makes every non-service role denied, so if an anon key is ever
+-- leaked or added to the frontend these tables stay unreadable. The
+-- service_role key bypasses RLS, which is exactly why the backend still works.
+--
+-- Verify afterwards:
+--   SELECT relname, relrowsecurity FROM pg_class
+--    WHERE relname IN ('otps','whatsapp_message_log','review_requests');
+ALTER TABLE public.otps ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.whatsapp_message_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.review_requests ENABLE ROW LEVEL SECURITY;
+
+-- A stray policy from an earlier manual attempt would silently re-open these
+-- tables, so drop the ones we know are wrong by name only.
+DROP POLICY IF EXISTS otps_public_read ON public.otps;
+DROP POLICY IF EXISTS whatsapp_log_public_read ON public.whatsapp_message_log;
+DROP POLICY IF EXISTS review_requests_public_read ON public.review_requests;

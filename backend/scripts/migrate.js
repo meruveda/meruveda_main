@@ -69,6 +69,7 @@ const INVENTORY = {
   ],
   '006_missing_columns.sql': ['orders.delivered_at', 'reviews.is_featured', 'reviews.reply'],
   '007_mobile_auth.sql': ['users.reset_password_token', 'users.reset_password_expires'],
+  // 008 is superseded by 006 (same two columns) and is an inert reference file.
   '008_reviews_is_featured.sql': ['reviews.is_featured', 'reviews.reply'],
   '009_page_views.sql': ['page_views', 'users.phone_verified'],
   '010_auto_invoice_shiprocket.sql': [
