@@ -37,29 +37,66 @@ function loadEnv() {
   }
 }
 
-/** SUPABASE_DB_URL wins; otherwise compose one from the discrete parts. */
+/**
+ * Build a Postgres connection string.
+ *
+ * Several naming conventions are accepted, in this precedence, because the
+ * project has used more than one over time and an operator should not have to
+ * guess which one this script expects:
+ *
+ *   1. A full URL:   SUPABASE_DB_URL, then DATABASE_URL, then DB_URL
+ *   2. A Supabase-specific set:  SUPABASE_DB_HOST / _PORT / _USER / _NAME / _PASSWORD
+ *   3. libpq standard (what `psql`, `pg_dump` and the Supabase CLI read):
+ *      PGHOST / PGPORT / PGUSER / PGPASSWORD / PGDATABASE
+ *   4. Generic:      DB_HOST / DB_PORT / DB_USER / DB_NAME / DB_PASSWORD
+ *
+ * In cases 2-4 the host defaults to db.<ref>.supabase.co derived from
+ * SUPABASE_URL, so a lone password is enough.
+ *
+ * NOTE: none of these is the service-role key. That key is a REST credential
+ * for PostgREST; Postgres rejects it as a password (verified: "password
+ * authentication failed for user postgres"). It cannot run DDL.
+ */
 function buildConnection() {
-  if (process.env.SUPABASE_DB_URL) return process.env.SUPABASE_DB_URL;
+  const full = process.env.SUPABASE_DB_URL || process.env.DATABASE_URL || process.env.DB_URL;
+  if (full) return full;
 
-  const password = process.env.SUPABASE_DB_PASSWORD;
+  const pick = (...names) => {
+    for (const n of names) {
+      const v = process.env[n];
+      if (v && v.trim()) return v.trim();
+    }
+    return '';
+  };
+
+  const password = pick('SUPABASE_DB_PASSWORD', 'PGPASSWORD', 'DB_PASSWORD', 'DB_PASS', 'POSTGRES_PASSWORD');
   if (!password) return null;
 
-  let host = process.env.SUPABASE_DB_HOST;
+  let host = pick('SUPABASE_DB_HOST', 'PGHOST', 'DB_HOST', 'POSTGRES_HOST');
   if (!host) {
     const ref = (process.env.SUPABASE_URL || '').match(/https:\/\/([a-z0-9]+)\./);
     if (!ref) return null;
     host = `db.${ref[1]}.supabase.co`;
   }
-  const port = process.env.SUPABASE_DB_PORT || '5432';
-  const user = process.env.SUPABASE_DB_USER || 'postgres';
-  const name = process.env.SUPABASE_DB_NAME || 'postgres';
+  const port = pick('SUPABASE_DB_PORT', 'PGPORT', 'DB_PORT') || '5432';
+  const user = pick('SUPABASE_DB_USER', 'PGUSER', 'DB_USER') || 'postgres';
+  const name = pick('SUPABASE_DB_NAME', 'PGDATABASE', 'DB_NAME') || 'postgres';
   return `postgresql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${name}`;
 }
 
+/** Names that, if present, are accepted as the connection. Used in error text. */
+function connectionEnvNames() {
+  return [
+    'SUPABASE_DB_URL', 'DATABASE_URL', 'DB_URL',
+    'SUPABASE_DB_PASSWORD', 'PGPASSWORD', 'DB_PASSWORD', 'DB_PASS', 'POSTGRES_PASSWORD',
+  ];
+}
+
 function missingEnv() {
-  if (process.env.SUPABASE_DB_URL) return [];
-  if (process.env.SUPABASE_DB_PASSWORD) return [];
-  return ['SUPABASE_DB_PASSWORD (or SUPABASE_DB_URL)'];
+  if (process.env.SUPABASE_DB_URL || process.env.DATABASE_URL || process.env.DB_URL) return [];
+  if (process.env.SUPABASE_DB_PASSWORD || process.env.PGPASSWORD || process.env.DB_PASSWORD ||
+      process.env.DB_PASS || process.env.POSTGRES_PASSWORD) return [];
+  return connectionEnvNames();
 }
 
 /** Strip comment lines so prose about DELETE does not trip the scanner. */
@@ -122,8 +159,11 @@ async function main() {
   const missing = missingEnv();
   if (missing.length) {
     printTable('PREFLIGHT', [
-      ['env', 'FAIL', `missing: ${missing.join(', ')}`],
-      ['how to fix', '', 'add it to backend/.env, then re-run npm run db:migrate:pending'],
+      ['connection', 'FAIL', 'no database password or URL found'],
+      ['accepted names', '', connectionEnvNames().join(', ')],
+      ['host / port / user / name', '', 'SUPABASE_DB_* then PG* then DB_* (default db.<ref>.supabase.co:5432/postgres)'],
+      ['not usable', '', 'SUPABASE_URL + the service-role key are REST-only and cannot run DDL'],
+      ['how to fix', '', 'add a password to backend/.env, then re-run npm run db:migrate:pending'],
     ]);
     console.log('\nNothing was read and nothing was written.');
     process.exit(1);
