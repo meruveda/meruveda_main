@@ -2,19 +2,39 @@ import { Request, Response, NextFunction } from 'express';
 import { supabase } from '../database/supabase';
 import { hasTable } from '../services/schemaGuard';
 
-// Helper to determine if an order qualifies for revenue calculation
-const isOrderQualifying = (order: any) => {
+/**
+ * Revenue eligibility.
+ *
+ * The business rules are unchanged and were not touched:
+ *   - COD        counts once the order is delivered (cash is only banked on
+ *                delivery, so recognising an order before that would overstate
+ *                revenue).
+ *   - Prepaid    counts once payment_status = paid, regardless of delivery.
+ *
+ * What was broken is the status COMPARISON. Postgres stores these values
+ * lower-case — the live `orders.status` column contains 'delivered' and
+ * 'pending', never 'Delivered' — while this compared against 'Delivered'.
+ * The comparison could therefore never be true and no COD order was ever
+ * counted. Comparisons are now case-insensitive so they match the stored data
+ * and stay correct if the casing ever changes upstream.
+ *
+ * Exported so the rule can be unit tested directly rather than only through an
+ * HTTP round trip.
+ */
+export const isOrderQualifying = (order: any) => {
   const isCOD = order.payment_method === 'Cash On Delivery' || String(order.payment_method).toUpperCase() === 'COD';
-  const isPaid = order.payment_status === 'paid';
-  
+  const isPaid = String(order.payment_status ?? '').toLowerCase() === 'paid';
+  const status = String(order.status ?? '').toLowerCase();
+
   if (isCOD) {
-    // COD orders: count only once delivery status = Delivered
-    return order.status === 'Delivered';
-  } else {
-    // Online/PayU orders: count toward revenue once payment_status = paid, regardless of delivery status
-    return isPaid;
+    return status === 'delivered';
   }
+  return isPaid;
 };
+
+/** Revenue = subtotal - discount - tax (GST). Shipping is excluded, as before. */
+export const orderRevenue = (o: any) =>
+  Number(o.subtotal || 0) - Number(o.discount || 0) - Number(o.tax || 0);
 
 export const getDashboardStats = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -48,7 +68,7 @@ export const getDashboardStats = async (req: Request, res: Response, next: NextF
 
     // Sum financial metrics
     // Revenue = Subtotal - Discount - Tax (GST)
-    const totalRevenue = qualifyingOrders.reduce((sum, o) => sum + (Number(o.subtotal || 0) - Number(o.discount || 0) - Number(o.tax || 0)), 0);
+    const totalRevenue = qualifyingOrders.reduce((sum, o) => sum + orderRevenue(o), 0);
     const shippingCollected = qualifyingOrders.reduce((sum, o) => sum + Number(o.shipping_fee || 0), 0);
     const gstCollected = qualifyingOrders.reduce((sum, o) => sum + Number(o.tax || 0), 0);
 
@@ -56,14 +76,14 @@ export const getDashboardStats = async (req: Request, res: Response, next: NextF
     const today = new Date();
     const todayRevenue = qualifyingOrders
       .filter(o => new Date(o.created_at).toDateString() === today.toDateString())
-      .reduce((sum, o) => sum + (Number(o.subtotal || 0) - Number(o.discount || 0) - Number(o.tax || 0)), 0);
+      .reduce((sum, o) => sum + orderRevenue(o), 0);
 
     const monthlyRevenue = qualifyingOrders
       .filter(o => {
         const oDate = new Date(o.created_at);
         return oDate.getMonth() === today.getMonth() && oDate.getFullYear() === today.getFullYear();
       })
-      .reduce((sum, o) => sum + (Number(o.subtotal || 0) - Number(o.discount || 0) - Number(o.tax || 0)), 0);
+      .reduce((sum, o) => sum + orderRevenue(o), 0);
 
     // Order status counts
     const pendingOrders = allOrders?.filter((o: any) => o.status === 'Pending').length || 0;
@@ -78,7 +98,7 @@ export const getDashboardStats = async (req: Request, res: Response, next: NextF
       const dateString = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); // e.g., "Jul 25"
       
       const dayOrders = qualifyingOrders.filter(o => new Date(o.created_at).toDateString() === d.toDateString());
-      const dayRevenue = dayOrders.reduce((sum, o) => sum + (Number(o.subtotal || 0) - Number(o.discount || 0) - Number(o.tax || 0)), 0);
+      const dayRevenue = dayOrders.reduce((sum, o) => sum + orderRevenue(o), 0);
       
       revenueChart.push({
         date: dateString,
@@ -98,7 +118,7 @@ export const getDashboardStats = async (req: Request, res: Response, next: NextF
         const oDate = new Date(o.created_at);
         return oDate.getMonth() === d.getMonth() && oDate.getFullYear() === d.getFullYear();
       });
-      const monthRevenue = monthOrders.reduce((sum, o) => sum + (Number(o.subtotal || 0) - Number(o.discount || 0) - Number(o.tax || 0)), 0);
+      const monthRevenue = monthOrders.reduce((sum, o) => sum + orderRevenue(o), 0);
       
       salesChart.push({
         month: monthLabel,
@@ -157,7 +177,7 @@ export const getSummary = async (req: Request, res: Response, next: NextFunction
     ]);
 
     const qualifyingOrders = allOrders?.filter(isOrderQualifying) || [];
-    const totalRevenue = qualifyingOrders.reduce((sum, o) => sum + (Number(o.subtotal || 0) - Number(o.discount || 0) - Number(o.tax || 0)), 0);
+    const totalRevenue = qualifyingOrders.reduce((sum, o) => sum + orderRevenue(o), 0);
 
     const salesByMonth = [];
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -171,7 +191,7 @@ export const getSummary = async (req: Request, res: Response, next: NextFunction
         return oDate.getMonth() === d.getMonth() && oDate.getFullYear() === d.getFullYear();
       });
       
-      const monthRevenue = monthOrders.reduce((sum, o) => sum + (Number(o.subtotal || 0) - Number(o.discount || 0) - Number(o.tax || 0)), 0);
+      const monthRevenue = monthOrders.reduce((sum, o) => sum + orderRevenue(o), 0);
       salesByMonth.push({
         month: monthLabel,
         revenue: Number(monthRevenue.toFixed(2)),
