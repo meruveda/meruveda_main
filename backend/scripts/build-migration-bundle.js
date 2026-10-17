@@ -55,13 +55,16 @@ const header = `-- =============================================================
 -- the only way to apply schema is a direct connection or this file pasted into
 -- the Supabase SQL editor.
 --
--- SAFE TO RE-RUN: every statement is ADD COLUMN IF NOT EXISTS / CREATE TABLE IF
--- NOT EXISTS / CREATE INDEX IF NOT EXISTS. Nothing drops, truncates or rewrites
--- existing rows. customers, products, orders, order_items, media, reviews and
--- categories are untouched.
+-- ZERO DATA RISK: every statement is ADD COLUMN IF NOT EXISTS / CREATE TABLE IF
+-- NOT EXISTS / CREATE INDEX IF NOT EXISTS / ALTER ... ENABLE ROW LEVEL SECURITY.
+-- There is no DROP, TRUNCATE, DELETE or UPDATE of existing rows, so customers,
+-- products, orders, order_items, media, reviews and categories are untouched.
+-- The three newly created tables cannot already exist, so no DROP POLICY is
+-- needed for them either.
 --
--- APPLY ORDER MATTERS ONLY in that 006 must precede nothing, and all four are
--- independent of one another — but keep the order below for reviewability.
+-- The four deltas are mutually independent (005 touches users + new tables,
+-- 006 touches orders + reviews, 009 touches users + a new table, 010 touches
+-- orders), so order is not load-bearing - it is kept ascending for review only.
 -- =====================================================================
 
 BEGIN;
@@ -95,8 +98,12 @@ SELECT relname, relrowsecurity
  WHERE relname IN ('otps', 'whatsapp_message_log', 'review_requests')
  ORDER BY relname;
 
--- ROLLBACK: if anything above is wrong, restore from
--- backend/backups/ using scripts/restore-data.js. Do NOT reset the project.
+-- ROLLBACK: this bundle never deletes data, so it does not need undoing. To
+-- restore ROW data anyway (e.g. a partial restore), use the verified snapshot:
+--   npm run db:backup                 take a fresh one first
+--   node scripts/restore-data.js      dry run - shows the plan, writes nothing
+--   node scripts/restore-data.js --apply
+-- Do NOT reset the Supabase project; that destroys data this snapshot relies on.
 `;
 
 function build() {
@@ -128,7 +135,7 @@ function main() {
 
   fs.writeFileSync(outPath, content);
 
-  const destructive = content.match(/^\s*(DROP\s+TABLE|TRUNCATE|DELETE\s+FROM)\b/im);
+  const destructive = content.match(/^\s*(DROP\s+(TABLE|POLICY|SCHEMA|DATABASE)|TRUNCATE|DELETE\s+FROM)\b/im);
   console.log(`Wrote ${path.relative(process.cwd(), outPath)}`);
   console.log(`  includes : ${PLAN.map((p) => p.file.replace(/_.*\.sql$/, '')).join(' -> ')}`);
   console.log(`  excludes : ${EXCLUDED.map(([f]) => f.replace(/_.*\.sql$/, '')).join(', ')}`);

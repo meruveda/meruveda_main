@@ -75,12 +75,11 @@ ALTER TABLE public.users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ;
 -- Verify afterwards:
 --   SELECT relname, relrowsecurity FROM pg_class
 --    WHERE relname IN ('otps','whatsapp_message_log','review_requests');
+--
+-- No DROP POLICY statements are issued. These three tables are created in this
+-- same transaction, so no policy can pre-exist on them; a DROP here would be a
+-- statement that can never do anything and would make the bundle look
+-- destructive to anyone reviewing it.
 ALTER TABLE public.otps ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.whatsapp_message_log ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.review_requests ENABLE ROW LEVEL SECURITY;
-
--- A stray policy from an earlier manual attempt would silently re-open these
--- tables, so drop the ones we know are wrong by name only.
-DROP POLICY IF EXISTS otps_public_read ON public.otps;
-DROP POLICY IF EXISTS whatsapp_log_public_read ON public.whatsapp_message_log;
-DROP POLICY IF EXISTS review_requests_public_read ON public.review_requests;

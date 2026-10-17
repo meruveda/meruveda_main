@@ -22,6 +22,7 @@
     "db:bundle:check": "node scripts/build-migration-bundle.js --check",
     "db:backup": "node scripts/backup-data.js",
     "db:verify:backup": "node scripts/verify-backup.js --latest",
+    "db:restore": "node scripts/restore-data.js",
     "wa:verify": "node scripts/verify-whatsapp.js",
     "wa:verify:send": "node scripts/verify-whatsapp.js --send"
   },
