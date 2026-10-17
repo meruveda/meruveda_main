@@ -95,7 +95,9 @@ async function main() {
 
   // ---- 3. Phone number identity ------------------------------------------
   const num = await api(`/${phoneId}?fields=id,display_phone_number,verified_name,quality_rating,code_verification_status,name_status`);
+  let phoneOk = false;
   if (num.status === 200) {
+    phoneOk = true;
     const n = num.json;
     line(true, 'Phone number ID resolves',
       `display=${n.display_phone_number || '?'} name=${n.verified_name || '(unverified)'} status=${n.code_verification_status || '?'} quality=${n.quality_rating || '?'}`);
@@ -104,11 +106,37 @@ async function main() {
       console.log('              but new template submissions are limited until it is approved.');
     }
   } else {
-    line(false, 'Phone number ID resolves', JSON.stringify(sanitize(num.json)));
+    const e = num.json?.error || {};
+    line(false, 'Phone number ID resolves', `code=${e.code} subcode=${e.error_subcode ?? '-'} ${e.message || ''}`);
+    if (e.code === 100) {
+      console.log('');
+      console.log('        This means the access token cannot see that Phone Number ID at all.');
+      console.log('        Either the id is wrong, or the System User it belongs to has no');
+      console.log('        WhatsApp Business Account assigned. Both must be fixed in Meta:');
+      console.log('          1. Correct id: Meta Business Manager -> WhatsApp -> Phone numbers ->');
+      console.log('             your number -> API Setup -> "Phone number ID"');
+      console.log('          2. Assignment: Business Settings -> Users -> System Users -> your');
+      console.log('             employee -> Assign Assets -> WhatsApp Business Account');
+      console.log('        Do not guess the id: a wrong one fails every send with error 100.');
+    }
   }
 
   // ---- 4. Business account + template inventory ---------------------------
-  const wabaId = process.env.WHATSAPP_BUSINESS_ACCOUNT_ID;
+  // The WABA id is usually not recorded locally, but it is reachable from the
+  // phone number id, so it can be derived rather than asked for.
+  let wabaId = process.env.WHATSAPP_BUSINESS_ACCOUNT_ID;
+  if (!wabaId) {
+    const acct = await api(`/${phoneId}/whatsapp_business_account?fields=id,name`);
+    if (acct.status === 200 && acct.json?.id) {
+      wabaId = String(acct.json.id);
+      console.log(`\n  Derived WHATSAPP_BUSINESS_ACCOUNT_ID from the phone number: ${wabaId}`);
+      if (acct.json.name) console.log(`  Business account name: ${acct.json.name}`);
+      console.log('  (set it in backend/.env so this lookup is not needed at runtime)');
+    } else {
+      console.log(`\n  Could not derive a business account id: ${JSON.stringify(sanitize(acct.json))}`);
+    }
+  }
+
   if (wabaId) {
     const tpl = await api(`/${wabaId}/message_templates?fields=name,status,language,category,parameter_count`);
     if (tpl.status === 200 && Array.isArray(tpl.json.data)) {
@@ -163,7 +191,12 @@ async function main() {
 
   // ---- 6. Optional real send ---------------------------------------------
   if (send) {
-    if (!templateReady) {
+    if (!phoneOk) {
+      console.log('\n  NOT SENDING. The Phone Number ID cannot be loaded by this token, so any');
+      console.log('  send attempt would fail with Graph error 100. Fix the id or the System');
+      console.log('  User\'s WABA assignment first - see the steps above.');
+      process.exitCode = 1;
+    } else if (!templateReady) {
       console.log('\n  NOT SENDING. --send requires a confirmed, APPROVED template first.');
       console.log(`  Reason: ${templateDetail}`);
       console.log('  Set WHATSAPP_BUSINESS_ACCOUNT_ID, fix the template in Meta Business Manager,');
