@@ -37,8 +37,22 @@ export type WhatsappTemplate = (typeof WHATSAPP_TEMPLATES)[keyof typeof WHATSAPP
 const graphBase = () =>
   `https://graph.facebook.com/${config.whatsappGraphApiVersion}/${config.whatsappPhoneNumberId}`;
 
+/**
+ * True when WhatsApp can actually send.
+ *
+ * A placeholder value counts as NOT configured. Without this check an unset-but-
+ * present placeholder (the default in .env.example, and what ships in a copied
+ * .env) reads as configured, so otpController's "WhatsApp is unavailable" guard
+ * is skipped and the user gets a silent failure at send time instead of a clear
+ * 503. It also keeps the test suite from attempting real Graph API calls.
+ */
 export function isWhatsappConfigured(): boolean {
-  return Boolean(config.whatsappApiToken && config.whatsappPhoneNumberId);
+  const token = config.whatsappApiToken;
+  const id = config.whatsappPhoneNumberId;
+  if (!token || !id) return false;
+  if (/^(your-|<|placeholder)/i.test(token) || token === 'PLACEHOLDER_TOKEN') return false;
+  if (/^(your-|<|placeholder)/i.test(id)) return false;
+  return true;
 }
 
 /**

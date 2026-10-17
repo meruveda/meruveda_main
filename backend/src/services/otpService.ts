@@ -5,6 +5,7 @@ import { config } from '../config/env';
 import { hasColumn, hasTable } from './schemaGuard';
 import { normalizePhone, sendOnce, WHATSAPP_TEMPLATES, sendTemplate } from './whatsappService';
 import { canonicalPhone, phoneVariants, placeholderEmailFor } from '../utils/phone';
+import { hashOtpCode, verifyOtpCode } from '../utils/otpHash';
 
 const OTP_TTL_MINUTES = 5;
 const OTP_MAX_ATTEMPTS = 5;
@@ -66,7 +67,7 @@ export const otpService = {
 
     const { error } = await supabase.from('otps').insert({
       phone,
-      code,
+      code_hash: hashOtpCode(code, phone),
       purpose: PURPOSE,
       attempts: 0,
       max_attempts: OTP_MAX_ATTEMPTS,
@@ -117,7 +118,7 @@ export const otpService = {
     if (new Date(row.expires_at).getTime() < Date.now()) return { ok: false, reason: 'expired' };
     if (Number(row.attempts) >= Number(row.max_attempts)) return { ok: false, reason: 'too_many_attempts' };
 
-    if (row.code !== submitted) {
+    if (!verifyOtpCode(submitted, phone, row.code_hash)) {
       await supabase
         .from('otps')
         .update({ attempts: Number(row.attempts) + 1 })

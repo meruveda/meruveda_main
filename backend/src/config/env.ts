@@ -122,6 +122,10 @@ export const config = {
   // "false" to disable; anything else (including unset) means enabled.
   invoiceAutoSend: process.env.INVOICE_AUTO_SEND !== 'false',
   shiprocketAutoPush: process.env.SHIPROCKET_AUTO_PUSH === 'true',
+  // Server-side pepper for OTP digests (src/utils/otpHash.ts). Must never be
+  // sent to a client or stored in the database. Changing it invalidates every
+  // outstanding OTP, which is acceptable because they live 5 minutes.
+  otpHashPepper: process.env.OTP_HASH_PEPPER || '',
 
   // ---- Business identity printed on the tax invoice ----
   // Read from env only — never commit real values. `GSTIN` is the legacy name
@@ -250,6 +254,13 @@ if (nodeEnv === 'production') {
   // Absolute links (password reset) must point at the real storefront.
   if (!process.env.FRONTEND_URL) {
     warn.push('FRONTEND_URL — password reset links would point at http://localhost:3000');
+  }
+
+  // OTP digests are only as strong as their pepper. Without it the fallback is
+  // a constant published in the source tree, so the otps table is effectively
+  // brute-forceable by anyone holding a dump.
+  if (!process.env.OTP_HASH_PEPPER) {
+    warn.push('OTP_HASH_PEPPER — OTP codes are hashed with a development fallback pepper; rotate before going live');
   }
 
   // WhatsApp is an OPTIONAL slot. When it is unset the invoice pipeline skips

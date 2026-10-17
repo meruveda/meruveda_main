@@ -23,6 +23,14 @@
  *   node scripts/migrate.js --dry-run     list pending, execute nothing
  *   node scripts/migrate.js               apply every pending delta
  *   node scripts/migrate.js --only=005    apply a single delta by number
+ *   node scripts/migrate.js --baseline    record already-satisfied deltas
+ *
+ * --baseline exists because _migrations starts empty on a database that was
+ * migrated by hand through the SQL editor. Without it the runner would treat
+ * 001-004 and 007 as pending and re-run them; 002 in particular is NOT
+ * idempotent (ALTER TABLE ... RENAME COLUMN has no IF EXISTS guard) and would
+ * abort the whole run. Baseline probes each delta's objects over PostgREST and
+ * records the delta as applied when they are all already present.
  */
 const fs = require('fs');
 const path = require('path');
@@ -33,8 +41,41 @@ const MIGRATIONS_TABLE = 'public._migrations';
 
 const argv = process.argv.slice(2);
 const dryRun = argv.includes('--dry-run');
+const baseline = argv.includes('--baseline');
 const onlyArg = argv.find((a) => a.startsWith('--only='));
 const only = onlyArg ? onlyArg.split('=')[1] : null;
+
+/**
+ * Objects each delta is expected to create, mirroring the statements in the
+ * SQL itself. Baseline uses this to decide whether a delta is already applied.
+ */
+const INVENTORY = {
+  '001_shiprocket_migration.sql': [
+    'products.weight', 'products.length', 'products.breadth', 'products.height', 'products.hsn',
+    'orders.shiprocket_order_id', 'orders.shipment_id', 'orders.awb_code', 'orders.courier_name',
+    'orders.tracking_url', 'orders.tracking_status', 'orders.pickup_location', 'orders.shipping_cost',
+    'orders.estimated_delivery', 'orders.manifest_url', 'orders.label_url', 'orders.invoice_url',
+    'orders.last_tracking_sync',
+  ],
+  '002_media_migration.sql': [
+    'media.public_url', 'media.bucket', 'media.size', 'media.mime_type', 'media.storage_path',
+  ],
+  '003_missing_tables_and_transactions.sql': [
+    'cms_pages', 'activity_logs', 'support_tickets', 'transactions', 'order_tracking_history',
+  ],
+  '004_banners_migration.sql': ['banners'],
+  '005_otp_whatsapp_review_requests.sql': [
+    'otps', 'whatsapp_message_log', 'review_requests', 'users.address', 'users.last_login_at',
+  ],
+  '006_missing_columns.sql': ['orders.delivered_at', 'reviews.is_featured', 'reviews.reply'],
+  '007_mobile_auth.sql': ['users.reset_password_token', 'users.reset_password_expires'],
+  '008_reviews_is_featured.sql': ['reviews.is_featured', 'reviews.reply'],
+  '009_page_views.sql': ['page_views', 'users.phone_verified'],
+  '010_auto_invoice_shiprocket.sql': [
+    'orders.invoice_sent_at', 'orders.invoice_error', 'orders.shiprocket_push_status',
+    'orders.shiprocket_push_error', 'orders.shiprocket_pushed_at', 'orders.shiprocket_push_started_at',
+  ],
+};
 
 function loadDotEnv() {
   const envPath = path.join(__dirname, '..', '.env');
@@ -118,8 +159,78 @@ function assertAdditive(delta) {
   }
 }
 
+/**
+ * Baseline: record deltas whose objects are all already present.
+ * Runs over PostgREST, so it works before any direct connection exists.
+ */
+async function runBaseline() {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) {
+    console.error('SUPABASE_URL / SUPABASE_SERVICE_KEY are required to baseline.');
+    process.exit(1);
+  }
+  const H = { apikey: key, Authorization: `Bearer ${key}` };
+  const present = async (name) => {
+    const dot = name.indexOf('.');
+    if (dot === -1) return (await fetch(`${url}/rest/v1/${name}?select=*&limit=1`, { headers: H })).ok;
+    const t = name.slice(0, dot);
+    const c = name.slice(dot + 1);
+    return (await fetch(`${url}/rest/v1/${t}?select=${encodeURIComponent(c)}&limit=1`, { headers: H })).ok;
+  };
+
+  const conn = buildConnection();
+  if (conn) {
+    const { Client } = require('pg');
+    const client = new Client({ connectionString: conn, ssl: { rejectUnauthorized: false } });
+    await client.connect();
+    try {
+      await ensureMigrationsTable(client);
+      for (const delta of listDeltas()) {
+        const objects = INVENTORY[delta.filename];
+        if (!objects) {
+          console.log(`  no inventory  ${delta.filename} - cannot baseline, skipping`);
+          continue;
+        }
+        const missing = [];
+        for (const o of objects) if (!(await present(o))) missing.push(o);
+        if (missing.length === 0) {
+          await client.query(
+            `INSERT INTO ${MIGRATIONS_TABLE} (filename, checksum) VALUES ($1, $2)
+             ON CONFLICT (filename) DO NOTHING`,
+            [delta.filename, delta.checksum]
+          );
+          console.log(`  baselined  ${delta.filename} (all ${objects.length} objects present)`);
+        } else {
+          console.log(`  pending    ${delta.filename}  missing: ${missing.join(', ')}`);
+        }
+      }
+    } finally {
+      await client.end().catch(() => {});
+    }
+  } else {
+    console.log('No direct connection yet - reporting what baseline WOULD record:\n');
+    for (const delta of listDeltas()) {
+      const objects = INVENTORY[delta.filename];
+      if (!objects) { console.log(`  no inventory  ${delta.filename}`); continue; }
+      const missing = [];
+      for (const o of objects) if (!(await present(o))) missing.push(o);
+      console.log(
+        missing.length === 0
+          ? `  would baseline  ${delta.filename}`
+          : `  would stay pending  ${delta.filename}  missing: ${missing.join(', ')}`
+      );
+    }
+  }
+}
+
 async function main() {
   loadDotEnv();
+
+  if (baseline) {
+    await runBaseline();
+    return;
+  }
 
   const conn = buildConnection();
   if (!conn) {
