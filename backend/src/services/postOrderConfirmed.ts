@@ -13,11 +13,20 @@ export interface PostOrderConfirmedResult {
   shiprocket: { ok: boolean; skipped?: boolean; reason?: string };
 }
 
-/** True when the order is paid on delivery (no payment callback exists). */
+/**
+ * True when the order is paid on delivery (no payment callback exists).
+ *
+ * The stored value is the storefront's 'Cash On Delivery', not 'cod' — the old
+ * exact match against 'cod' was therefore always false in production, which is
+ * why the COD order-confirmation text was never sent.
+ *
+ * Exact set membership after trimming and lowercasing, never a substring match,
+ * so 'cashfree' is not COD. Keep this list in step with invoiceService.isCodOrder.
+ */
+const COD_PAYMENT_METHODS = new Set(['cod', 'cash on delivery', 'cash_on_delivery']);
+
 export function isCodOrder(order: any): boolean {
-  // Exact stored value, case-insensitive — not a substring match, which used to
-  // classify any method containing "cash" (e.g. "cashfree") as COD.
-  return String(order?.payment_method || '').trim().toLowerCase() === 'cod';
+  return COD_PAYMENT_METHODS.has(String(order?.payment_method || '').trim().toLowerCase());
 }
 
 /**

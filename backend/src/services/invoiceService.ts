@@ -884,9 +884,23 @@ export function paymentWordingFor(order: {
   return { mode: 'prepaid', paid: false, reference: null, wording: 'Payment: Online (via PayU)' };
 }
 
+/**
+ * Every payment_method value that means "cash on delivery".
+ *
+ * Compared as an exact set membership after trimming and lowercasing — NOT a
+ * substring match, which used to classify any method containing "cash"
+ * (e.g. "cashfree") as COD.
+ *
+ * The storefront writes 'Cash On Delivery' (frontend checkout page). 'cod' is
+ * accepted because orderService has always treated it as COD too, so a manual
+ * edit or an API caller can legitimately produce it. 'cash_on_delivery' is
+ * accepted as a defensive alias.
+ */
+const COD_PAYMENT_METHODS = new Set(['cod', 'cash on delivery', 'cash_on_delivery']);
+
 /** COD decided on the exact stored `payment_method` value, case-insensitively. */
 export function isCodOrder(order: { payment_method?: string | null }): boolean {
-  return String(order?.payment_method || '').trim().toLowerCase() === 'cod';
+  return COD_PAYMENT_METHODS.has(String(order?.payment_method || '').trim().toLowerCase());
 }
 
 /**

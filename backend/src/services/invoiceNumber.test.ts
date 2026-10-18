@@ -450,10 +450,19 @@ test('a missing bucket is auto-created rather than failing the invoice', async (
 /* ------------------------------------------------------------------ */
 
 test('COD is decided on the exact stored payment_method, case-insensitively', () => {
+  // The storefront writes 'Cash On Delivery'; orderService has always also
+  // accepted 'COD'. Matching only 'cod' made this return false for every real
+  // COD order, so those invoices carried prepaid wording and the COD
+  // confirmation text was never sent. The three spellings below are now all COD.
   assert.equal(isCodOrder({ payment_method: 'COD' }), true);
   assert.equal(isCodOrder({ payment_method: 'cod' }), true);
   assert.equal(isCodOrder({ payment_method: ' COD ' }), true);
+  assert.equal(isCodOrder({ payment_method: 'Cash On Delivery' }), true);
+  assert.equal(isCodOrder({ payment_method: 'cash on delivery' }), true);
+  assert.equal(isCodOrder({ payment_method: '  Cash On Delivery  ' }), true);
+  assert.equal(isCodOrder({ payment_method: 'cash_on_delivery' }), true);
   assert.equal(isCodOrder({ payment_method: 'PayU' }), false);
+  assert.equal(isCodOrder({ payment_method: 'PayOnline (via PayU)' }), false);
   assert.equal(isCodOrder({ payment_method: 'cashfree' }), false, 'substring must not match');
   assert.equal(isCodOrder({}), false);
 });
