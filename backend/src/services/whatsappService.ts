@@ -195,13 +195,13 @@ export async function sendTemplate(
   const phone = normalizePhone(to);
   if (!phone || !isWhatsappConfigured()) return false;
 
-  // Dry run: log the exact payload and report success without calling Meta.
-  // Used for local development so a real OTP can be exercised without spending
-  // message quota. Never a substitute for a real send in production.
+  // Dry run: record that a send was skipped and report success without calling
+  // Meta. The parameter VALUES are deliberately not printed — for the OTP path
+  // they are the code itself.
   if (config.whatsappDryRun) {
     console.log(
-      `[WhatsApp] DRY RUN — would send template "${templateName}" to ${phone} ` +
-        `with params ${JSON.stringify(params)}`
+      `[WhatsApp] DRY RUN — would send template "${templateName}" (lang ${config.whatsappTemplateLang || 'en'}) ` +
+        `to ${phone} with ${params.length} body parameter(s). Values not logged.`
     );
     return true;
   }
@@ -229,6 +229,98 @@ export async function sendTemplate(
   } catch (err: any) {
     console.error(
       `[WhatsApp] Template "${templateName}" send failed for ${phone}:`,
+      err?.message || err
+    );
+    return false;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Authentication-category templates (login_auth and friends)          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Build the Meta payload for an AUTHENTICATION-category template.
+ *
+ * Meta requires the one-time code to be supplied TWICE:
+ *
+ *   1. as a body parameter  — {{1}} in the approved body text, and
+ *   2. as the parameter of the COPY_CODE button at index 0, which is what
+ *      produces the one-tap autofill in the WhatsApp UI.
+ *
+ * Sending only the body parameter is the single most common reason Meta
+ * rejects an authentication template outright, so both are always sent here.
+ *
+ * The template NAME and LANGUAGE come from the environment only
+ * (WHATSAPP_OTP_TEMPLATE_NAME / WHATSAPP_TEMPLATE_LANG). Nothing is hardcoded,
+ * so the same build works against any Meta account.
+ *
+ * Exported pure so the exact payload shape can be asserted in tests without
+ * touching the network.
+ */
+export function buildAuthenticationTemplatePayload(options: {
+  to: string;
+  code: string;
+  templateName?: string;
+  language?: string;
+}): Record<string, any> {
+  const phone = normalizePhone(options.to);
+  const code = String(options.code ?? '');
+  const name = String(options.templateName || config.whatsappOtpTemplateName || '').trim();
+  const language = String(options.language || config.whatsappTemplateLang || 'en').trim();
+
+  return {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to: phone,
+    type: 'template',
+    template: {
+      name,
+      language: { code: language },
+      components: [
+        {
+          type: 'body',
+          parameters: [{ type: 'text', text: code }],
+        },
+        {
+          type: 'button',
+          sub_type: 'copy_code',
+          // Index is a STRING on the wire, per Meta's template payload spec.
+          index: '0',
+          parameters: [{ type: 'text', text: code }],
+        },
+      ],
+    },
+  };
+}
+
+/**
+ * Deliver the OTP on an AUTHENTICATION-category template.
+ *
+ * Returns true only when Meta accepted the message, so a rejected template is
+ * surfaced to the caller instead of being reported to the customer as sent.
+ */
+export async function sendAuthenticationTemplate(to: string, code: string): Promise<boolean> {
+  const phone = normalizePhone(to);
+  if (!phone || !isWhatsappConfigured()) return false;
+
+  const payload = buildAuthenticationTemplatePayload({ to, code });
+
+  // Dry run reports success without calling Meta, and never prints the code.
+  if (config.whatsappDryRun) {
+    console.log(
+      `[WhatsApp] DRY RUN — would send authentication template "${payload.template.name}" ` +
+        `(lang ${payload.template.language.code}) to ${phone}. Code not logged.`
+    );
+    return true;
+  }
+
+  try {
+    await graphPost(`${graphBase()}/messages`, payload);
+    return true;
+  } catch (err: any) {
+    console.error(
+      `[WhatsApp] Authentication template "${payload.template.name}" send failed for ${phone}:`,
       err?.message || err
     );
     return false;
@@ -528,6 +620,156 @@ export async function sendOnce(options: {
 }
 
 /**
+ * Build the invoice template payload. Exported pure so both env modes can be
+ * asserted in tests without a network call.
+ *
+ * WHATSAPP_INVOICE_MODE picks the shape:
+ *
+ *   'document' (default) — the PDF rides in the template's DOCUMENT header.
+ *     Body variables: {{1}} name {{2}} order no {{3}} invoice no {{4}} amount.
+ *
+ *   'link' — no attachment; a signed, expiring Storage URL goes in the body as
+ *     {{5}}. Never a bare order id: the URL is minted by Supabase with an
+ *     expiry (INVOICE_SIGNED_URL_EXPIRY_SECONDS, default 7 days) so a guessable
+ *     /orders/:id link can never be used to fetch someone else's invoice.
+ *
+ * Template name and language come from env only.
+ */
+export function buildInvoiceTemplatePayload(options: {
+  to: string;
+  customerName: string;
+  orderNumber: string;
+  invoiceNumber: string;
+  total: string;
+  signedUrl: string | null;
+  filename: string;
+}): Record<string, any> {
+  const mode = invoiceWhatsapp.mode === 'link' ? 'link' : 'document';
+  const bodyText = [
+    options.customerName,
+    options.orderNumber,
+    options.invoiceNumber,
+    options.total,
+  ];
+
+  const components: any[] = [];
+
+  if (mode === 'document') {
+    // Header MUST precede the body component.
+    components.push({
+      type: 'header',
+      parameters: [
+        {
+          type: 'document',
+          document: { link: options.signedUrl, filename: options.filename },
+        },
+      ],
+    });
+  } else {
+    // Link mode: the URL is the 5th body variable.
+    bodyText.push(String(options.signedUrl || ''));
+  }
+
+  components.push({
+    type: 'body',
+    parameters: bodyText.map((value) => ({ type: 'text', text: String(value ?? '') })),
+  });
+
+  return {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to: normalizePhone(options.to),
+    type: 'template',
+    template: {
+      name: invoiceWhatsapp.templateName,
+      language: { code: invoiceWhatsapp.templateLang },
+      components,
+    },
+  };
+}
+
+/**
+ * Deliver a tax invoice over the approved template, in whichever mode
+ * WHATSAPP_INVOICE_MODE selects.
+ *
+ * Additive sibling of `sendInvoiceDocumentTemplate` (which is untouched and
+ * still does exactly what it always did). `invoiceDispatchService` calls this
+ * one; behaviour in 'document' mode is identical to the old sender.
+ *
+ * Outside the 24-hour customer-service window Meta only accepts a template
+ * message, so the PDF is either attached via the template's DOCUMENT header or
+ * handed over as a signed link.
+ *
+ * Never throws: a Meta error is logged and reported as `false`.
+ * Returns true only when Meta accepted the message.
+ */
+export async function sendInvoiceTemplate(options: {
+  to: string;
+  customerName: string;
+  orderNumber: string;
+  invoiceNumber: string;
+  total: string;
+  signedUrl: string | null;
+  filename: string;
+}): Promise<boolean> {
+  try {
+    const phone = normalizePhone(options.to);
+    if (!phone) return false;
+    if (!options.signedUrl) {
+      console.warn(`[WhatsApp] no signed invoice URL for ${options.invoiceNumber} — skipping.`);
+      return false;
+    }
+
+    const payload = buildInvoiceTemplatePayload(options);
+
+    // Dry run logs the shape only. A signed URL is a bearer token for that
+    // invoice, so it is never printed.
+    if (invoiceWhatsapp.dryRun) {
+      console.log(
+        `[WhatsApp] DRY RUN — would send invoice ${options.invoiceNumber} via template ` +
+          `"${invoiceWhatsapp.templateName}" (lang ${invoiceWhatsapp.templateLang}, mode ${invoiceWhatsapp.mode}). ` +
+          `URL not logged.`
+      );
+      return true;
+    }
+
+    const res = await fetch(`${graphBase()}/messages`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${config.whatsappApiToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    // Log the full Meta response: the HTTP status, the message id on success,
+    // and error.code / error.message on failure. Without error.code a template
+    // rejection and a rate limit look identical in the logs.
+    const json: any = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      console.error(
+        `[WhatsApp] invoice send FAILED for ${phone} — HTTP ${res.status} ` +
+          `code=${json?.error?.code ?? 'n/a'} ` +
+          `message=${json?.error?.message ?? 'no message'} ` +
+          `detail=${JSON.stringify(json?.error?.error_data ?? null)}`
+      );
+      return false;
+    }
+
+    console.log(
+      `[WhatsApp] invoice ${options.invoiceNumber} accepted by Meta — ` +
+        `HTTP ${res.status} wamid=${json?.messages?.[0]?.id ?? 'n/a'}`
+    );
+    return true;
+  } catch (err: any) {
+    // Belt and braces: this runs from post-order background work and must never
+    // reject into it.
+    console.error('[WhatsApp] invoice send threw:', err?.message || err);
+    return false;
+  }
+}
+
+/**
  * Deliver a tax invoice over the approved UTILITY template.
  *
  * Outside the 24-hour customer-service window Meta only accepts a template
@@ -639,6 +881,8 @@ export const whatsappService = {
   sendDocumentTemplate,
   sendDocumentTemplateOnce,
   sendInvoiceDocumentTemplate,
+  sendInvoiceTemplate,
+  sendAuthenticationTemplate,
   sendOnce,
   wasSent,
 };

@@ -17,10 +17,9 @@ const MESSAGES: Record<string, string> = {
 
 const handleSend = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    // OTP_DISABLED TEMPORARILY - re-enable by setting OTP_ENABLED=true.
     if (!config.otpEnabled) {
       return res.status(503).json({
-        error: { message: 'OTP sign-in is temporarily disabled. Please use Sign up / Login instead.' },
+        error: { message: 'OTP sign-in is temporarily disabled. Please try again shortly.' },
       });
     }
 
@@ -38,8 +37,11 @@ const handleSend = async (req: Request, res: Response, next: NextFunction) => {
     res.json({
       message: 'OTP sent to your WhatsApp number.',
       expiresInSeconds: result.expiresInSeconds,
-      // Local development convenience only — never exposed in production.
-      ...(config.nodeEnv !== 'production' && { devOtp: result.devOtp }),
+      // Local development convenience only. Mirrors the gate in otpService:
+      // never in production, and never once real Meta credentials exist.
+      ...(config.nodeEnv !== 'production' && !isWhatsappConfigured()
+        ? { devOtp: result.devOtp }
+        : {}),
     });
   } catch (error: any) {
     if (error.status) {

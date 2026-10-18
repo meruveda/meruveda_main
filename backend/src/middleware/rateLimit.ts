@@ -118,8 +118,21 @@ export function createRateLimiter(opts: {
    * cannot exhaust the limit for everyone else behind the same NAT/proxy.
    */
   secondaryKey?: (req: Request) => string;
+  /**
+   * Which single dimension the bucket is keyed on.
+   *
+   * 'composite' (default) keeps the existing ip+phone key.
+   * 'phone' keys on the phone number alone, so rotating source IPs cannot
+   *   bypass the limit — this is what stops one victim's number being flooded.
+   * 'ip' keys on the IP alone, so one host cannot brute-force many numbers.
+   *
+   * The OTP routes mount all three in series, giving a genuine per-phone AND
+   * per-IP limit rather than one combined bucket.
+   */
+  keyMode?: 'composite' | 'phone' | 'ip';
 }) {
   const store = opts.store || defaultStore;
+  const mode = opts.keyMode || 'composite';
   return async (req: Request, res: Response, next: NextFunction) => {
     try {
       // req.ip honours `trust proxy` (X-Forwarded-For) — on Vercel this is
@@ -132,7 +145,12 @@ export function createRateLimiter(opts: {
         : String(req.body?.phone || '')
             .replace(/\D/g, '')
             .slice(-10);
-      const key = `rl:${opts.prefix}:${ip}:${phone}`;
+      const key =
+        mode === 'phone'
+          ? `rl:${opts.prefix}:phone:${phone}`
+          : mode === 'ip'
+            ? `rl:${opts.prefix}:ip:${ip}`
+            : `rl:${opts.prefix}:${ip}:${phone}`;
 
       const { count, resetInMs } = await store.incr(key, opts.windowMs);
 
@@ -159,6 +177,41 @@ export const loginLimiter = createRateLimiter({ windowMs: 15 * 60 * 1000, max: 2
 export const signupLimiter = createRateLimiter({ windowMs: 10 * 60 * 1000, max: 10, prefix: 'signup' });
 export const otpSendLimiter = createRateLimiter({ windowMs: 10 * 60 * 1000, max: 5, prefix: 'otp-send' });
 export const otpVerifyLimiter = createRateLimiter({ windowMs: 10 * 60 * 1000, max: 10, prefix: 'otp-verify' });
+
+/**
+ * Per-PHONE and per-IP OTP limits, mounted alongside the composite bucket.
+ *
+ * The composite key alone is not enough in either direction: an attacker who
+ * rotates source IPs has an unlimited quota for one victim number, and one host
+ * can spray many numbers. These two buckets close each gap independently.
+ *
+ * Per-phone is the tighter of the two on purpose — a customer legitimately
+ * re-requests a code a handful of times, an attacker flooding one number is not.
+ */
+export const otpSendPerPhoneLimiter = createRateLimiter({
+  windowMs: 10 * 60 * 1000,
+  max: 5,
+  prefix: 'otp-send-phone',
+  keyMode: 'phone',
+});
+export const otpSendPerIpLimiter = createRateLimiter({
+  windowMs: 10 * 60 * 1000,
+  max: 20,
+  prefix: 'otp-send-ip',
+  keyMode: 'ip',
+});
+export const otpVerifyPerPhoneLimiter = createRateLimiter({
+  windowMs: 10 * 60 * 1000,
+  max: 10,
+  prefix: 'otp-verify-phone',
+  keyMode: 'phone',
+});
+export const otpVerifyPerIpLimiter = createRateLimiter({
+  windowMs: 10 * 60 * 1000,
+  max: 40,
+  prefix: 'otp-verify-ip',
+  keyMode: 'ip',
+});
 export const passwordResetLimiter = createRateLimiter({ windowMs: 15 * 60 * 1000, max: 5, prefix: 'pw-reset' });
 export const orderCreateLimiter = createRateLimiter({ windowMs: 10 * 60 * 1000, max: 20, prefix: 'order-create' });
 export const payuInitiateLimiter = createRateLimiter({ windowMs: 10 * 60 * 1000, max: 10, prefix: 'payu-initiate' });

@@ -2,31 +2,46 @@
  * WhatsApp Cloud API credential, phone number and template validator.
  *
  * Answers, without guessing:
- *   1. Is WHATSAPP_API_TOKEN a valid, live Meta token?
+ *   1. Is the WhatsApp token a valid, live Meta token?
  *   2. Is WHATSAPP_PHONE_NUMBER_ID really a WhatsApp Business phone number id,
  *      and which number is behind it?
  *   3. Which message templates actually exist on the account, what are their
- *      approval statuses, languages and body-variable counts?
- *   4. Does the template the code hardcodes (whatsappService.ts WHATSAPP_TEMPLATES.OTP)
- *      exist and is it APPROVED? If not, OTP sends cannot succeed.
- *   5. Optionally send one real test message to ADMIN_WHATSAPP_NUMBER.
+ *      approval statuses, languages, categories and body-variable counts?
+ *   4. Does WHATSAPP_OTP_TEMPLATE_NAME exist, is it APPROVED, is its category
+ *      AUTHENTICATION and is its language exactly WHATSAPP_TEMPLATE_LANG?
+ *   5. When WHATSAPP_INVOICE_ENABLED=true, the same three questions for
+ *      WHATSAPP_INVOICE_TEMPLATE_NAME.
+ *   6. Optionally send one real test message to ADMIN_WHATSAPP_NUMBER.
  *
- * The token is never printed. Recipient must already exist in the environment -
- * nothing is hardcoded.
+ * Template names and languages come from the environment ONLY — nothing is
+ * hardcoded, so this script validates exactly what the app will send.
+ *
+ * The token is never printed. Recipient must already exist in the environment.
+ *
+ * Exit code: 0 when every check passed, 1 otherwise.
  *
  * Usage:
  *   node scripts/verify-whatsapp.js
  *   node scripts/verify-whatsapp.js --send      send a test template message
+ *   node scripts/verify-whatsapp.js --json      machine-readable result line
  */
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 
 const API_VERSION = process.env.WHATSAPP_GRAPH_API_VERSION || 'v20.0';
 const GRAPH = `https://graph.facebook.com/${API_VERSION}`;
-const OTP_TEMPLATE = 'otp_verification';
 
-const token = process.env.WHATSAPP_API_TOKEN || '';
+// ---- Everything below is read from the environment only ---------------------
+const token = process.env.WHATSAPP_API_TOKEN || process.env.WHATSAPP_TOKEN || '';
 const phoneId = process.env.WHATSAPP_PHONE_NUMBER_ID || '';
 const testRecipient = process.env.ADMIN_WHATSAPP_NUMBER || '';
+const OTP_TEMPLATE = (process.env.WHATSAPP_OTP_TEMPLATE_NAME || '').trim();
+const TEMPLATE_LANG = (process.env.WHATSAPP_TEMPLATE_LANG || '').trim();
+const INVOICE_ENABLED = process.env.WHATSAPP_INVOICE_ENABLED === 'true';
+const INVOICE_TEMPLATE = (
+  process.env.WHATSAPP_INVOICE_TEMPLATE_NAME ||
+  process.env.INVOICE_WA_TEMPLATE_NAME ||
+  ''
+).trim();
 
 const looksPlaceholder = !token || token === 'PLACEHOLDER_TOKEN' || /^your-/i.test(token);
 
@@ -61,6 +76,11 @@ function line(ok, label, detail) {
   return ok;
 }
 
+/** Emit the machine-readable result line go-live.js reads. Contains no secrets. */
+function emitJson(partial) {
+  console.log(`GO_LIVE_JSON ${JSON.stringify({ allOk: false, ...partial })}`);
+}
+
 async function main() {
   const send = process.argv.includes('--send');
   console.log(`Graph API version : ${API_VERSION}\n`);
@@ -69,6 +89,7 @@ async function main() {
     console.log('FAIL  WHATSAPP_API_TOKEN is still a placeholder in backend/.env');
     console.log('      Set it to a real Meta access token, then re-run this script.');
     console.log('      Nothing else can be validated until then.');
+    emitJson({ token: false, waba: false, phoneId: false, otpTemplate: false, missing: 'WHATSAPP_API_TOKEN or WHATSAPP_TOKEN' });
     process.exit(1);
   }
 
@@ -90,6 +111,13 @@ async function main() {
 
   if (!phoneId) {
     line(false, 'WHATSAPP_PHONE_NUMBER_ID', 'not set');
+    emitJson({
+      token: Boolean(tokenOk),
+      waba: false,
+      phoneId: false,
+      otpTemplate: false,
+      missing: 'WHATSAPP_PHONE_NUMBER_ID',
+    });
     process.exit(1);
   }
 
@@ -151,43 +179,115 @@ async function main() {
     console.log('\n  WHATSAPP_BUSINESS_ACCOUNT_ID is not set - cannot list templates.');
   }
 
-  // ---- 4. Does the hardcoded OTP template line up? -----------------------
-  console.log(`\n  The code sends template name "${OTP_TEMPLATE}" (whatsappService.ts WHATSAPP_TEMPLATES.OTP)`);
-  console.log('  with language "en" and exactly 2 body params: {{1}} = code, {{2}} = TTL minutes.');
+  // ---- 4. Templates must line up with what the code will actually send -----
+  console.log(
+    `\n  The code sends template name "${OTP_TEMPLATE || '(unset)'}" ` +
+      `(WHATSAPP_OTP_TEMPLATE_NAME) with language "${TEMPLATE_LANG || '(unset)'}" ` +
+      `(WHATSAPP_TEMPLATE_LANG).`
+  );
+  console.log('  It is an AUTHENTICATION-category template: the code is sent as the body');
+  console.log('  parameter {{1}} AND as the copy-code button parameter at index 0.');
 
   // Send is gated on this outcome: firing at Meta with an unapproved or
-  // mis-shaped template just burns the customer's 45s resend cooldown and
+  // mis-shaped template just burns the customer's 30s resend cooldown and
   // proves nothing. Nothing is sent until the template is confirmed usable.
+  const checks = {};
   let templateReady = false;
   let templateDetail = 'template inventory unavailable (WHATSAPP_BUSINESS_ACCOUNT_ID not set)';
 
+  /** Look one template up and assert status / category / language. */
+  function checkTemplate(list, name, expectedCategory, wantLanguage) {
+    const match = list.find((t) => t.name === name);
+    if (!match) {
+      line(false, `Template "${name}" exists`, 'no template with that exact name');
+      return {
+        ok: false,
+        detail:
+          `No template named "${name}". Templates on this account: ` +
+          (list.length ? list.map((t) => `"${t.name}" (${t.status})`).join(', ') : 'none listed'),
+      };
+    }
+
+    const approved = match.status === 'APPROVED';
+    const category = String(match.category || '').toUpperCase();
+    const language = String(match.language || '');
+
+    const problems = [];
+    if (!approved) problems.push(`status is ${match.status}, not APPROVED`);
+    if (expectedCategory && category !== expectedCategory) {
+      problems.push(`category is "${category}", the code sends ${expectedCategory}`);
+    }
+    if (wantLanguage && language !== wantLanguage) {
+      problems.push(`language is "${language}", the code sends "${wantLanguage}"`);
+    }
+
+    // Keep the "is APPROVED" wording: preflight.js greps for it.
+    if (approved) {
+      line(true, `Template "${name}" is APPROVED`,
+        `status=${match.status} lang=${match.language} category=${match.category || '?'} params=${match.parameter_count ?? '?'}`);
+    } else {
+      line(false, `Template "${name}" is APPROVED`, `status=${match.status}`);
+    }
+
+    if (problems.length) {
+      const detail = `Template "${name}" is not usable: ${problems.join('; ')}`;
+      console.log(`        BLOCKING: ${detail}`);
+      return { ok: false, detail };
+    }
+    return {
+      ok: true,
+      detail: `${name} approved, ${language}, ${category || 'category n/a'}`,
+    };
+  }
+
   if (!wabaId) {
     line(false, 'WHATSAPP_BUSINESS_ACCOUNT_ID', 'not set — cannot verify the template, so --send is blocked');
+    checks.otpTemplate = { ok: false, detail: 'WHATSAPP_BUSINESS_ACCOUNT_ID not set' };
+    checks.waba = { ok: false, detail: 'not set' };
   } else {
-    const tpl = await api(`/${wabaId}/message_templates?fields=name,status,language,parameter_count`);
+    checks.waba = { ok: true, id: String(wabaId) };
+    const tpl = await api(`/${wabaId}/message_templates?fields=name,status,language,category,parameter_count`);
     const list = tpl.json?.data || [];
-    const match = list.find((t) => t.name === OTP_TEMPLATE);
-    if (!match) {
-      line(false, `Template "${OTP_TEMPLATE}" exists`, 'no template with that exact name');
-      templateDetail =
-        `No template named "${OTP_TEMPLATE}". Approved templates on this account: ` +
-        (list.length ? list.map((t) => `"${t.name}" (${t.status})`).join(', ') : 'none listed');
+
+    if (!OTP_TEMPLATE) {
+      line(false, 'WHATSAPP_OTP_TEMPLATE_NAME', 'not set — the app would guess a template name');
+      checks.otpTemplate = {
+        ok: false,
+        detail: 'WHATSAPP_OTP_TEMPLATE_NAME is not set',
+      };
+      templateDetail = checks.otpTemplate.detail;
+    } else if (!TEMPLATE_LANG) {
+      line(false, 'WHATSAPP_TEMPLATE_LANG', 'not set — the language must match the approved template exactly');
+      checks.otpTemplate = {
+        ok: false,
+        detail: 'WHATSAPP_TEMPLATE_LANG is not set',
+      };
+      templateDetail = checks.otpTemplate.detail;
     } else {
-      const approved = match.status === 'APPROVED';
-      line(approved, `Template "${OTP_TEMPLATE}" is APPROVED`, `status=${match.status} lang=${match.language} params=${match.parameter_count}`);
-      const problems = [];
-      if (!approved) problems.push(`status is ${match.status}, not APPROVED`);
-      if (Number(match.parameter_count) !== 2) problems.push(`declares ${match.parameter_count} variables, code sends 2`);
-      if (match.language !== 'en') problems.push(`language is "${match.language}", code sends "en"`);
-      if (problems.length) {
-        templateDetail = `Template "${OTP_TEMPLATE}" is not usable: ${problems.join('; ')}`;
-        console.log(`        BLOCKING: ${templateDetail}`);
+      const outcome = checkTemplate(list, OTP_TEMPLATE, 'AUTHENTICATION', TEMPLATE_LANG);
+      checks.otpTemplate = outcome;
+      templateReady = outcome.ok;
+      templateDetail = outcome.detail;
+    }
+
+    // The invoice template only matters when the flag is on.
+    if (INVOICE_ENABLED) {
+      if (!INVOICE_TEMPLATE) {
+        line(false, 'WHATSAPP_INVOICE_TEMPLATE_NAME',
+          'not set while WHATSAPP_INVOICE_ENABLED=true');
+        checks.invoiceTemplate = {
+          ok: false,
+          detail: 'WHATSAPP_INVOICE_ENABLED=true but WHATSAPP_INVOICE_TEMPLATE_NAME is not set',
+        };
       } else {
-        templateReady = true;
-        templateDetail = `${OTP_TEMPLATE} approved, en, 2 variables`;
+        // Invoices are UTILITY templates, not AUTHENTICATION ones.
+        checks.invoiceTemplate = checkTemplate(list, INVOICE_TEMPLATE, 'UTILITY', TEMPLATE_LANG);
       }
     }
   }
+
+  checks.token = { ok: Boolean(tokenOk) };
+  checks.phoneId = { ok: Boolean(phoneOk) };
 
   // ---- 6. Optional real send ---------------------------------------------
   if (send) {
@@ -206,6 +306,10 @@ async function main() {
       line(false, 'ADMIN_WHATSAPP_NUMBER', 'not set - refusing to guess a recipient');
       process.exitCode = 1;
     } else {
+      // Build exactly what the app builds: an AUTHENTICATION-category payload
+      // with the code as the body parameter AND as the copy-code button
+      // parameter at index 0. A body-only payload is what Meta rejects.
+      const TEST_CODE = '123456';
       const res = await api(`/${phoneId}/messages`, {
         method: 'POST',
         body: JSON.stringify({
@@ -215,8 +319,16 @@ async function main() {
           type: 'template',
           template: {
             name: OTP_TEMPLATE,
-            language: { code: 'en' },
-            components: [{ type: 'body', parameters: [{ type: 'text', text: '123456' }, { type: 'text', text: '5' }] }],
+            language: { code: TEMPLATE_LANG },
+            components: [
+              { type: 'body', parameters: [{ type: 'text', text: TEST_CODE }] },
+              {
+                type: 'button',
+                sub_type: 'copy_code',
+                index: '0',
+                parameters: [{ type: 'text', text: TEST_CODE }],
+              },
+            ],
           },
         }),
       });
@@ -230,7 +342,33 @@ async function main() {
     console.log('  (--send refuses to fire unless the template above is APPROVED and correctly shaped.)');
   }
 
-  void tokenOk;
+  // ---- 7. Machine-readable result + exit code -----------------------------
+  // go-live.js reads this line instead of scraping prose. It contains check
+  // NAMES and booleans only — no token, no phone number, no secret value.
+  const allOk =
+    Boolean(checks.token?.ok) &&
+    Boolean(checks.waba?.ok) &&
+    Boolean(checks.phoneId?.ok) &&
+    Boolean(checks.otpTemplate?.ok) &&
+    (checks.invoiceTemplate ? Boolean(checks.invoiceTemplate.ok) : true);
+
+  console.log(
+    `GO_LIVE_JSON ${JSON.stringify({
+      token: Boolean(checks.token?.ok),
+      waba: Boolean(checks.waba?.ok),
+      phoneId: Boolean(checks.phoneId?.ok),
+      otpTemplate: Boolean(checks.otpTemplate?.ok),
+      otpTemplateCategory: 'AUTHENTICATION',
+      otpTemplateLanguage: TEMPLATE_LANG || null,
+      otpTemplateName: OTP_TEMPLATE || null,
+      invoiceTemplate: checks.invoiceTemplate ? Boolean(checks.invoiceTemplate.ok) : null,
+      invoiceTemplateName: INVOICE_ENABLED ? INVOICE_TEMPLATE || null : null,
+      allOk,
+    })}`
+  );
+
+  // Nothing here printed a secret, so this is safe to log.
+  process.exit(allOk && !process.exitCode ? 0 : 1);
 }
 
 main().catch((err) => {

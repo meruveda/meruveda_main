@@ -9,6 +9,10 @@ import {
   signupLimiter,
   otpSendLimiter,
   otpVerifyLimiter,
+  otpSendPerPhoneLimiter,
+  otpSendPerIpLimiter,
+  otpVerifyPerPhoneLimiter,
+  otpVerifyPerIpLimiter,
   passwordResetLimiter,
 } from '../middleware/rateLimit';
 
@@ -26,9 +30,19 @@ router.post('/quick-login', quickLoginLimiter, quickLogin as any);
 
 // WhatsApp OTP login/registration used by the checkout form
 // (disabled when OTP_ENABLED != true — see otpController).
-router.post('/otp/send', otpSendLimiter, sendOtp as any);
-router.post('/otp/resend', otpSendLimiter, resendOtp as any);
-router.post('/otp/verify', otpVerifyLimiter, verifyOtp as any);
+//
+// Three buckets each: composite (ip+phone), phone alone and IP alone. The
+// composite bucket alone leaves both an IP-rotation flood against one number
+// and a one-host spray across many numbers completely unthrottled.
+router.post('/otp/send', otpSendLimiter, otpSendPerPhoneLimiter, otpSendPerIpLimiter, sendOtp as any);
+router.post('/otp/resend', otpSendLimiter, otpSendPerPhoneLimiter, otpSendPerIpLimiter, resendOtp as any);
+router.post(
+  '/otp/verify',
+  otpVerifyLimiter,
+  otpVerifyPerPhoneLimiter,
+  otpVerifyPerIpLimiter,
+  verifyOtp as any
+);
 router.put('/profile', requireAuth as any, updateCheckoutProfile as any);
 
 router.get('/me', requireAuth as any, getMe as any);

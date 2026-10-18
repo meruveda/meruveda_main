@@ -99,9 +99,19 @@ export const config = {
   whatsappOrderTemplateName: (process.env.WHATSAPP_ORDER_TEMPLATE_NAME || '').trim(),
   whatsappReviewTemplateName: (process.env.WHATSAPP_REVIEW_TEMPLATE_NAME || '').trim(),
   whatsappTemplateLang: (process.env.WHATSAPP_TEMPLATE_LANG || 'en').trim(),
-  // When true (or when no token is configured), sends are logged instead of
-  // dispatched and the OTP is printed to the server console. Never enables
-  // itself in production — see the devOtp gate in otpService.
+  // Master switch for WhatsApp INVOICE delivery. Default false = the WhatsApp
+  // invoice channel is switched off and every other part of the order flow
+  // behaves exactly as it did before this flag existed.
+  whatsappInvoiceEnabled: process.env.WHATSAPP_INVOICE_ENABLED === 'true',
+  // 'document' -> attach the PDF in the template's document header.
+  // 'link'     -> put a signed, expiring URL in the template body instead.
+  // Read from env only; never hardcoded per deployment.
+  whatsappInvoiceMode: (
+    process.env.WHATSAPP_INVOICE_MODE || 'document'
+  ).trim().toLowerCase() === 'link' ? 'link' : 'document',
+  // When true, sends are logged instead of dispatched. Hard-refused in
+  // production (see the audit block below): a silent dry run in production
+  // reports "OTP sent" to a customer who receives nothing.
   whatsappDryRun: process.env.WHATSAPP_DRY_RUN === 'true',
   // Meta App Dashboard > Settings > Basic > App Secret. Used to verify the
   // X-Hub-Signature-256 header on inbound webhook POSTs.
@@ -181,12 +191,28 @@ export const config = {
 // simply SKIPS WhatsApp quietly: no error, no attempt consumed, no failure
 // state written. Fill them on Vercel and redeploy and delivery starts by itself.
 export const invoiceWhatsapp = {
+  // Master switch (WHATSAPP_INVOICE_ENABLED). Off = the WhatsApp invoice
+  // channel is inert and the order flow is byte-for-byte what it was before.
+  enabled: config.whatsappInvoiceEnabled,
+  // `document` attaches the PDF in the template's document header; `link` puts
+  // a signed, expiring URL in the template body.
+  mode: config.whatsappInvoiceMode,
   configured: Boolean(
-    process.env.WHATSAPP_API_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID
+    (process.env.WHATSAPP_API_TOKEN || process.env.WHATSAPP_TOKEN) &&
+      process.env.WHATSAPP_PHONE_NUMBER_ID
   ),
-  // Approved UTILITY template carrying a DOCUMENT header.
-  templateName: (process.env.INVOICE_WA_TEMPLATE_NAME || 'INVOICE_WITH_DOCUMENT').trim(),
-  templateLang: (process.env.INVOICE_WA_TEMPLATE_LANG || 'en_US').trim(),
+  // Approved UTILITY template carrying a DOCUMENT header (or a plain link body
+  // when mode is 'link'). Name + language come from env only.
+  templateName: (
+    process.env.WHATSAPP_INVOICE_TEMPLATE_NAME ||
+    process.env.INVOICE_WA_TEMPLATE_NAME ||
+    'invoice_with_document'
+  ).trim(),
+  templateLang: (
+    process.env.WHATSAPP_TEMPLATE_LANG ||
+    process.env.INVOICE_WA_TEMPLATE_LANG ||
+    'en'
+  ).trim(),
   // true logs the exact payload and never calls Meta.
   dryRun: process.env.WHATSAPP_DRY_RUN === 'true',
   // How far back the delivery sweep looks for invoices that were issued but
@@ -273,15 +299,33 @@ if (nodeEnv === 'production') {
 
   // OTP digests are only as strong as their pepper. Without it the fallback is
   // a constant published in the source tree, so the otps table is effectively
-  // brute-forceable by anyone holding a dump.
-  if (!process.env.OTP_HASH_PEPPER) {
-    warn.push('OTP_HASH_PEPPER — OTP codes are hashed with a development fallback pepper; rotate before going live');
+  // brute-forceable by anyone holding a dump. Both documented spellings count.
+  if (!(process.env.OTP_HASH_PEPPER || process.env.OTP_HASH_SECRET)) {
+    warn.push('OTP_HASH_PEPPER (or OTP_HASH_SECRET) — OTP codes are hashed with a development fallback pepper; rotate before going live');
+  }
+
+  // WHATSAPP_DRY_RUN=true in production makes sendTemplate return true without
+  // ever calling Meta, so the checkout answers "OTP sent to your WhatsApp
+  // number" to a customer who receives nothing. That is a silent, false-green
+  // failure, so it is fatal rather than a warning.
+  if (process.env.WHATSAPP_DRY_RUN === 'true') {
+    fatal.push(
+      'WHATSAPP_DRY_RUN — must never be true in production: it reports "OTP sent" while sending nothing',
+    );
   }
 
   // WhatsApp is an OPTIONAL slot. When it is unset the invoice pipeline skips
   // WhatsApp quietly and nothing is warned about: that is a supported state.
-  if (process.env.WHATSAPP_API_TOKEN && !process.env.WHATSAPP_APP_SECRET) {
+  if ((process.env.WHATSAPP_API_TOKEN || process.env.WHATSAPP_TOKEN) && !process.env.WHATSAPP_APP_SECRET) {
     warn.push('WHATSAPP_APP_SECRET — webhook signatures cannot be verified; receiveWebhook then rejects every call in production');
+  }
+
+  // Invoice delivery on WhatsApp: the flag is on, so a missing template name
+  // would silently deliver nothing.
+  if (config.whatsappInvoiceEnabled && !config.whatsappInvoiceTemplateName) {
+    fatal.push(
+      'WHATSAPP_INVOICE_TEMPLATE_NAME — WHATSAPP_INVOICE_ENABLED is true but no invoice template name is set, so invoices would be issued and never delivered',
+    );
   }
 
   // Invoice: GST compliance needs a real GSTIN on the printed invoice.
