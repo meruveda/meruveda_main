@@ -441,6 +441,87 @@ export const invoiceStatus = async (req: Request, res: Response, next: NextFunct
   }
 };
 
+/**
+ * Re-attempt delivery of an invoice that was issued but never handed over.
+ *
+ * This is NOT a "send me the invoice again" button. It is idempotent in the
+ * same way the automatic sweep is: if `state.json` already records the WhatsApp
+ * channel as `sent`, nothing is sent and the call is a no-op. One order still
+ * results in exactly one delivered invoice.
+ *
+ * No response shape is invented for the rest of the invoice API — it mirrors
+ * `invoiceStatus` (`{ data: {...} }`) so an operator tooling one call site works
+ * for both.
+ */
+export const resendInvoice = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { id } = req.params;
+
+    const { data: orderRow, error: lookupError } = await supabase
+      .from('orders')
+      .select('id, order_number')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (lookupError) {
+      console.error(`[Invoice] resend lookup failed for ${id}:`, lookupError.message);
+      return res.status(503).json({
+        error: { message: `Could not read this order (${lookupError.code || 'database error'}).` },
+      });
+    }
+    if (!orderRow) {
+      return res.status(404).json({ error: { message: 'Order not found' } });
+    }
+
+    // Flag off = exactly the previous behaviour: the WhatsApp invoice channel is
+    // inert, so there is nothing to re-attempt.
+    if (!invoiceDispatchService.whatsappInvoiceEnabled()) {
+      return res.json({
+        data: {
+          orderNumber: orderRow.order_number,
+          status: 'skipped',
+          reason: 'WhatsApp invoice delivery is disabled (WHATSAPP_INVOICE_ENABLED=false)',
+        },
+      });
+    }
+
+    const before = deriveInvoiceStatus(await readInvoiceState(orderRow.id));
+    if (before.status === 'sent') {
+      return res.json({
+        data: {
+          orderNumber: orderRow.order_number,
+          status: 'skipped',
+          reason: 'invoice already delivered on WhatsApp — one order sends one invoice',
+          sentAt: before.sentAt,
+        },
+      });
+    }
+
+    // Never throws: sendInvoiceDispatch handles its own failures, and anything
+    // unexpected is caught here so a resend can never 500 the admin UI.
+    const dispatch = await invoiceDispatchService.sendInvoiceDispatch(orderRow.id);
+    const after = deriveInvoiceStatus(await readInvoiceState(orderRow.id));
+
+    return res.json({
+      data: {
+        orderNumber: orderRow.order_number,
+        invoiceNumber: dispatch.invoiceNumber || null,
+        status: after.status,
+        whatsapp: dispatch.whatsapp,
+        adminCopy: dispatch.adminCopy,
+        email: dispatch.email,
+        busy: Boolean(dispatch.busy),
+        reason: dispatch.reason || null,
+        sentAt: after.sentAt,
+      },
+    });
+  } catch (error: any) {
+    // A resend is an operator convenience; it must never take anything down.
+    console.error(`[Invoice] resend failed:`, error?.message || error);
+    next(error);
+  }
+};
+
 /** Manual fallback: push one order to Shiprocket (admin). */
 export const pushToShiprocket = async (req: Request, res: Response, next: NextFunction) => {
   try {

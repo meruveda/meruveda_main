@@ -33,6 +33,33 @@ export function isInvoiceEligible(order: any, _source?: PostOrderSource): boolea
   return Boolean(order);
 }
 
+/**
+ * Should this trigger issue the invoice, honouring the WHATSAPP_INVOICE_ENABLED
+ * flag?
+ *
+ * Flag OFF (the default): exactly the previous behaviour. COD placement issues,
+ * the PayU callback does not.
+ *
+ * Flag ON: the PayU success callback ALSO issues, because that is the moment
+ * payment is confirmed — the one moment an invoice for a prepaid order may
+ * legitimately be sent. The dispatcher's atomic claim still guarantees one
+ * invoice per order, so a duplicate callback cannot double-issue.
+ *
+ * This lives here rather than at the PayU call site so the callback controller
+ * is not modified at all.
+ */
+export function shouldIssueInvoice(
+  requested: boolean,
+  order: any,
+  source: PostOrderSource
+): boolean {
+  if (requested) return true;
+  if (source !== 'payu_success') return false;
+  if (!invoiceDispatchService.whatsappInvoiceEnabled()) return false;
+  // Only once the money is actually confirmed recorded on the order row.
+  return String(order?.payment_status || '').trim().toLowerCase() === 'paid';
+}
+
 /* ------------------------------------------------------------------ */
 /* Failure bookkeeping — never throws, never blocks the order flow     */
 /* ------------------------------------------------------------------ */
@@ -81,10 +108,9 @@ async function saveShiprocketError(orderId: string, message: string): Promise<vo
  *     admin retry UI.
  *   - The invoice path is invoiceDispatchService and nothing else; the old
  *     WhatsApp-only branch has been removed.
- *   - It returns as soon as the jobs are KICKED OFF, not when they finish.
- *     Callers that must not block (the PayU browser redirect) rely on that:
- *     idempotency comes from the atomic claim inside the dispatcher, not from
- *     waiting.
+ *   - The returned promise IS the background work, so `keepAlive()` (and hence
+ *     Vercel's `waitUntil`) holds the real work open. Callers still do not
+ *     await it — the customer's checkout response is never delayed.
  */
 export function postOrderConfirmed(
   orderId: string,
@@ -104,11 +130,14 @@ export function postOrderConfirmed(
           .eq('id', orderId)
           .maybeSingle();
 
-// The PayU success callback records payment and must NOT issue: the invoice
-        // was already issued at order creation. Issuing again would risk a
-        // second tax document for one order.
-        if (!invoice) {
-          result.invoice = { ok: true, skipped: true, reason: 'invoice already issued at order creation' };
+        const issue = shouldIssueInvoice(invoice, order, source);
+
+        if (!issue) {
+          result.invoice = {
+            ok: true,
+            skipped: true,
+            reason: 'invoice already issued at order creation',
+          };
         } else if (!isInvoiceEligible(order, source)) {
           result.invoice = { ok: true, skipped: true, reason: 'order not found' };
         } else {
@@ -176,14 +205,24 @@ export function postOrderConfirmed(
     return result;
   })();
 
-  // `wait: true` is for callers that genuinely must block (tests, admin tools).
-  // The PayU callback uses the default fire-and-return so the customer's
-  // redirect is never delayed by invoice rendering or provider latency.
-  if (wait) return work;
+  // BUG FIXED HERE — this is why the 2026-10-16 COD orders never got an invoice.
+  //
+  // This used to return `Promise.resolve({...})` immediately and run the real
+  // work on a detached `void work.catch(...)`. Every caller wraps this in
+  // `keepAlive(postOrderConfirmed(...))`, and `keepAlive` hands its argument to
+  // Vercel's `waitUntil()`. So waitUntil was registering an ALREADY-SETTLED
+  // promise: the actual invoice dispatch was never registered with the
+  // invocation, and Vercel froze the function as soon as the 201 / redirect
+  // flushed. The PDF render died mid-flight with no state.json, no claim, no
+  // error recorded anywhere — exactly the signature those orders have.
+  //
+  // Returning `work` costs nothing to either caller: neither `await`s it, and
+  // `keepAlive` never blocks the response. It only means the real work is what
+  // waitUntil now holds open.
   void work.catch((err: any) => {
     console.error('[PostOrder] post-confirmation work failed:', err?.message || err);
   });
-  return Promise.resolve({ invoice: { ok: false }, shiprocket: { ok: false } });
+  return work;
 }
 
 /**

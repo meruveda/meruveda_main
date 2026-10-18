@@ -14,7 +14,7 @@ import {
   writeInvoiceIssue,
 } from './invoiceService';
 import { getInvoiceEmailTemplate, isEmailConfigured, sendEmailWithAttachments } from './emailService';
-import { normalizePhone, sendInvoiceDocumentTemplate } from './whatsappService';
+import { normalizePhone, sendInvoiceTemplate, logMessage } from './whatsappService';
 import {
   createInvoiceSignedUrl,
   deleteInvoiceClaim,
@@ -81,6 +81,55 @@ function customerEmail(order: any): string {
 function customerFirstName(order: any): string {
   const full = order?.shipping_address?.fullName || order?.billing_address?.fullName || '';
   return String(full).split(' ').filter(Boolean)[0] || '';
+}
+
+/* ------------------------------------------------------------------ */
+/* WhatsApp invoice delivery — behind WHATSAPP_INVOICE_ENABLED          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Is WhatsApp invoice delivery switched on?
+ *
+ * WHATSAPP_INVOICE_ENABLED defaults to false, and false means the WhatsApp
+ * channel is inert: no template is looked at, no attempt is consumed, no
+ * failure is recorded, and the rest of the order flow is byte-for-byte what it
+ * was before this feature existed.
+ */
+export function whatsappInvoiceEnabled(): boolean {
+  return invoiceWhatsapp.enabled === true;
+}
+
+/**
+ * Record one delivery attempt in `whatsapp_message_log`.
+ *
+ * Every attempt is logged, sent or failed, so "the invoice never arrived" is
+ * always answerable from the database. Never throws and never blocks the caller:
+ * the log is bookkeeping, not delivery.
+ */
+async function logInvoiceAttempt(entry: {
+  orderId: string;
+  referenceId: string;
+  recipient: string;
+  status: 'sent' | 'failed';
+  error?: string;
+  invoiceNumber: string;
+  mode: 'document' | 'link';
+}): Promise<void> {
+  try {
+    await logMessage({
+      recipient: entry.recipient,
+      templateName: invoiceWhatsapp.templateName,
+      messageType: entry.mode === 'link' ? 'template_link' : 'template_document',
+      purpose: entry.referenceId.endsWith(':admin') ? ADMIN_PURPOSE : WHATSAPP_PURPOSE,
+      referenceId: entry.referenceId,
+      status: entry.status,
+      error: entry.error,
+      // Order id and invoice number only. No signed URL, no phone number.
+      payload: { orderId: entry.orderId, invoiceNumber: entry.invoiceNumber, mode: entry.mode },
+    });
+  } catch (err: any) {
+    console.error('[Invoice] could not write the WhatsApp message log:', err?.message || err);
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -315,17 +364,18 @@ export async function sendInvoiceDispatch(orderId: string): Promise<InvoiceDispa
     return delivered ? 'sent' : 'failed';
   };
 
-  /* ---- 5. WhatsApp channel — approved UTILITY template, DOCUMENT header ---- */
+  /* ---- 5. WhatsApp channel — approved template, gated by the flag ---- */
   // Outside the 24h customer-service window Meta only accepts a template
-  // message, so the PDF must ride on a template whose first component is a
-  // document header.
+  // message, so the PDF is attached (document mode) or handed over as a signed
+  // link (link mode).
   //
-  // If the Meta slot is empty this SKIPS QUIETLY: no error, no attempt
-  // consumed, no failure state written. The invoice is still issued and
-  // downloadable; the backfill sweep delivers it later if the slot is filled in.
+  // If the flag is off this returns 'disabled' immediately: no template is
+  // looked at, no attempt is consumed and no failure state is written. The
+  // invoice is still issued and downloadable.
   const runWhatsappChannel = async (): Promise<ChannelStatus> => {
     const phone = customerPhone(order);
     if (!phone) return 'disabled';
+    if (!whatsappInvoiceEnabled()) return 'disabled';
     if (!invoiceWhatsapp.configured) {
       // Not an error and not a failure — the slot is simply empty.
       await patchChannel(orderId, 'whatsapp', { status: 'not_configured' });
@@ -333,11 +383,14 @@ export async function sendInvoiceDispatch(orderId: string): Promise<InvoiceDispa
     }
 
     const existing = await readInvoiceState(orderId);
+    // Idempotency: one order sends one invoice. The sent flag + timestamp in
+    // state.json is the record; a second trigger reads it and does nothing.
     if (existing?.channels?.whatsapp?.status === 'sent') return 'skipped';
 
     const signedUrl = await signedUrlPromise;
+    const mode = invoiceWhatsapp.mode === 'link' ? 'link' : 'document';
     const delivered = await withTimeout(
-      sendInvoiceDocumentTemplate({
+      sendInvoiceTemplate({
         to: phone,
         customerName: custName,
         orderNumber: order.order_number,
@@ -360,18 +413,29 @@ export async function sendInvoiceDispatch(orderId: string): Promise<InvoiceDispa
       lastAttemptAt: new Date().toISOString(),
       lastError: delivered ? null : 'Meta rejected the invoice template message',
     });
+
+    await logInvoiceAttempt({
+      orderId,
+      referenceId: orderId,
+      recipient: phone,
+      status: delivered ? 'sent' : 'failed',
+      error: delivered ? undefined : 'Meta rejected the invoice template message',
+      invoiceNumber,
+      mode,
+    });
+
     return delivered ? 'sent' : 'failed';
   };
 
   /* ---- 6. copy to the store owner — best effort ---- */
   const runAdminCopyChannel = async (): Promise<ChannelStatus> => {
     const adminPhone = normalizePhone(config.adminWhatsappNumber);
-    if (!adminPhone || !invoiceWhatsapp.configured) return 'disabled';
-    if (!adminPhone) return 'disabled';
+    if (!adminPhone || !whatsappInvoiceEnabled() || !invoiceWhatsapp.configured) return 'disabled';
 
     const signedUrl = await signedUrlPromise;
+    const mode = invoiceWhatsapp.mode === 'link' ? 'link' : 'document';
     const delivered = await withTimeout(
-      sendInvoiceDocumentTemplate({
+      sendInvoiceTemplate({
         to: adminPhone,
         customerName: 'Store admin',
         orderNumber: order.order_number,
@@ -386,6 +450,17 @@ export async function sendInvoiceDispatch(orderId: string): Promise<InvoiceDispa
       console.error('[Invoice] admin copy failed:', err?.message || err);
       return false;
     });
+
+    await logInvoiceAttempt({
+      orderId,
+      referenceId: `${orderId}:admin`,
+      recipient: adminPhone,
+      status: delivered ? 'sent' : 'failed',
+      error: delivered ? undefined : 'Meta rejected the invoice template message',
+      invoiceNumber,
+      mode,
+    });
+
     return delivered ? 'sent' : 'failed';
   };
 
@@ -459,8 +534,9 @@ export interface InvoiceRetryRow {
  * sale happened when the order was placed.
  */
 export async function retryPendingInvoices(limit = 25): Promise<InvoiceRetryRow[]> {
-  // Without the Meta slot there is nothing to sweep toward. Returning quietly is
-  // the correct behaviour, not a failure.
+  // Without the flag, or without the Meta slot, there is nothing to sweep
+  // toward. Returning quietly is the correct behaviour, not a failure.
+  if (!whatsappInvoiceEnabled()) return [];
   if (!invoiceWhatsapp.configured) return [];
 
   const since = new Date(Date.now() - invoiceWhatsapp.backfillDays * 24 * 60 * 60 * 1000);
@@ -528,5 +604,6 @@ export const invoiceDispatchService = {
   createInvoiceSignedUrl,
   downloadInvoicePdf,
   readInvoiceState,
+  whatsappInvoiceEnabled,
   MAX_INVOICE_ATTEMPTS,
 };

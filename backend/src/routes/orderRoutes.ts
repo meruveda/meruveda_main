@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getOrders, getOrderById, createOrder, updateOrderStatus, getMyOrders, updateOrder, deleteOrder, trackOrder, trackByAwb, invoiceStatus, downloadInvoice, pushToShiprocket, retryShiprocketPushes } from '../controllers/ordersController';
+import { getOrders, getOrderById, createOrder, updateOrderStatus, getMyOrders, updateOrder, deleteOrder, trackOrder, trackByAwb, invoiceStatus, resendInvoice, downloadInvoice, pushToShiprocket, retryShiprocketPushes } from '../controllers/ordersController';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { orderCreateLimiter } from '../middleware/rateLimit';
 
@@ -23,11 +23,14 @@ router.use(requireAuth as any);
 router.get('/my', getMyOrders as any);
 router.post('/', orderCreateLimiter, createOrder as any);
 
-// Read-only invoice delivery status. There is deliberately no resend/send
-// endpoint: delivery is automatic (COD at placement, PayU on verified callback)
-// and the cron sweep retries failures, so a manual trigger would be a second way
-// to deliver the same tax document twice.
+// Read-only invoice delivery status. Delivery is automatic (COD at placement,
+// PayU on the verified callback) and the cron sweep retries failures.
 router.get('/:id/invoice/status', invoiceStatus as any);
+
+// Re-attempt delivery of an invoice that was issued but never delivered.
+// Idempotent: a channel already recorded as `sent` is a no-op, so this can
+// never turn one order into two delivered invoices. Admin only.
+router.post('/:id/resend-invoice', requireAdmin as any, resendInvoice as any);
 
 // Owner or admin may download the fixed GST invoice PDF.
 router.get('/:id/invoice', downloadInvoice as any);
