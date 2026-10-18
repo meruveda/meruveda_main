@@ -19,6 +19,7 @@
     "dev:clean": "node -e \"require('fs').rmSync('frontend/.next',{recursive:true,force:true})\" && npm run dev",
     "build": "npm run build -w @meruveda/shared -w meruveda -w meruveda-admin -w backend",
     "build:shared": "npm run build -w @meruveda/shared",
-    "lint": "npm run lint --workspaces --if-present"
+    "lint": "npm run lint --workspaces --if-present",
+    "go-live": "npm run go-live -w backend"
   }
 }
