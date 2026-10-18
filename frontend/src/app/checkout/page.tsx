@@ -26,14 +26,18 @@ import axiosInstance from "@/api/axiosInstance";
 import { track as trackEvent } from "@/lib/analytics";
 import { INDIAN_STATES as STATES, isIndianState } from "@/constants/states";
 
-// OTP feature flag. Default false = the no-OTP Sign up / Login flow below is
-// active. Set NEXT_PUBLIC_OTP_ENABLED=true to bring the WhatsApp OTP UI back.
-// Backend must have OTP_ENABLED=true as well for the OTP endpoints to respond.
-const OTP_ENABLED = process.env.NEXT_PUBLIC_OTP_ENABLED === "true";
-
+// The WhatsApp OTP is the only way to identify a customer at checkout: the
+// Send OTP button sits where "Sign up" used to be, and there is no separate
+// login or signup step on this page.
+//
+// NEXT_PUBLIC_OTP_ENABLED is no longer read here. It used to switch between
+// this flow and a no-OTP "Sign up" button; with the Sign up button gone the
+// flag has nothing left to switch, and the real gate is the backend's
+// OTP_ENABLED (which 503s /api/auth/otp/* when off). The variable name is
+// still accepted in .env so existing files keep working — it is simply inert.
 const SHIPPING_IS_TAXABLE = false; // TODO: PENDING CLIENT CONFIRMATION. Set to true to tax shipping charges.
 
-const OTP_RESEND_SECONDS = 45;
+const OTP_RESEND_SECONDS = 30;
 
 // All Indian states and Union Territories — dropdown for the delivery address.
 // Single source of truth: also drives validation on the saved-address path and
@@ -286,7 +290,7 @@ function writeStoredAddresses(list: Address[]) {
 
 export default function CheckoutPage() {
   const { cart, cartTotal, removeFromCart, updateQuantity } = useCart();
-  const { user, isAuthenticated, isLoading, sendOtp, resendOtp, verifyOtp, quickLogin, saveProfile } = useAuth();
+  const { user, isAuthenticated, isLoading, sendOtp, resendOtp, verifyOtp, saveProfile } = useAuth();
   const router = useRouter();
 
   // No separate login screen: the checkout form itself is the login.
@@ -315,8 +319,6 @@ export default function CheckoutPage() {
   const [otpError, setOtpError] = useState("");
   const [otpResendIn, setOtpResendIn] = useState(0);
   const [customerEmail, setCustomerEmail] = useState("");
-  // No-OTP Sign up flow (active while OTP_ENABLED is false).
-  const [isSigningUp, setIsSigningUp] = useState(false);
   const [mobileError, setMobileError] = useState("");
 
   const hydratedFromProfileRef = useRef(false);
@@ -444,6 +446,10 @@ export default function CheckoutPage() {
 
   // Prefill the contact + address form from the signed-in customer, but never
   // skip the form itself — the user still sees and confirms every field.
+  //
+  // A valid session DOES skip the OTP step: the number was already proven on a
+  // previous visit, so asking for a code again would be pure friction. The form
+  // still renders every field; only the verification gate is satisfied.
   useEffect(() => {
     if (!user) return;
     const fullName = [user.firstName, user.lastName].filter(Boolean).join(" ");
@@ -452,9 +458,12 @@ export default function CheckoutPage() {
     if (!customerEmail && user.email && !String(user.email).endsWith("@meruveda.whatsapp")) {
       setCustomerEmail(user.email);
     }
+    if (isAuthenticated) {
+      setOtpVerified(true);
+    }
     // The address form itself takes name/phone from step 1, so nothing to prefill.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user]);
+  }, [user, isAuthenticated]);
 
   // OTP resend cooldown ticker
   useEffect(() => {
@@ -510,43 +519,6 @@ export default function CheckoutPage() {
 
   /** 10-digit Indian mobile check on the normalized digits. */
   const isValidIndianMobile = (value: string): boolean => /^[6-9]\d{9}$/.test(normalizePhoneDigits(value));
-
-  /**
-   * No-OTP Sign up / Login (active while OTP_ENABLED is false).
-   * Backend logs the number in when it already exists, otherwise auto-creates
-   * the customer. After success the rest of checkout works exactly as before.
-   */
-  const handleSignUp = async () => {
-    setOtpError("");
-    setMobileError("");
-
-    if (!contactName.trim()) {
-      setOtpError("Please enter your name.");
-      return;
-    }
-    if (!isValidIndianMobile(mobile)) {
-      setMobileError("Enter a valid 10-digit Indian mobile number.");
-      return;
-    }
-
-    setIsSigningUp(true);
-    try {
-      await quickLogin(mobile, contactName.trim());
-      setOtpVerified(true);
-      setOtpMessage("Signed in. You can place your order now.");
-      if (typeof window !== "undefined") {
-        try {
-          window.dispatchEvent(new CustomEvent("meruveda:auth-changed"));
-        } catch {
-          /* noop */
-        }
-      }
-    } catch (err: any) {
-      setOtpError(err?.message || "Could not sign you in. Please try again.");
-    } finally {
-      setIsSigningUp(false);
-    }
-  };
 
   // Lets a verified customer unlock the number field (fields are locked on success).
   const handleChangeNumber = () => {
@@ -951,13 +923,13 @@ export default function CheckoutPage() {
     form.submit();
   };
 
-  // Place Order / Pay Action — requires a signed-in account (email login).
-  // (OTP verification is commented out; the old account setup is the gate.)
+  // Place Order / Pay Action — the WhatsApp OTP is the identity gate. There is
+  // no login redirect: verifying the number is what signs the customer in.
   const handlePlaceOrder = async () => {
-    if (!isAuthenticated || !user) {
-      setOtpError("Please log in to place your order.");
+    if (!otpVerified) {
+      setOtpError("Please verify your WhatsApp number before placing the order.");
       if (typeof window !== "undefined") {
-        router.push(`/login?next=${encodeURIComponent("/checkout")}`);
+        document.getElementById("checkout-contact")?.scrollIntoView({ behavior: "smooth", block: "center" });
       }
       return;
     }
@@ -1099,14 +1071,9 @@ export default function CheckoutPage() {
               Contact Details
             </h2>
 
-            {/* The form only owns submission while the OTP flow is active: the
-                Send button is type="submit", so Enter in a text field sends the
-                code. With OTP off there is no submit button in this form and
-                Enter must not reload the page. */}
-            <form
-              onSubmit={OTP_ENABLED ? handleSendOtp : (e) => e.preventDefault()}
-              className="space-y-4"
-            >
+            {/* This form owns submission: the Send button is type="submit", so Enter in a
+                text field sends the code. */}
+            <form onSubmit={handleSendOtp} className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
                   <label className={labelClass}>Full Name</label>
@@ -1132,36 +1099,17 @@ export default function CheckoutPage() {
                       className={`${inputClass} ${mobileError ? "border-red-400" : ""}`}
                       placeholder="98765 43210"
                     />
-                    {/* WhatsApp OTP entry point. Requires OTP_ENABLED=true on BOTH sides:
-                NEXT_PUBLIC_OTP_ENABLED (this file) and OTP_ENABLED (backend,
-                which 503s /auth/otp/* when off). When off, the Sign up button
-                runs the no-OTP quick-login flow instead. */}
-                    {OTP_ENABLED ? (
-                      !otpVerified && (
-                        <button
-                          type="submit"
-                          disabled={isSendingOtp || (otpResendIn > 0 && otpSent)}
-                          className="shrink-0 bg-deep-purple text-white px-4 py-2 text-xs font-bold rounded-lg hover:bg-deep-purple/90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
-                        >
-                          {isSendingOtp ? <Loader2 size={14} className="animate-spin" /> : <Smartphone size={14} />}
-                          {otpSent ? "Resend" : "Send OTP"}
-                        </button>
-                      )
-                    ) : (
+                    {/* WhatsApp OTP entry point. This button replaced "Sign up":
+                        there is no separate login or signup on this page. The
+                        backend 503s /api/auth/otp/* unless OTP_ENABLED=true. */}
+                    {!otpVerified && (
                       <button
-                        type="button"
-                        onClick={handleSignUp}
-                        disabled={isSigningUp || otpVerified}
+                        type="submit"
+                        disabled={isSendingOtp || (otpResendIn > 0 && otpSent)}
                         className="shrink-0 bg-deep-purple text-white px-4 py-2 text-xs font-bold rounded-lg hover:bg-deep-purple/90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
                       >
-                        {isSigningUp ? (
-                          <Loader2 size={14} className="animate-spin" />
-                        ) : otpVerified ? (
-                          <CheckCircle2 size={14} />
-                        ) : (
-                          <Smartphone size={14} />
-                        )}
-                        {otpVerified ? "Signed in" : "Sign up"}
+                        {isSendingOtp ? <Loader2 size={14} className="animate-spin" /> : <Smartphone size={14} />}
+                        {otpSent ? "Resend" : "Send OTP"}
                       </button>
                     )}
                   </div>
@@ -1201,7 +1149,7 @@ export default function CheckoutPage() {
                       className="shrink-0 bg-gold text-deep-purple px-6 py-2 text-xs font-bold rounded-lg hover:bg-gold-light disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                     >
                       {isVerifyingOtp ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
-                      Verify
+                      Verify OTP
                     </button>
                   </div>
                   <div className="flex items-center justify-between gap-3 text-[11px]">
@@ -1225,7 +1173,7 @@ export default function CheckoutPage() {
               {otpVerified && (
                 <div className="flex flex-wrap items-center justify-between gap-2 border border-green-200 bg-green-50 rounded-xl px-4 py-3">
                   <span className="flex items-center gap-2 text-xs font-bold text-green-700">
-                    <CheckCircle2 size={15} /> {OTP_ENABLED ? "Verified ✓" : "Signed in ✓"}
+                    <CheckCircle2 size={15} /> Verified ✓
                     <span className="font-medium text-green-600">{mobile}</span>
                   </span>
                   <button
@@ -1246,34 +1194,6 @@ export default function CheckoutPage() {
               <span className="w-6 h-6 bg-deep-purple text-white rounded-full text-xs flex items-center justify-center font-sans">2</span>
               Delivery Address &amp; Email
             </h2>
-
-            {/* Old setup — ordering needs a signed-in account (OTP commented out). */}
-            {!isAuthenticated && (
-              <div className="mb-5 flex flex-col gap-3 border border-gold/40 bg-gold/5 rounded-xl px-4 py-3 sm:flex-row sm:items-center">
-                <div className="flex items-start gap-2.5 flex-1">
-                  <Smartphone size={16} className="text-gold shrink-0 mt-0.5" />
-                  <p className="text-xs text-deep-purple leading-relaxed">
-                    <span className="font-bold">Login required.</span>{" "}
-                    Log in to place this order. You can enter the address meanwhile.
-                  </p>
-                </div>
-                <Link
-                  href={`/login?next=${encodeURIComponent("/checkout")}`}
-                  className="shrink-0 bg-deep-purple text-white px-4 py-2 text-xs font-bold rounded-lg hover:bg-deep-purple/90 transition-colors flex items-center justify-center gap-1.5"
-                >
-                  <Smartphone size={13} /> Login to Order
-                </Link>
-                {/*
-                <button
-                  type="button"
-                  onClick={handleVerifyMobileClick}
-                  className="shrink-0 bg-deep-purple text-white px-4 py-2 text-xs font-bold rounded-lg hover:bg-deep-purple/90 transition-colors flex items-center justify-center gap-1.5"
-                >
-                  <Smartphone size={13} /> Verify Mobile Number
-                </button>
-                */}
-              </div>
-            )}
 
             {/* Saved addresses — selectable cards, never faded or greyed out */}
             {addresses.length > 0 && !showNewAddressForm && (
@@ -1772,7 +1692,7 @@ export default function CheckoutPage() {
             {/* Submit Action — signed-in account required (old setup). */}
             <button
               onClick={handlePlaceOrder}
-              disabled={isPlacingOrder || !isServiceable || !isAuthenticated || !addressValid}
+              disabled={isPlacingOrder || !isServiceable || !otpVerified || !addressValid}
               className="w-full bg-gold text-deep-purple font-bold py-3.5 rounded-xl hover:bg-gold-light transition-all flex items-center justify-center gap-2 text-sm shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isPlacingOrder ? (
@@ -1780,8 +1700,8 @@ export default function CheckoutPage() {
                   <Loader2 size={18} className="animate-spin" />
                   Processing...
                 </>
-              ) : !isAuthenticated ? (
-                "Login to continue"
+              ) : !otpVerified ? (
+                "Verify your WhatsApp number to continue"
               ) : !deliveryAddressValid ? (
                 "Complete address to continue"
               ) : !emailValid ? (
@@ -1793,20 +1713,12 @@ export default function CheckoutPage() {
               )}
             </button>
 
-            {!isAuthenticated && (
+            {!otpVerified && !addressValid && (
               <p className="text-[11px] text-gray-400 text-center mt-2">
-                Please{" "}
-                <Link href={`/login?next=${encodeURIComponent("/checkout")}`} className="font-bold text-deep-purple hover:underline">
-                  log in
-                </Link>{" "}
-                to place your order. New here?{" "}
-                <Link href={`/signup?next=${encodeURIComponent("/checkout")}`} className="font-bold text-deep-purple hover:underline">
-                  Create an account
-                </Link>
-                .
+                Send and verify the WhatsApp OTP above to continue.
               </p>
             )}
-            {isAuthenticated && !addressValid && (
+            {otpVerified && !addressValid && (
               <p className="text-[11px] text-gray-400 text-center mt-2">
                 {!deliveryAddressValid
                   ? "Choose a saved address or complete every required address field."
