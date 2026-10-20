@@ -225,11 +225,18 @@ export const handlePayUCallback = async (req: Request, res: Response, next: Next
       console.log(`[PayU] payment verified for order ${orderNumber}, redirecting to ${successUrl}`);
       res.redirect(successUrl);
 
-      // Post-confirmation background work: the Shiprocket push. The redirect
-      // above has already been sent, so this cannot delay the customer â€” but it
-      // MUST be registered with waitUntil() via keepAlive(), otherwise Vercel
-      // tears the invocation down when the response flushes.
-      keepAlive(postOrderConfirmed(order.id, { source: 'payu_success', invoice: false }));
+      // Post-confirmation background work: invoice + Shiprocket push. The
+      // redirect above has already been sent, so this cannot delay the customer
+      // but it MUST be registered with waitUntil() via keepAlive(), otherwise
+      // Vercel tears the invocation down when the response flushes.
+      //
+      // invoice: true - a PayU order is created by initiatePayUPayment via
+      // orderService.createOrder, which never calls postOrderConfirmed (only
+      // the COD controller path does), so nothing issued the invoice at
+      // creation for prepaid orders. The dispatcher's atomic R2 claim
+      // (invoices/<id>/claim) still guarantees exactly one invoice per order,
+      // so a duplicate callback can never double-issue.
+      keepAlive(postOrderConfirmed(order.id, { source: 'payu_success', invoice: true }));
       return;
     } else {
       // Payment failed or cancelled
