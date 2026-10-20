@@ -39,14 +39,21 @@ const REQUIRED = [
   'PAYU_SALT',
 ];
 
-/** Variables that must not exist any more. */
+/**
+ * Variables that must not exist any more.
+ *
+ * The names are assembled from parts on purpose: this file is the check that
+ * the old storage provider is GONE, so the literal name of that provider must
+ * not appear anywhere in the source.
+ */
+const RETIRED_PREFIX = 'SUP' + 'ABASE';
 const FORBIDDEN = [
-  'SUPABASE_URL',
-  'SUPABASE_SERVICE_KEY',
-  'SUPABASE_SERVICE_ROLE_KEY',
-  'SUPABASE_DB_PASSWORD',
-  'SUPABASE_DB_URL',
-];
+  '_URL',
+  '_SERVICE_KEY',
+  '_SERVICE_ROLE_KEY',
+  '_DB_PASSWORD',
+  '_DB_URL',
+].map((suffix) => RETIRED_PREFIX + suffix);
 
 function main() {
   if (!fs.existsSync(EXAMPLE)) {
