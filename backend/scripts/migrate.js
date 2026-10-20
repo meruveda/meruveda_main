@@ -1,352 +1,198 @@
 /**
- * Delta migration runner.
+ * Neon migration runner — the ONE path that changes the schema.
  *
- * The Supabase REST client (@supabase/supabase-js) can only read and write rows
- * through PostgREST. It cannot run DDL - this project exposes zero SQL-executing
- * RPCs, so `CREATE TABLE` is impossible over REST. Applying
- * database/deltas/*.sql therefore needs a direct Postgres connection.
+ * Reads backend/database/neon/*.sql in filename order. Each file runs inside
+ * its own transaction against DATABASE_URL_UNPOOLED (migrations never go
+ * through the pooled endpoint), and is recorded in public._migrations with a
+ * sha256 checksum:
  *
- * Design:
- *   - Migrations run in filename order (001, 002, ... 010).
- *   - Each runs inside its own transaction, so a failure leaves nothing behind.
- *   - Applied files are recorded in public._migrations with a sha256 checksum;
- *     re-running is a no-op, and an edited file is reported as drift rather
- *     than silently re-applied.
- *   - The connection string is never logged. Only host and database are shown.
+ *   - applied + same checksum  -> no-op (safe re-run)
+ *   - applied + new checksum   -> DRIFT: fail loudly instead of re-applying
+ *   - not applied              -> run it
  *
- * Connection (in order of precedence):
- *   DATABASE_URL                  full postgres:// connection string
- *   SUPABASE_DB_HOST + SUPABASE_DB_PASSWORD + SUPABASE_URL
- *                                 host defaults to db.<ref>.supabase.co
+ * Every file must be additive and idempotent (IF NOT EXISTS / OR REPLACE) so a
+ * hand-applied schema baselines cleanly. The connection string is never
+ * printed: only host and database name are shown.
+ *
+ * Connection: DATABASE_URL_UNPOOLED, falling back to DATABASE_URL.
  *
  * Usage:
- *   node scripts/migrate.js --dry-run     list pending, execute nothing
- *   node scripts/migrate.js               apply every pending delta
- *   node scripts/migrate.js --only=005    apply a single delta by number
- *   node scripts/migrate.js --baseline    record already-satisfied deltas
- *
- * --baseline exists because _migrations starts empty on a database that was
- * migrated by hand through the SQL editor. Without it the runner would treat
- * 001-004 and 007 as pending and re-run them; 002 in particular is NOT
- * idempotent (ALTER TABLE ... RENAME COLUMN has no IF EXISTS guard) and would
- * abort the whole run. Baseline probes each delta's objects over PostgREST and
- * records the delta as applied when they are all already present.
+ *   node scripts/migrate.js --dry-run   list pending, execute nothing
+ *   node scripts/migrate.js             apply every pending migration
+ *   node scripts/migrate.js --only=002  apply a single migration (by prefix)
  */
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const DELTAS_DIR = path.join(__dirname, '..', 'database', 'deltas');
+const MIGRATIONS_DIR = path.join(__dirname, '..', 'database', 'neon');
 const MIGRATIONS_TABLE = 'public._migrations';
 
 const argv = process.argv.slice(2);
 const dryRun = argv.includes('--dry-run');
-const baseline = argv.includes('--baseline');
 const onlyArg = argv.find((a) => a.startsWith('--only='));
 const only = onlyArg ? onlyArg.split('=')[1] : null;
-
-/**
- * Objects each delta is expected to create, mirroring the statements in the
- * SQL itself. Baseline uses this to decide whether a delta is already applied.
- */
-const INVENTORY = {
-  '001_shiprocket_migration.sql': [
-    'products.weight', 'products.length', 'products.breadth', 'products.height', 'products.hsn',
-    'orders.shiprocket_order_id', 'orders.shipment_id', 'orders.awb_code', 'orders.courier_name',
-    'orders.tracking_url', 'orders.tracking_status', 'orders.pickup_location', 'orders.shipping_cost',
-    'orders.estimated_delivery', 'orders.manifest_url', 'orders.label_url', 'orders.invoice_url',
-    'orders.last_tracking_sync',
-  ],
-  '002_media_migration.sql': [
-    'media.public_url', 'media.bucket', 'media.size', 'media.mime_type', 'media.storage_path',
-  ],
-  '003_missing_tables_and_transactions.sql': [
-    'cms_pages', 'activity_logs', 'support_tickets', 'transactions', 'order_tracking_history',
-  ],
-  '004_banners_migration.sql': ['banners'],
-  '005_otp_whatsapp_review_requests.sql': [
-    'otps', 'whatsapp_message_log', 'review_requests', 'users.address', 'users.last_login_at',
-  ],
-  '006_missing_columns.sql': ['orders.delivered_at', 'reviews.is_featured', 'reviews.reply'],
-  '007_mobile_auth.sql': ['users.reset_password_token', 'users.reset_password_expires'],
-  // 008 is superseded by 006 (same two columns) and is an inert reference file.
-  '008_reviews_is_featured.sql': ['reviews.is_featured', 'reviews.reply'],
-  '009_page_views.sql': ['page_views', 'users.phone_verified'],
-  '010_auto_invoice_shiprocket.sql': [
-    'orders.invoice_sent_at', 'orders.invoice_error', 'orders.shiprocket_push_status',
-    'orders.shiprocket_push_error', 'orders.shiprocket_pushed_at', 'orders.shiprocket_push_started_at',
-  ],
-};
 
 function loadDotEnv() {
   const envPath = path.join(__dirname, '..', '.env');
   if (!fs.existsSync(envPath)) return;
   for (const line of fs.readFileSync(envPath, 'utf8').split(/\r?\n/)) {
-    const m = /^([A-Z0-9_]+)\s*=\s*(.*)$/.exec(line.trim());
+    const m = line.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
     if (!m) continue;
-    let v = m[2].trim();
-    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
-      v = v.slice(1, -1);
-    }
-    process.env[m[1]] = v;
+    let value = m[2].trim();
+    const quoted = value.match(/^(['"])(.*)\1$/);
+    if (quoted) value = quoted[2];
+    if (process.env[m[1]] === undefined) process.env[m[1]] = value;
   }
 }
 
 function buildConnection() {
-  if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
-
-  const password = process.env.SUPABASE_DB_PASSWORD;
-  if (!password) return null;
-
-  let host = process.env.SUPABASE_DB_HOST;
-  if (!host) {
-    const ref = (process.env.SUPABASE_URL || '').match(/https:\/\/([a-z0-9]+)\.supabase\.co/);
-    if (!ref) return null;
-    host = `db.${ref[1]}.supabase.co`;
+  const unpooled = (process.env.DATABASE_URL_UNPOOLED || '').trim();
+  const pooled = (process.env.DATABASE_URL || '').trim();
+  const url = unpooled || pooled;
+  if (!url) {
+    console.error('Missing DATABASE_URL_UNPOOLED (preferred) or DATABASE_URL in backend/.env');
+    process.exit(1);
   }
-  const user = process.env.SUPABASE_DB_USER || 'postgres';
-  return `postgresql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:5432/postgres`;
+  if (!unpooled && url.includes('-pooler')) {
+    console.warn('WARNING: only a pooled DATABASE_URL is set; migrations should use the unpooled endpoint.');
+  }
+  return url;
 }
 
-/** Never print the password: show only host + database. */
+/** host/database only — never the credentials. */
 function describe(connString) {
   try {
     const u = new URL(connString);
-    return `${u.hostname}:${u.port || 5432}/${u.pathname.replace(/^\//, '')}`;
+    return `${u.host}/${u.pathname.slice(1)}`;
   } catch {
     return '(unparseable connection string)';
+  }
+}
+
+function listMigrations() {
+  if (!fs.existsSync(MIGRATIONS_DIR)) {
+    console.error(`No migrations directory at ${path.relative(process.cwd(), MIGRATIONS_DIR)}`);
+    process.exit(1);
+  }
+  const files = fs
+    .readdirSync(MIGRATIONS_DIR)
+    .filter((f) => f.endsWith('.sql'))
+    .sort();
+  return files.map((name) => {
+    const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, name), 'utf8');
+    return {
+      name,
+      sql,
+      // The checksum is taken over the raw file (drift detection), but the
+      // runner owns the transaction, so a file's own BEGIN/COMMIT wrapper is
+      // stripped before execution — nested BEGIN only produces warnings and
+      // would commit before the _migrations row is written.
+      runnableSql: sql.replace(/^\s*BEGIN\s*;?/i, '').replace(/\bCOMMIT\s*;?\s*$/i, ''),
+      checksum: crypto.createHash('sha256').update(sql).digest('hex'),
+    };
+  });
+}
+
+/** Additive-only guard: a migration may never drop or truncate anything. */
+const DESTRUCTIVE = /^\s*(DROP\s+(TABLE|DATABASE|SCHEMA)|TRUNCATE|DELETE\s+FROM)\b/im;
+function assertAdditive(migration) {
+  if (DESTRUCTIVE.test(migration.sql)) {
+    console.error(`REFUSING ${migration.name}: destructive statement found (DROP/TRUNCATE/DELETE FROM).`);
+    console.error('Migrations here are additive only.');
+    process.exit(1);
   }
 }
 
 async function ensureMigrationsTable(client) {
   await client.query(`
     CREATE TABLE IF NOT EXISTS ${MIGRATIONS_TABLE} (
-      filename    TEXT PRIMARY KEY,
+      name        TEXT PRIMARY KEY,
       checksum    TEXT NOT NULL,
-      applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-    )
-  `);
+      applied_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+      duration_ms INTEGER NOT NULL DEFAULT 0
+    )`);
 }
 
 async function readApplied(client) {
-  const { rows } = await client.query(`SELECT filename, checksum FROM ${MIGRATIONS_TABLE}`);
-  return new Map(rows.map((r) => [r.filename, r.checksum]));
+  const { rows } = await client.query(`SELECT name, checksum FROM ${MIGRATIONS_TABLE}`);
+  const map = new Map();
+  for (const r of rows) map.set(r.name, r.checksum);
+  return map;
 }
 
-function listDeltas() {
-  return fs
-    .readdirSync(DELTAS_DIR)
-    .filter((f) => f.endsWith('.sql'))
-    .sort((a, b) => a.localeCompare(b, 'en', { numeric: true }))
-    .filter((f) => (only ? f.startsWith(`${only}_`) : true))
-    .map((filename) => {
-      const sql = fs.readFileSync(path.join(DELTAS_DIR, filename), 'utf8');
-      return { filename, sql, checksum: crypto.createHash('sha256').update(sql).digest('hex') };
-    });
-}
-
-/**
- * Safety gate: refuse to run a migration that contains a destructive verb.
- * Every checked-in delta is additive; this catches a bad local edit before it
- * reaches production data rather than after.
- */
-const DESTRUCTIVE = /^\s*(DROP\s+(TABLE|DATABASE|SCHEMA)|TRUNCATE|DELETE\s+FROM)\b/im;
-function assertAdditive(delta) {
-  const hit = delta.sql.match(DESTRUCTIVE);
-  if (hit) {
-    throw new Error(
-      `${delta.filename} contains a destructive statement (${hit[0].trim()}). Refusing to run it.`
-    );
-  }
-}
-
-/**
- * Baseline: record deltas whose objects are all already present.
- * Runs over PostgREST, so it works before any direct connection exists.
- */
-async function runBaseline() {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!url || !key) {
-    console.error('SUPABASE_URL / SUPABASE_SERVICE_KEY are required to baseline.');
-    process.exit(1);
-  }
-  const H = { apikey: key, Authorization: `Bearer ${key}` };
-  const present = async (name) => {
-    const dot = name.indexOf('.');
-    if (dot === -1) return (await fetch(`${url}/rest/v1/${name}?select=*&limit=1`, { headers: H })).ok;
-    const t = name.slice(0, dot);
-    const c = name.slice(dot + 1);
-    return (await fetch(`${url}/rest/v1/${t}?select=${encodeURIComponent(c)}&limit=1`, { headers: H })).ok;
-  };
-
-  const conn = buildConnection();
-  if (conn) {
-    const { Client } = require('pg');
-    const client = new Client({ connectionString: conn, ssl: { rejectUnauthorized: false } });
-    await client.connect();
-    try {
-      await ensureMigrationsTable(client);
-      for (const delta of listDeltas()) {
-        const objects = INVENTORY[delta.filename];
-        if (!objects) {
-          console.log(`  no inventory  ${delta.filename} - cannot baseline, skipping`);
-          continue;
-        }
-        const missing = [];
-        for (const o of objects) if (!(await present(o))) missing.push(o);
-        if (missing.length === 0) {
-          await client.query(
-            `INSERT INTO ${MIGRATIONS_TABLE} (filename, checksum) VALUES ($1, $2)
-             ON CONFLICT (filename) DO NOTHING`,
-            [delta.filename, delta.checksum]
-          );
-          console.log(`  baselined  ${delta.filename} (all ${objects.length} objects present)`);
-        } else {
-          console.log(`  pending    ${delta.filename}  missing: ${missing.join(', ')}`);
-        }
-      }
-    } finally {
-      await client.end().catch(() => {});
-    }
-  } else {
-    console.log('No direct connection yet - reporting what baseline WOULD record:\n');
-    for (const delta of listDeltas()) {
-      const objects = INVENTORY[delta.filename];
-      if (!objects) { console.log(`  no inventory  ${delta.filename}`); continue; }
-      const missing = [];
-      for (const o of objects) if (!(await present(o))) missing.push(o);
-      console.log(
-        missing.length === 0
-          ? `  would baseline  ${delta.filename}`
-          : `  would stay pending  ${delta.filename}  missing: ${missing.join(', ')}`
-      );
-    }
-  }
-}
-
-/**
- * Turn a driver error into something actionable. "password authentication
- * failed" and "getaddrinfo ENOTFOUND" need completely different fixes, and the
- * raw pg message does not make that obvious.
- */
 function classifyConnectionError(err) {
-  const msg = String(err?.message || err);
-  if (/password authentication failed|no pg_hba\.conf entry|authentication/i.test(msg)) {
-    return [
-      'AUTHENTICATED AS, BUT REJECTED. The host is reachable and the credentials are wrong.',
-      '',
-      'Supabase does NOT accept the service-role key as a database password — that key is',
-      'for the REST API only. Use the project database password instead:',
-      '  Supabase dashboard -> Project Settings -> Database -> Reset database password',
-      '  (or the password from the original project-setup email)',
-      '',
-      'Then set SUPABASE_DB_PASSWORD (or DATABASE_URL) in backend/.env and re-run.',
-    ].join('\n');
-  }
-  if (/ENOTFOUND|EAI_AGAIN/i.test(msg)) {
-    return 'HOST NOT RESOLVABLE. Check the project ref in SUPABASE_URL.';
-  }
-  if (/ECONNREFUSED/i.test(msg)) {
-    return 'CONNECTION REFUSED. Supabase direct connections are TCP/5432 only.';
-  }
-  if (/timeout|ETIMEDOUT/i.test(msg)) {
-    return 'TIMED OUT reaching the database. Likely a firewall blocking port 5432 outbound.';
-  }
-  return msg;
+  const code = err?.code;
+  if (code === '28P01' || code === '28000') return 'authentication failed — check the password in backend/.env';
+  if (code === '3D000') return 'database does not exist';
+  if (code === 'ECONNREFUSED' || code === 'ENOTFOUND') return 'could not reach the host';
+  if (code === '57P03') return 'the database is starting up, retry in a few seconds';
+  return err?.message || String(err);
 }
 
 async function main() {
   loadDotEnv();
-
-  if (baseline) {
-    await runBaseline();
-    return;
-  }
-
-  const conn = buildConnection();
-  if (!conn) {
-    console.error(
-      [
-        'No Postgres connection available.',
-        '',
-        'PostgREST cannot run DDL, so a direct connection is required. Set ONE of:',
-        '  DATABASE_URL                 postgresql://postgres:<pw>@db.<ref>.supabase.co:5432/postgres',
-        '  SUPABASE_DB_PASSWORD         the project database password',
-        '  (+ optional SUPABASE_DB_HOST, defaults to db.<ref>.supabase.co)',
-        '',
-        'The password is in Supabase -> Project Settings -> Database, or in the',
-        'original project-setup email. Do not paste it into chat.',
-      ].join('\n')
-    );
-    process.exit(1);
-  }
-
   const { Client } = require('pg');
-  const client = new Client({ connectionString: conn, ssl: { rejectUnauthorized: false } });
+  const conn = buildConnection();
+  const migrations = listMigrations().filter((m) => !only || m.name.startsWith(only));
+  migrations.forEach(assertAdditive);
 
-  console.log(`Target      : ${describe(conn)}`);
-  console.log(`Mode        : ${dryRun ? 'DRY RUN (nothing will be executed)' : 'APPLY'}`);
-  console.log(`Delta dir   : ${DELTAS_DIR}\n`);
+  const client = new Client({ connectionString: conn, ssl: { rejectUnauthorized: false } });
+  console.log(`Neon migrations -> ${describe(conn)} (dir: database/neon)`);
 
   try {
     await client.connect();
     await ensureMigrationsTable(client);
     const applied = await readApplied(client);
-    const deltas = listDeltas();
 
-    let pending = 0;
-    for (const delta of deltas) {
-      const prior = applied.get(delta.filename);
-      if (prior === delta.checksum) {
-        console.log(`  skip     ${delta.filename} (already applied)`);
-        continue;
+    const pending = [];
+    for (const migration of migrations) {
+      const recorded = applied.get(migration.name);
+      if (recorded === undefined) {
+        pending.push(migration);
+      } else if (recorded !== migration.checksum) {
+        console.error(`DRIFT: ${migration.name} was applied with a different checksum.`);
+        console.error('Never edit an applied migration — add a new file instead.');
+        process.exit(2);
       }
-      if (prior !== undefined) {
-        console.log(
-          `  DRIFT    ${delta.filename} was applied but the file has changed since.`
-        );
-        console.log('           Refusing to re-apply. Resolve the difference manually.');
-        process.exitCode = 1;
-        continue;
-      }
-      pending += 1;
+    }
+
+    if (pending.length === 0) {
+      console.log(`Nothing to do: ${migrations.length} migration(s) already applied.`);
+      return;
+    }
+
+    for (const migration of pending) {
       if (dryRun) {
-        console.log(`  pending  ${delta.filename}`);
+        console.log(`  would apply ${migration.name}`);
         continue;
       }
-
-      assertAdditive(delta);
-      process.stdout.write(`  apply    ${delta.filename} ... `);
+      const started = Date.now();
+      await client.query('BEGIN');
       try {
-        await client.query('BEGIN');
-        await client.query(delta.sql);
+        await client.query(migration.runnableSql);
+        const duration = Date.now() - started;
         await client.query(
-          `INSERT INTO ${MIGRATIONS_TABLE} (filename, checksum) VALUES ($1, $2)
-           ON CONFLICT (filename) DO UPDATE SET checksum = EXCLUDED.checksum, applied_at = now()`,
-          [delta.filename, delta.checksum]
+          `INSERT INTO ${MIGRATIONS_TABLE} (name, checksum, duration_ms) VALUES ($1, $2, $3)`,
+          [migration.name, migration.checksum, duration],
         );
         await client.query('COMMIT');
-        console.log('ok');
+        console.log(`  applied ${migration.name} (${duration}ms)`);
       } catch (err) {
-        await client.query('ROLLBACK').catch(() => {});
-        console.log('FAILED');
-        console.error(`\n${err.message}\n`);
-        console.error('Rolled back. No changes were applied.');
+        await client.query('ROLLBACK').catch(() => undefined);
+        console.error(`  FAILED ${migration.name}: ${classifyConnectionError(err)}`);
         process.exit(1);
       }
     }
 
-    console.log(
-      `\n${dryRun ? `${pending} delta(s) pending.` : pending === 0 ? 'Nothing to apply.' : `${pending} delta(s) applied.`}`
-    );
-    if (!dryRun && pending > 0) console.log('Run: node scripts/verify-schema.js to confirm the objects exist.');
+    if (dryRun) console.log(`${pending.length} migration(s) pending (dry run, nothing executed).`);
+    else console.log(`Done: ${pending.length} migration(s) applied.`);
+  } catch (err) {
+    console.error(`Migration run failed: ${classifyConnectionError(err)}`);
+    process.exit(1);
   } finally {
-    await client.end().catch(() => {});
+    await client.end().catch(() => undefined);
   }
 }
 
-main().catch((err) => {
-  console.error(classifyConnectionError(err));
-  process.exit(1);
-});
+main();

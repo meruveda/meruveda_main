@@ -1,0 +1,488 @@
+{
+  "tables": {
+    "_migrations": {
+      "columns": {
+        "name": "text",
+        "checksum": "text",
+        "applied_at": "timestamp with time zone",
+        "duration_ms": "integer"
+      }
+    },
+    "activity_logs": {
+      "columns": {
+        "id": "uuid",
+        "user_id": "uuid",
+        "action": "text",
+        "entity_type": "text",
+        "entity_id": "text",
+        "details": "jsonb",
+        "ip_address": "text",
+        "created_at": "timestamp with time zone"
+      }
+    },
+    "analytics_events": {
+      "columns": {
+        "id": "uuid",
+        "event_name": "character varying",
+        "path": "character varying",
+        "session_id": "character varying",
+        "product_id": "uuid",
+        "order_id": "uuid",
+        "value": "numeric",
+        "currency": "character varying",
+        "created_at": "timestamp with time zone"
+      }
+    },
+    "banners": {
+      "columns": {
+        "id": "uuid",
+        "heading": "text",
+        "subheading": "text",
+        "cta_text": "text",
+        "cta_link": "text",
+        "image_url": "text",
+        "display_order": "integer",
+        "is_active": "boolean",
+        "created_at": "timestamp with time zone",
+        "updated_at": "timestamp with time zone"
+      }
+    },
+    "blogs": {
+      "columns": {
+        "id": "uuid",
+        "title": "text",
+        "slug": "text",
+        "excerpt": "text",
+        "content": "text",
+        "author_id": "uuid",
+        "featured_image": "text",
+        "status": "text",
+        "seo_metadata": "jsonb",
+        "published_at": "timestamp with time zone",
+        "created_at": "timestamp with time zone",
+        "updated_at": "timestamp with time zone"
+      }
+    },
+    "cart_items": {
+      "columns": {
+        "id": "uuid",
+        "user_id": "uuid",
+        "product_id": "uuid",
+        "quantity": "integer",
+        "created_at": "timestamp with time zone",
+        "updated_at": "timestamp with time zone"
+      }
+    },
+    "categories": {
+      "columns": {
+        "id": "uuid",
+        "name": "text",
+        "slug": "text",
+        "description": "text",
+        "parent_id": "uuid",
+        "created_at": "timestamp with time zone",
+        "image": "text",
+        "banner": "text",
+        "isFeatured": "boolean"
+      }
+    },
+    "cms_pages": {
+      "columns": {
+        "id": "uuid",
+        "slug": "text",
+        "title": "text",
+        "content": "text",
+        "status": "text",
+        "created_at": "timestamp with time zone",
+        "updated_at": "timestamp with time zone"
+      }
+    },
+    "coupons": {
+      "columns": {
+        "id": "uuid",
+        "code": "text",
+        "type": "text",
+        "value": "numeric",
+        "min_purchase": "numeric",
+        "max_discount": "numeric",
+        "start_date": "timestamp with time zone",
+        "end_date": "timestamp with time zone",
+        "usage_limit": "integer",
+        "used_count": "integer",
+        "status": "text",
+        "created_at": "timestamp with time zone",
+        "updated_at": "timestamp with time zone",
+        "expires_at": "timestamp with time zone",
+        "active": "boolean"
+      }
+    },
+    "invoice_sequences": {
+      "columns": {
+        "fy": "text",
+        "last_value": "bigint",
+        "updated_at": "timestamp with time zone"
+      }
+    },
+    "media": {
+      "columns": {
+        "id": "uuid",
+        "filename": "text",
+        "public_url": "text",
+        "storage_path": "text",
+        "bucket": "text",
+        "mime_type": "text",
+        "size": "bigint",
+        "created_at": "timestamp with time zone"
+      }
+    },
+    "notifications": {
+      "columns": {
+        "id": "uuid",
+        "user_id": "uuid",
+        "title": "text",
+        "message": "text",
+        "type": "text",
+        "is_read": "boolean",
+        "link": "text",
+        "created_at": "timestamp with time zone"
+      }
+    },
+    "order_items": {
+      "columns": {
+        "id": "uuid",
+        "order_id": "uuid",
+        "product_id": "uuid",
+        "product_name": "text",
+        "sku": "text",
+        "quantity": "integer",
+        "price": "numeric",
+        "total": "numeric",
+        "created_at": "timestamp with time zone",
+        "image_url": "text"
+      }
+    },
+    "order_tracking_history": {
+      "columns": {
+        "id": "uuid",
+        "order_id": "uuid",
+        "tracking_status": "text",
+        "location": "text",
+        "activity": "text",
+        "raw_payload": "jsonb",
+        "created_at": "timestamp with time zone"
+      }
+    },
+    "orders": {
+      "columns": {
+        "id": "uuid",
+        "user_id": "uuid",
+        "order_number": "text",
+        "status": "text",
+        "payment_status": "text",
+        "subtotal": "numeric",
+        "tax": "numeric",
+        "shipping_fee": "numeric",
+        "discount": "numeric",
+        "total": "numeric",
+        "shipping_address": "jsonb",
+        "billing_address": "jsonb",
+        "payment_method": "text",
+        "notes": "text",
+        "created_at": "timestamp with time zone",
+        "updated_at": "timestamp with time zone",
+        "shiprocket_order_id": "text",
+        "shipment_id": "text",
+        "awb_code": "text",
+        "courier_name": "text",
+        "tracking_url": "text",
+        "tracking_status": "text",
+        "pickup_location": "text",
+        "shipping_cost": "numeric",
+        "estimated_delivery": "timestamp with time zone",
+        "manifest_url": "text",
+        "label_url": "text",
+        "invoice_url": "text",
+        "last_tracking_sync": "timestamp with time zone",
+        "shipment_status": "text",
+        "pickup_status": "text",
+        "last_tracking_update": "timestamp with time zone",
+        "delivered_at": "timestamp with time zone",
+        "invoice_sent_at": "timestamp with time zone",
+        "invoice_error": "text",
+        "shiprocket_push_status": "character varying",
+        "shiprocket_push_error": "text",
+        "shiprocket_pushed_at": "timestamp with time zone",
+        "shiprocket_push_started_at": "timestamp with time zone",
+        "invoice_number": "text"
+      }
+    },
+    "otps": {
+      "columns": {
+        "id": "uuid",
+        "phone": "character varying",
+        "purpose": "character varying",
+        "code_hash": "character varying",
+        "attempts": "integer",
+        "expires_at": "timestamp with time zone",
+        "used_at": "timestamp with time zone",
+        "created_at": "timestamp with time zone",
+        "consumed_at": "timestamp with time zone",
+        "max_attempts": "integer"
+      }
+    },
+    "page_views": {
+      "columns": {
+        "id": "uuid",
+        "path": "text",
+        "referrer": "text",
+        "session_id": "text",
+        "device_type": "text",
+        "created_at": "timestamp with time zone"
+      }
+    },
+    "products": {
+      "columns": {
+        "id": "uuid",
+        "name": "text",
+        "slug": "text",
+        "sku": "text",
+        "category_id": "uuid",
+        "description": "text",
+        "price": "numeric",
+        "selling_price": "numeric",
+        "stock": "integer",
+        "minimum_stock": "integer",
+        "brand": "text",
+        "status": "text",
+        "stock_status": "text",
+        "images": "jsonb",
+        "seo_metadata": "jsonb",
+        "created_at": "timestamp with time zone",
+        "updated_at": "timestamp with time zone",
+        "weight": "numeric",
+        "length": "numeric",
+        "breadth": "numeric",
+        "height": "numeric",
+        "hsn": "text"
+      }
+    },
+    "review_requests": {
+      "columns": {
+        "id": "uuid",
+        "order_id": "uuid",
+        "user_id": "uuid",
+        "product_id": "uuid",
+        "status": "character varying",
+        "sent_at": "timestamp with time zone",
+        "review_id": "uuid",
+        "error": "text",
+        "created_at": "timestamp with time zone",
+        "updated_at": "timestamp with time zone"
+      }
+    },
+    "reviews": {
+      "columns": {
+        "id": "uuid",
+        "product_id": "uuid",
+        "user_id": "uuid",
+        "rating": "integer",
+        "title": "text",
+        "comment": "text",
+        "status": "text",
+        "created_at": "timestamp with time zone",
+        "updated_at": "timestamp with time zone",
+        "is_featured": "boolean",
+        "reply": "text"
+      }
+    },
+    "settings": {
+      "columns": {
+        "id": "uuid",
+        "key": "text",
+        "value": "jsonb",
+        "description": "text",
+        "created_at": "timestamp with time zone",
+        "updated_at": "timestamp with time zone"
+      }
+    },
+    "support_tickets": {
+      "columns": {
+        "id": "uuid",
+        "user_id": "uuid",
+        "subject": "text",
+        "message": "text",
+        "status": "text",
+        "priority": "text",
+        "created_at": "timestamp with time zone",
+        "updated_at": "timestamp with time zone",
+        "ticket_number": "character varying",
+        "reply": "text"
+      }
+    },
+    "transactions": {
+      "columns": {
+        "id": "uuid",
+        "order_id": "uuid",
+        "user_id": "uuid",
+        "amount": "numeric",
+        "currency": "text",
+        "payment_method": "text",
+        "payment_gateway": "text",
+        "gateway_transaction_id": "text",
+        "status": "text",
+        "metadata": "jsonb",
+        "created_at": "timestamp with time zone",
+        "updated_at": "timestamp with time zone"
+      }
+    },
+    "user_addresses": {
+      "columns": {
+        "id": "uuid",
+        "user_id": "uuid",
+        "title": "text",
+        "first_name": "text",
+        "last_name": "text",
+        "phone": "text",
+        "street_address": "text",
+        "apartment": "text",
+        "city": "text",
+        "state": "text",
+        "postal_code": "text",
+        "country": "text",
+        "is_default": "boolean",
+        "created_at": "timestamp with time zone",
+        "updated_at": "timestamp with time zone"
+      }
+    },
+    "users": {
+      "columns": {
+        "id": "uuid",
+        "email": "text",
+        "password_hash": "text",
+        "first_name": "text",
+        "last_name": "text",
+        "phone": "text",
+        "role": "text",
+        "active": "boolean",
+        "created_at": "timestamp with time zone",
+        "updated_at": "timestamp with time zone",
+        "reset_password_token": "text",
+        "reset_password_expires": "timestamp with time zone",
+        "address": "jsonb",
+        "last_login_at": "timestamp with time zone",
+        "phone_verified": "boolean"
+      }
+    },
+    "whatsapp_message_log": {
+      "columns": {
+        "id": "uuid",
+        "recipient": "character varying",
+        "template_name": "character varying",
+        "message_type": "character varying",
+        "purpose": "character varying",
+        "reference_id": "character varying",
+        "status": "character varying",
+        "error": "text",
+        "payload": "jsonb",
+        "created_at": "timestamp with time zone"
+      }
+    },
+    "wishlist_items": {
+      "columns": {
+        "id": "uuid",
+        "user_id": "uuid",
+        "product_id": "uuid",
+        "created_at": "timestamp with time zone"
+      }
+    }
+  },
+  "functions": [
+    "assign_invoice_number"
+  ],
+  "indexes": [
+    "_migrations_pkey",
+    "activity_logs_pkey",
+    "analytics_events_pkey",
+    "banners_pkey",
+    "blogs_pkey",
+    "blogs_slug_key",
+    "cart_items_pkey",
+    "categories_pkey",
+    "categories_slug_key",
+    "cms_pages_pkey",
+    "cms_pages_slug_key",
+    "coupons_code_key",
+    "coupons_pkey",
+    "idx_activity_logs_created_at",
+    "idx_activity_user",
+    "idx_analytics_events_created_at",
+    "idx_analytics_events_name_created",
+    "idx_analytics_events_product",
+    "idx_blogs_author_id",
+    "idx_blogs_status_pub",
+    "idx_blogs_title_trgm",
+    "idx_cart_user",
+    "idx_categories_parent_id",
+    "idx_notifications_user_id",
+    "idx_order_items_order",
+    "idx_order_items_product_id",
+    "idx_orders_awb",
+    "idx_orders_created",
+    "idx_orders_delivered_at",
+    "idx_orders_invoice_number",
+    "idx_orders_invoice_sent_at",
+    "idx_orders_invoice_unsent",
+    "idx_orders_payment_method",
+    "idx_orders_push_pending",
+    "idx_orders_shiprocket_push_status",
+    "idx_orders_shiprocket_pushed_at",
+    "idx_orders_status_created_payment",
+    "idx_orders_user",
+    "idx_orders_user_created",
+    "idx_otps_created_at",
+    "idx_otps_phone_created",
+    "idx_page_views_created_at",
+    "idx_page_views_session",
+    "idx_products_category",
+    "idx_products_name_trgm",
+    "idx_products_sku_trgm",
+    "idx_products_status",
+    "idx_products_status_slug",
+    "idx_review_requests_status",
+    "idx_reviews_is_featured",
+    "idx_reviews_product",
+    "idx_reviews_user_id",
+    "idx_support_tickets_ticket_number",
+    "idx_support_tickets_user_id",
+    "idx_tracking_order",
+    "idx_transactions_gateway_id",
+    "idx_transactions_order",
+    "idx_user_addresses_user_id",
+    "idx_whatsapp_message_log_reference",
+    "invoice_sequences_pkey",
+    "media_pkey",
+    "notifications_pkey",
+    "order_items_pkey",
+    "order_tracking_history_pkey",
+    "orders_order_number_key",
+    "orders_pkey",
+    "otps_pkey",
+    "page_views_pkey",
+    "products_pkey",
+    "products_sku_key",
+    "products_slug_key",
+    "review_requests_order_id_key",
+    "review_requests_pkey",
+    "reviews_pkey",
+    "settings_key_key",
+    "settings_pkey",
+    "support_tickets_pkey",
+    "transactions_pkey",
+    "user_addresses_pkey",
+    "users_email_key",
+    "users_pkey",
+    "whatsapp_message_log_pkey",
+    "whatsapp_message_log_purpose_reference_id_key",
+    "wishlist_items_pkey"
+  ]
+}
