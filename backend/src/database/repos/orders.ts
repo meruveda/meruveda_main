@@ -237,7 +237,11 @@ export async function findCancelInfo(orderId: string): Promise<any | null> {
 }
 
 export async function insertOrder(data: Record<string, any>, q: QueryFn = query): Promise<any> {
-  return insertRow('orders', data, q);
+  // `items` is not a column on `orders` - the line items live in their own
+  // table. The service keeps the (server-priced) items on the object it
+  // passes in, so they have to be stripped before the row is written.
+  const { items: _items, ...columns } = data;
+  return insertRow('orders', columns, q);
 }
 
 export async function updateOrderById(
