@@ -1,5 +1,5 @@
 export const revalidate = 60; // ISR: catalog pages refresh within a minute
-import Image from "next/image";
+import MediaImage from "@/components/MediaImage";
 import Link from "next/link";
 import { API_BASE_URL } from "@/utils/apiUrl";
 
@@ -67,7 +67,7 @@ export default async function BlogPage() {
                 <article key={post.id || i} className="group flex flex-col space-y-4">
                   {/* Image Card Container */}
                   <div className="relative aspect-[16/10] w-full rounded-2xl overflow-hidden shadow-sm border border-slate-100/10">
-                    <Image 
+                    <MediaImage 
                       src={img} 
                       alt={post.title} 
                       fill 

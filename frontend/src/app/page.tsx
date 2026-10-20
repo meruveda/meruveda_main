@@ -1,5 +1,5 @@
 export const revalidate = 60; // ISR: catalog pages refresh within a minute
-import Image from "next/image";
+import MediaImage from "@/components/MediaImage";
 import Link from "next/link";
 import { Search, Leaf, ShieldCheck, Heart, Wind, Sparkles, Droplet, Star, ArrowRight } from "lucide-react";
 import FeaturedProducts from "@/components/FeaturedProducts";
@@ -209,7 +209,7 @@ export default async function Home() {
                 return (
                   <Link href={`/blog/${slug}`} key={post.id || i} className="group cursor-pointer flex flex-col h-full">
                     <div className="relative h-60 rounded-xl overflow-hidden mb-6">
-                      <Image src={img} alt={post.title} fill sizes="(max-width: 768px) 100vw, 33vw" className="object-cover group-hover:scale-105 transition-transform duration-500" />
+                      <MediaImage src={img} alt={post.title} fill sizes="(max-width: 768px) 100vw, 33vw" className="object-cover group-hover:scale-105 transition-transform duration-500" />
                       <div className="absolute top-4 left-4 bg-gold text-deep-purple text-xs font-bold px-3 py-1 rounded-full shadow-md">
                         {category}
                       </div>

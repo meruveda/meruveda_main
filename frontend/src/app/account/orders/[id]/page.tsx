@@ -1,7 +1,7 @@
 "use client";
 
 import { use, useCallback, useEffect, useState } from "react";
-import Image from "next/image";
+import MediaImage from "@/components/MediaImage";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -226,7 +226,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
           {order.items.map((item) => (
             <div key={item.id} className="flex gap-4 items-center border border-gray-100 rounded-xl p-4 bg-white">
               <div className="relative w-16 h-16 bg-gray-50 rounded-lg border border-gray-100 shrink-0 overflow-hidden">
-                <Image src={item.image} alt={item.name} fill className="object-contain p-1" sizes="64px" />
+                <MediaImage src={item.image} alt={item.name} fill className="object-contain p-1" sizes="64px" />
               </div>
               <div className="flex-1 min-w-0">
                 <h4 className="font-semibold text-deep-purple truncate text-sm">{item.name}</h4>

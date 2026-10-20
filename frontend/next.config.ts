@@ -16,6 +16,13 @@ try {
   mediaRemotePattern = null;
 }
 
+// The storefront's own host: the catalogue artwork is served statically from
+// frontend/public/images, so the site serves its own product photos.
+const ownHostRemotePattern = {
+  protocol: "https" as const,
+  hostname: "meruvedawellness.com",
+};
+
 const nextConfig: NextConfig = {
   transpilePackages: ["@meruveda/shared"],
   images: {
@@ -25,7 +32,9 @@ const nextConfig: NextConfig = {
     // The proxy fetches patiently, resizes and caches instead.
     loader: "custom",
     loaderFile: "./src/imageLoader.ts",
-    remotePatterns: mediaRemotePattern ? [mediaRemotePattern] : [],
+    remotePatterns: mediaRemotePattern
+      ? [mediaRemotePattern, ownHostRemotePattern]
+      : [ownHostRemotePattern],
     // Product images live in object storage. On networks that resolve the
     // storage host through NAT64/IPv6, Next's SSRF guard misreads the address as
     // a private IP and answers every remote image with 400 ("url parameter is

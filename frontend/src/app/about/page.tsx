@@ -1,4 +1,4 @@
-import Image from 'next/image';
+import MediaImage from "@/components/MediaImage";
 
 export default function AboutPage() {
   return (
@@ -6,7 +6,7 @@ export default function AboutPage() {
       {/* Hero Section */}
       <section className="relative h-[60vh] min-h-[400px] flex items-center justify-center overflow-hidden">
         <div className="absolute inset-0 z-0">
-          <Image
+          <MediaImage
             src="/images/ayurvedic_hero_1783843890311.png"
             alt="Ayurvedic Herbs"
             fill
@@ -60,7 +60,7 @@ export default function AboutPage() {
               </p>
             </div>
             <div className="order-1 md:order-2 relative h-[400px] md:h-[500px] rounded-2xl overflow-hidden shadow-2xl group">
-              <Image
+              <MediaImage
                 src="/images/ayurvedic_lab_1783843904446.png"
                 alt="Ayurvedic Laboratory"
                 fill

@@ -1,6 +1,6 @@
 "use client";
 
-import Image from "next/image";
+import MediaImage from "@/components/MediaImage";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Trash2 } from "lucide-react";
@@ -84,7 +84,7 @@ export default function ProductGrid({ products }: { products: any[] }) {
               </div>
             )}
             <div className="relative w-full h-full transform group-hover:scale-105 transition-transform duration-500">
-              <Image src={product.img} alt={product.name} fill sizes="(max-width: 768px) 100vw, 25vw" className="object-contain drop-shadow-md" />
+              <MediaImage src={product.img} alt={product.name} fill sizes="(max-width: 768px) 100vw, 25vw" className="object-contain drop-shadow-md" />
             </div>
           </Link>
           

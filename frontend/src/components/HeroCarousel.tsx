@@ -1,8 +1,8 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import Image from "next/image";
 import { ChevronLeft, ChevronRight } from "lucide-react";
+import { buildSrcSet, isStaticAsset } from "@/lib/mediaUrl";
 
 interface Banner {
   id: string;
@@ -146,13 +146,25 @@ export default function HeroCarousel({ initialBanners }: HeroCarouselProps) {
                 isActive ? "scale-[1.04]" : "scale-100"
               }`}
             >
-              <Image
+              {/*
+                A plain <img>: the banner artwork is served statically from
+                this origin in its final, optimised form (WebP/JPEG), so it
+                needs neither an optimizer round-trip nor a resize proxy.
+                A remote banner still gets a real srcset through the backend
+                derivative proxy.
+              */}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
                 src={slide.image_url}
+                srcSet={buildSrcSet(slide.image_url)}
+                sizes={isStaticAsset(slide.image_url) ? "100vw" : undefined}
                 alt={slide.heading || "Banner"}
-                fill
-                sizes="100vw"
-                className="object-cover"
-                priority={isActive}
+                width={1600}
+                height={700}
+                loading={isActive ? "eager" : "lazy"}
+                decoding="async"
+                fetchPriority={isActive ? "high" : "auto"}
+                className="absolute inset-0 h-full w-full object-cover"
               />
             </div>
 

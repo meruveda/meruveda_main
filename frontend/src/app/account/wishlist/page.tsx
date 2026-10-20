@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Image from "next/image";
+import MediaImage from "@/components/MediaImage";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Heart, ShoppingCart, Star, Trash2 } from "lucide-react";
@@ -112,7 +112,7 @@ export default function WishlistPage() {
             return (
               <div key={item.id} className="bg-white border border-gray-100 rounded-2xl overflow-hidden shadow-sm hover:shadow-md transition-all flex flex-col">
                 <Link href={`/products/${item.id}`} className="relative aspect-square w-full bg-[#f8f5f0] block">
-                  <Image src={item.image} alt={item.name} fill className="object-contain p-5" sizes="300px" />
+                  <MediaImage src={item.image} alt={item.name} fill className="object-contain p-5" sizes="300px" />
                   {discount > 0 && (
                     <span className="absolute top-3 left-3 bg-green-600 text-white text-[11px] font-bold px-2.5 py-1 rounded-full">
                       {discount}% OFF

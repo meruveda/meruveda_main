@@ -1,6 +1,6 @@
 export const revalidate = 60; // ISR: catalog pages refresh within a minute
 import Link from "next/link";
-import Image from "next/image";
+import MediaImage from "@/components/MediaImage";
 import { ChevronRight, Calendar, Clock, ArrowLeft } from "lucide-react";
 import { API_BASE_URL } from "@/utils/apiUrl";
 import { notFound } from "next/navigation";
@@ -78,7 +78,7 @@ export default async function BlogPostPage({ params }: { params: Promise<{ slug:
 
         {/* Featured Image */}
         <div className="relative w-full aspect-[16/9] rounded-2xl overflow-hidden mb-12 shadow-lg">
-          <Image
+          <MediaImage
             src={img}
             alt={post.title}
             fill

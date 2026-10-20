@@ -1,6 +1,6 @@
 "use client";
 
-import Image from "next/image";
+import MediaImage from "@/components/MediaImage";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Trash2 } from "lucide-react";
@@ -54,7 +54,7 @@ export default function FeaturedProducts({ products }: { products: any[] }) {
               </div>
             )}
             <div className="relative w-full h-full transform group-hover:scale-105 transition-transform duration-500">
-              <Image
+              <MediaImage
                 src={typeof product.img === 'string' && product.img.trim() !== '' ? product.img : '/images/product_oil.png'}
                 alt={product.name || 'Product'}
                 fill

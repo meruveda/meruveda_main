@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import Image from "next/image";
+import MediaImage from "@/components/MediaImage";
 import Link from "next/link";
 import { Download, Eye, Package, Search, Truck } from "lucide-react";
 import { orderService } from "@/services/accountService";
@@ -157,7 +157,7 @@ export default function OrdersPage() {
                   {order.items.slice(0, 3).map((item) => (
                     <div key={item.id} className="flex gap-3.5 items-center min-w-0">
                       <div className="relative w-14 h-14 bg-gray-50 rounded-lg border border-gray-100 shrink-0 overflow-hidden">
-                        <Image src={item.image} alt={item.name} fill className="object-contain p-1" sizes="56px" />
+                        <MediaImage src={item.image} alt={item.name} fill className="object-contain p-1" sizes="56px" />
                       </div>
                       <div className="flex-1 min-w-0">
                         <h4 className="font-semibold text-deep-purple truncate text-sm">{item.name}</h4>

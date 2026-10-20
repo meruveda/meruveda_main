@@ -1,14 +1,20 @@
 import type { ImageLoaderProps } from "next/image";
+import { isStaticAsset } from "@/lib/mediaUrl";
 
 const REMOTE_PATTERN = /^https?:\/\//i;
 
 /**
  * Custom Next.js image loader.
  *
- * Remote photos are served through the backend proxy (which fetches with a long
- * timeout, resizes and caches) because Next's own optimizer gives up on the
- * upstream download after 7 seconds — see backend/src/routes/imageRoutes.ts.
- * Local /public assets are returned as-is.
+ * Static assets — the storefront's own `/public` folder, served from the same
+ * origin — are returned untouched: they are already stored in their final,
+ * optimised form (WebP siblings are generated for everything above 500 KB),
+ * so a resize round-trip would only add latency. `MediaImage` marks those
+ * sources `unoptimized`, so this loader is not even called for them.
+ *
+ * Remote photos are served through the backend proxy (which fetches with a
+ * long timeout, resizes and caches) because Next's own optimizer gives up on
+ * the upstream download after 7 seconds — see backend/src/routes/imageRoutes.ts.
  *
  * IMPORTANT: the proxy URL is intentionally same-origin (`/api/...`) instead of
  * `NEXT_PUBLIC_API_URL`. That env var is baked in at build time — if Vercel
@@ -19,10 +25,13 @@ const REMOTE_PATTERN = /^https?:\/\//i;
  * environments with no env dependency.
  */
 export default function imageLoader({ src, width, quality }: ImageLoaderProps): string {
+  if (isStaticAsset(src)) {
+    // Local (or own-origin) asset — serve directly, no optimizer round-trip.
+    return src;
+  }
+
   if (!REMOTE_PATTERN.test(src)) {
-    // Public-folder asset — serve directly, no optimizer round-trip needed.
-    // (Previously this hand-built a `/_next/image?...` URL; with a custom
-    // loader that endpoint isn't guaranteed, so a direct return is safer.)
+    // Anything else that is not a remote URL is a public-folder asset.
     return src;
   }
 

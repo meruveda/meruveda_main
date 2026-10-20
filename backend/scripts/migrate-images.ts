@@ -192,6 +192,19 @@ async function main(): Promise<void> {
     slot.finalUrl = slot.url;
   }
 
+  // The catalogue artwork is served statically from the storefront's own
+  // origin (frontend/public/images -> https://meruvedawellness.com/images/...).
+  // Those rows are already served from the site itself: they need neither an
+  // R2 copy nor a re-resolve, and a re-run must never overwrite them with a
+  // placeholder.
+  const staticBase = 'https://meruvedawellness.com/images/';
+  for (const slot of slots) {
+    if (slot.source) continue;
+    if (!slot.url.startsWith(staticBase)) continue;
+    slot.source = { file: '', confidence: 'static', note: 'already served statically from the site' };
+    slot.finalUrl = slot.url;
+  }
+
   for (const slot of slots) {
     if (slot.source) continue;
     // 1. exact sha1 of the URL -> the cached original

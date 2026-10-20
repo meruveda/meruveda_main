@@ -7,7 +7,7 @@ import {
   summarize,
   type ReviewSort,
 } from '@/data/reviews';
-import Image from 'next/image';
+import MediaImage from "@/components/MediaImage";
 import { useRouter } from 'next/navigation';
 import { Minus, Plus, ShoppingCart, Sparkles, Droplets, Star, Loader2, ArrowRight, BadgeCheck } from 'lucide-react';
 import { useCart } from '@/context/CartContext';
@@ -131,7 +131,7 @@ const ratingSummary = useMemo(() => summarize(reviewsForProduct(product.slug || 
                 transition={{ duration: 0.4 }}
                 className="relative w-full h-full z-0"
               >
-                <Image 
+                <MediaImage 
                   src={mainImage} 
                   alt={product.name} 
                   fill 
@@ -152,7 +152,7 @@ const ratingSummary = useMemo(() => summarize(reviewsForProduct(product.slug || 
                     className={`relative w-20 h-20 rounded-xl overflow-hidden flex-shrink-0 transition-all border ${mainImage === img.url ? 'border-gold-antique' : 'border-transparent bg-stone-100 hover:border-gold-antique/50'}`}
                   >
                     <div className="absolute inset-0 p-2">
-                      <Image src={img.url} alt={`${product.name} thumbnail ${idx + 1}`} fill sizes="80px" className="object-contain" />
+                      <MediaImage src={img.url} alt={`${product.name} thumbnail ${idx + 1}`} fill sizes="80px" className="object-contain" />
                     </div>
                   </button>
                 ))}

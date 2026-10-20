@@ -1,7 +1,7 @@
 "use client";
 
 import { Suspense, useEffect, useState } from "react";
-import Image from "next/image";
+import MediaImage from "@/components/MediaImage";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Loader2, Pencil, Star, Trash2 } from "lucide-react";
@@ -171,7 +171,7 @@ function ReviewsInner() {
             {pending.slice(0, 4).map((p) => (
               <div key={p.productId} className="flex items-center gap-3 border border-gold/30 bg-gold/5 rounded-xl p-3.5">
                 <div className="relative w-12 h-12 bg-white rounded-lg border border-gray-100 shrink-0 overflow-hidden">
-                  <Image src={p.image} alt={p.name} fill className="object-contain p-1" sizes="48px" />
+                  <MediaImage src={p.image} alt={p.name} fill className="object-contain p-1" sizes="48px" />
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="font-bold text-deep-purple text-xs truncate">{p.name}</p>
