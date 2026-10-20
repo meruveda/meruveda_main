@@ -192,17 +192,21 @@ async function main(): Promise<void> {
     slot.finalUrl = slot.url;
   }
 
-  // The catalogue artwork is served statically from the storefront's own
-  // origin (frontend/public/images -> https://meruvedawellness.com/images/...).
-  // Those rows are already served from the site itself: they need neither an
-  // R2 copy nor a re-resolve, and a re-run must never overwrite them with a
-  // placeholder.
-  const staticBase = 'https://meruvedawellness.com/images/';
+  // The catalogue artwork lives in frontend/public/images and is currently
+  // served from the storefront's own origin. It is the CORRECT artwork, and
+  // the migration copies it to R2 (with 400/800/1600 renditions) so the whole
+  // catalogue is served from one place - object storage - and the storefront
+  // no longer has to ship the product photos in its own bundle.
   for (const slot of slots) {
     if (slot.source) continue;
-    if (!slot.url.startsWith(staticBase)) continue;
-    slot.source = { file: '', confidence: 'static', note: 'already served statically from the site' };
-    slot.finalUrl = slot.url;
+    const ownFile = ownSiteFile(slot.url);
+    if (!ownFile) continue;
+    slot.source = {
+      file: ownFile.path,
+      confidence: 'exact-sha1',
+      note: "the site's own /images file",
+    };
+    usedFiles.add(ownFile.name);
   }
 
   for (const slot of slots) {
@@ -242,6 +246,14 @@ async function main(): Promise<void> {
         usedFiles.add(semantic.name);
         continue;
       }
+    }
+    // 5. the URL points at this site's own /images/ folder - the file is
+    //    right there in frontend/public/images, under the same name.
+    const ownFile = ownSiteFile(slot.url);
+    if (ownFile) {
+      slot.source = { file: ownFile.path, confidence: 'exact-sha1', note: 'the site’s own /images file' };
+      usedFiles.add(ownFile.name);
+      continue;
     }
     unresolved.push(slot);
   }
@@ -403,6 +415,26 @@ function labelWords(label: string): string[] {
     .toLowerCase()
     .split(/[^a-z0-9]+/)
     .filter((w) => w.length >= 4 && !['churna', 'oil', 'tablets', 'kit', 'hamper', 'dose'].includes(w));
+}
+
+/**
+ * The site's own /images file for a URL.
+ *
+ * A catalogue image can point at this very site (the storefront serves the
+ * artwork from /images). The file is then in frontend/public/images under the
+ * same name, and it is the CORRECT artwork - far better than any guess.
+ */
+function ownSiteFile(url: string): { path: string; name: string } | null {
+  let name = '';
+  try {
+    name = new URL(url).pathname.split('/').filter(Boolean).pop() || '';
+  } catch {
+    return null;
+  }
+  if (!name || !/\.(png|jpe?g|webp|gif|avif)$/i.test(name)) return null;
+  const full = path.join(PUBLIC_IMAGES, name);
+  if (!fs.existsSync(full)) return null;
+  return { path: full, name };
 }
 
 function writeReport(slots: Slot[]): void {
