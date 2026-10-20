@@ -2,8 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { orderService, pushOrderToShiprocket, retryFailedShiprocketPushes } from '../services/orderService';
 import { postOrderConfirmed, isCodOrder, sendOrderConfirmationText } from '../services/postOrderConfirmed';
 import { invoiceDispatchService, deriveInvoiceStatus } from '../services/invoiceDispatchService';
-import { supabase } from '../database/supabase';
-import { hasColumn } from '../services/schemaGuard';
+import * as ordersRepo from '../database/repos/orders';
 import { normalizePhone } from '../services/whatsappService';
 import { verifyToken } from '../utils/jwt';
 import { keepAlive } from '../utils/keepAlive';
@@ -46,7 +45,7 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
   try {
     const data = await orderService.createOrder(req.body, req.user?.id);
 
-    // Every order is invoiced the moment it is created — COD and prepaid alike,
+    // Every order is invoiced the moment it is created â€” COD and prepaid alike,
     // paid or not. A tax invoice documents the sale, and the sale happens when
     // the order is placed; waiting for a payment callback used to leave prepaid
     // checkouts with no invoice at all if the customer abandoned the PayU page.
@@ -54,11 +53,7 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
     // The PayU success callback therefore does NOT issue an invoice; it only
     // records payment. It cannot double-issue, because the claim below is
     // atomic and the callback would find it already taken.
-    const { data: placedOrder } = await supabase
-      .from('orders')
-      .select('*')
-      .eq('id', data.id)
-      .maybeSingle();
+    const placedOrder = await ordersRepo.getOrderRow(data.id);
     if (isCodOrder(data)) {
       // Confirmation text is a courtesy; the invoice is the dispatcher's job.
       keepAlive(sendOrderConfirmationText(placedOrder));
@@ -72,7 +67,7 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
     // time (Meta is not active yet) those invoices are simply waiting; once the
     // slot is filled in, the next order placed picks them up. This runs inside
     // waitUntil so it never touches the response, and it no-ops immediately when
-    // the slot is still empty — so the daily cron can stay fail-closed.
+    // the slot is still empty â€” so the daily cron can stay fail-closed.
     keepAlive(
       invoiceDispatchService
         .retryPendingInvoices(5)
@@ -86,7 +81,7 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
 };
 
 /**
- * PUBLIC guest order lookup — order number (or id) + mobile number, no login.
+ * PUBLIC guest order lookup â€” order number (or id) + mobile number, no login.
  * Powers the /track page.
  */
 export const trackOrder = async (req: Request, res: Response, next: NextFunction) => {
@@ -98,33 +93,15 @@ export const trackOrder = async (req: Request, res: Response, next: NextFunction
       return res.status(400).json({ error: { message: 'Order number and mobile number are required.' } });
     }
 
-    // `orders.delivered_at` lands in delta 006 — skip it while that is pending so
-    // the whole lookup still succeeds and the date simply comes back null.
-    const deliveredColumn = (await hasColumn('orders', 'delivered_at')) ? 'delivered_at, ' : '';
-
-    // A non-UUID reference inside `id.eq.<value>` makes PostgREST reject the whole
-    // filter ("invalid input syntax for type uuid"), which would 500 every lookup
-    // by plain order number. Only add the id branch when the value really is one,
-    // and drop characters that would break the or() expression.
+    // A non-UUID reference must never be compared against the uuid `id`
+    // column ("invalid input syntax for type uuid"). Only add the id branch
+    // when the value really is one, and drop characters that would break it.
     const safeRef = orderRef.replace(/[^A-Za-z0-9_-]/g, '');
     if (!safeRef) {
       return res.status(400).json({ error: { message: 'Order number and mobile number are required.' } });
     }
-    const lookupFilter = UUID_PATTERN.test(safeRef)
-      ? `order_number.eq.${safeRef},id.eq.${safeRef}`
-      : `order_number.eq.${safeRef}`;
 
-    const { data, error } = await supabase
-      .from('orders')
-      .select(`id, order_number, status, payment_status, created_at, ${deliveredColumn}awb_code, courier_name, tracking_url, tracking_status, estimated_delivery, last_tracking_update, shipping_address, order_tracking_history(*)`)
-      .or(lookupFilter)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (error) throw error;
-
-    const order: any = data;
+    const order: any = await ordersRepo.findForTracking(safeRef, UUID_PATTERN.test(safeRef));
     if (!order) {
       return res.status(404).json({ error: { message: 'No order found for these details.' } });
     }
@@ -164,7 +141,7 @@ export const trackOrder = async (req: Request, res: Response, next: NextFunction
 };
 
 /**
- * PUBLIC live AWB lookup — tracking ID entered manually on /track.
+ * PUBLIC live AWB lookup â€” tracking ID entered manually on /track.
  * Calls Shiprocket live and syncs the matching local order (if any).
  */
 export const trackByAwb = async (req: Request, res: Response, next: NextFunction) => {
@@ -245,7 +222,7 @@ export const trackByAwb = async (req: Request, res: Response, next: NextFunction
  * path for the customer or the admin.
  *
  * Order of precedence:
- *   1. the stored PDF named in `state.json` — an issued invoice is a legal
+ *   1. the stored PDF named in `state.json` â€” an issued invoice is a legal
  *      document and must NEVER be re-rendered; regenerating after an amount
  *      change would silently produce a different document under the same number.
  *   2. no state.json yet -> run the same automatic claim path that fires at
@@ -259,18 +236,15 @@ export const downloadInvoice = async (req: Request, res: Response, next: NextFun
   try {
     const { id } = req.params;
 
-    const { data: orderRow, error: queryError } = await supabase
-      .from('orders')
-      .select('id, user_id, order_number')
-      .eq('id', id)
-      .maybeSingle();
-
-    if (queryError) {
+    let orderRow: any;
+    try {
+      orderRow = await ordersRepo.getOrderRow(id as string);
+    } catch (queryError: any) {
       // A schema/behaviour failure is NOT a missing order.
-      console.error(`[Invoice] order lookup failed for ${id}:`, queryError.message);
+      console.error(`[Invoice] order lookup failed for ${id}:`, queryError?.message || queryError);
       return res.status(503).json({
         error: {
-          message: `Could not read this order (${queryError.code || 'database error'}).`,
+          message: `Could not read this order (${queryError?.code || 'database error'}).`,
         },
       });
     }
@@ -290,7 +264,7 @@ export const downloadInvoice = async (req: Request, res: Response, next: NextFun
       res.set({
         'Content-Type': 'application/pdf',
         'Content-Disposition': `attachment; filename="Invoice-${label}.pdf"`,
-        // Invoices contain PII — never let a shared proxy cache them.
+        // Invoices contain PII â€” never let a shared proxy cache them.
         'Cache-Control': 'private, no-store, max-age=0',
         'X-Content-Type-Options': 'nosniff',
         'Content-Length': String(bytes.length),
@@ -355,7 +329,7 @@ export const downloadInvoice = async (req: Request, res: Response, next: NextFun
  *
  * Claim, number allocation, PDF upload and state.json all happen here, in the
  * background. The claim is released in `finally` no matter what, so a failure
- * can never leave an order wedged behind an orphaned claim — which is what used
+ * can never leave an order wedged behind an orphaned claim â€” which is what used
  * to make downloads fail forever.
  */
 async function persistInvoiceInBackground(orderId: string): Promise<void> {
@@ -388,17 +362,14 @@ export const invoiceStatus = async (req: Request, res: Response, next: NextFunct
   try {
     const { id } = req.params;
 
-    const { data: orderRow, error: lookupError } = await supabase
-      .from('orders')
-      .select('id, user_id, order_number')
-      .eq('id', id)
-      .maybeSingle();
-
-    if (lookupError) {
-      console.error(`[Invoice] status lookup failed for ${id}:`, lookupError.message);
+    let orderRow: any;
+    try {
+      orderRow = await ordersRepo.getOrderRow(id as string);
+    } catch (lookupError: any) {
+      console.error(`[Invoice] status lookup failed for ${id}:`, lookupError?.message || lookupError);
       return res.status(503).json({
         error: {
-          message: `Could not read this order (${lookupError.code || 'database error'}).`,
+          message: `Could not read this order (${lookupError?.code || 'database error'}).`,
         },
       });
     }
@@ -449,7 +420,7 @@ export const invoiceStatus = async (req: Request, res: Response, next: NextFunct
  * channel as `sent`, nothing is sent and the call is a no-op. One order still
  * results in exactly one delivered invoice.
  *
- * No response shape is invented for the rest of the invoice API — it mirrors
+ * No response shape is invented for the rest of the invoice API â€” it mirrors
  * `invoiceStatus` (`{ data: {...} }`) so an operator tooling one call site works
  * for both.
  */
@@ -457,16 +428,13 @@ export const resendInvoice = async (req: Request, res: Response, next: NextFunct
   try {
     const { id } = req.params;
 
-    const { data: orderRow, error: lookupError } = await supabase
-      .from('orders')
-      .select('id, order_number')
-      .eq('id', id)
-      .maybeSingle();
-
-    if (lookupError) {
-      console.error(`[Invoice] resend lookup failed for ${id}:`, lookupError.message);
+    let orderRow: any;
+    try {
+      orderRow = await ordersRepo.getOrderRow(id as string);
+    } catch (lookupError: any) {
+      console.error(`[Invoice] resend lookup failed for ${id}:`, lookupError?.message || lookupError);
       return res.status(503).json({
-        error: { message: `Could not read this order (${lookupError.code || 'database error'}).` },
+        error: { message: `Could not read this order (${lookupError?.code || 'database error'}).` },
       });
     }
     if (!orderRow) {
@@ -491,7 +459,7 @@ export const resendInvoice = async (req: Request, res: Response, next: NextFunct
         data: {
           orderNumber: orderRow.order_number,
           status: 'skipped',
-          reason: 'invoice already delivered on WhatsApp — one order sends one invoice',
+          reason: 'invoice already delivered on WhatsApp â€” one order sends one invoice',
           sentAt: before.sentAt,
         },
       });
@@ -534,7 +502,7 @@ export const pushToShiprocket = async (req: Request, res: Response, next: NextFu
   }
 };
 
-/** Retry failed pushes (admin JWT or cron with CRON_SECRET — no user session needed). */
+/** Retry failed pushes (admin JWT or cron with CRON_SECRET â€” no user session needed). */
 export const retryShiprocketPushes = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const cronSecret = config.cronSecret;

@@ -1,5 +1,7 @@
 import { config } from '../config/env';
-import { supabase } from '../database/supabase';
+import * as ordersRepo from '../database/repos/orders';
+import * as reviewRequestsRepo from '../database/repos/reviewRequests';
+import * as usersRepo from '../database/repos/users';
 import { hasColumn, hasTable } from './schemaGuard';
 import { WHATSAPP_TEMPLATES, sendOnce, normalizePhone } from './whatsappService';
 
@@ -34,31 +36,20 @@ export const reviewJobService = {
 
     const cutoff = new Date(Date.now() - REVIEW_DELAY_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
-    const { data: orders, error } = await supabase
-      .from('orders')
-      .select('id, order_number, user_id, delivered_at, shipping_address, order_items(id, product_id, product_name)')
-      .eq('status', 'delivered')
-      .lte('delivered_at', cutoff)
-      .order('delivered_at', { ascending: true })
-      .limit(BATCH_SIZE);
-
-    if (error) throw error;
+    const orders = await ordersRepo.listForReviewRequests(cutoff, BATCH_SIZE);
 
     const stats = { scanned: 0, sent: 0, skipped: 0, failed: 0 };
-    for (const order of orders || []) {
+    for (const order of orders) {
       stats.scanned += 1;
       try {
         // Claim the order first => UNIQUE(order_id) makes this race-safe.
-        const { data: claim, error: claimErr } = await supabase
-          .from('review_requests')
-          .upsert(
-            { order_id: order.id, user_id: order.user_id, product_id: order.order_items?.[0]?.product_id || null, status: 'queued' },
-            { onConflict: 'order_id', ignoreDuplicates: true }
-          )
-          .select('id')
-          .maybeSingle();
+        const claim = await reviewRequestsRepo.claim({
+          order_id: order.id,
+          user_id: order.user_id,
+          product_id: order.order_items?.[0]?.product_id || null,
+          status: 'queued',
+        });
 
-        if (claimErr) throw claimErr;
         if (!claim) {
           // Already handled previously — never send a duplicate.
           stats.skipped += 1;
@@ -72,9 +63,9 @@ export const reviewJobService = {
           continue;
         }
 
-        const { data: userRow } = order.user_id
-          ? await supabase.from('users').select('first_name').eq('id', order.user_id).maybeSingle()
-          : { data: null as any };
+        const userRow = order.user_id
+          ? await usersRepo.findById(order.user_id, 'first_name')
+          : null;
         const name = userRow?.first_name || order.shipping_address?.fullName?.split(' ')[0] || 'there';
         const item = order.order_items?.[0];
         const productName = item?.product_name || 'your recent order';
@@ -107,15 +98,12 @@ export const reviewJobService = {
 
   async mark(id: string, status: string, errorText?: string, sentAt?: string) {
     try {
-      await supabase
-        .from('review_requests')
-        .update({
-          status,
-          error: errorText || null,
-          sent_at: sentAt || null,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', id);
+      await reviewRequestsRepo.mark(id, {
+        status,
+        error: errorText || null,
+        sent_at: sentAt || null,
+        updated_at: new Date().toISOString(),
+      });
     } catch (err: any) {
       console.error('[ReviewJob] Failed to update review_request row:', err?.message || err);
     }

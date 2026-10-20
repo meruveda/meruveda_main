@@ -1,12 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { GetObjectCommand, ListObjectsV2Command, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import {
   formatInvoiceNumber,
   invoiceFyLabel,
   isIntraState,
   isRajasthan,
 } from '@meruveda/shared';
-import { supabase } from '../database/supabase';
+import * as invoicesRepo from '../database/repos/invoices';
+import { __setR2ClientForTests } from './r2';
 import {
   allocateInvoiceNumber,
   claimInvoice,
@@ -29,97 +31,114 @@ import {
 } from './invoiceService';
 import * as invoiceDispatchModule from './invoiceDispatchService';
 import * as invoiceAssetsModule from './invoiceAssets';
+import * as invoiceServiceModule from './invoiceService';
 
 /**
  * Invoice numbering + GST contract tests.
  *
- * The once-only guarantee and the FY counter both live in Storage, not in the
- * database: `claimInvoice` creates `invoices/<id>/claim` with `upsert:false`,
- * and `allocateInvoiceNumber` creates a `counters/<FY>/<seq>` marker the same
- * way. So the tests below install a fake Storage backend that mirrors those
- * exact semantics — create-or-fail, no overwriting — and assert the service
- * layer on top of it:
+ * The once-only guarantee lives in R2: `claimInvoice` creates
+ * `invoices/<id>/claim` with `If-None-Match: *`. The invoice NUMBER lives in
+ * Postgres (`assign_invoice_number`). The tests install a fake R2 client that
+ * mirrors create-or-fail semantics and a fake database counter, then assert:
  *   - two parallel claims on one order -> exactly one winner, one invoice
  *   - a retry never allocates a second number
- *   - a lost counter race retries with the next number
+ *   - the database-assigned number is returned unchanged
  *   - there is no force/resend escape hatch at all
  *   - the FY label is derived from the invoice date, never hardcoded
  *   - payment wording never claims something untrue
  */
 
 /* ------------------------------------------------------------------ */
-/* Fake Storage                                                        */
+/* Fake R2 + database numbering                                        */
 /* ------------------------------------------------------------------ */
 
 /** Objects in the fake bucket: path -> content. */
 let objects = new Map<string, string>();
 
-/** The row the PostgREST stub hands back, or null for 'no such order'. */
+/** The row the order lookup hands back, or null for 'no such order'. */
 let orderRow: any = null;
+
+/** When set, the order lookup throws this instead of returning a row. */
+let orderError: any = null;
 
 /** Paths whose creation must fail once, to simulate a lost race. */
 let conflictOnce = new Set<string>();
 
+/** Numbers the database already assigned, keyed by order id (idempotent). */
+let assignedNumbers = new Map<string, string>();
+let counterSeq = 0;
+let counterFail = false;
+
+const fakeR2 = {
+  send: async (command: any) => {
+    const input = command?.input || {};
+    if (command instanceof PutObjectCommand) {
+      const key = input.Key;
+      if (conflictOnce.has(key)) {
+        conflictOnce.delete(key);
+        objects.set(key, '');
+        throw Object.assign(new Error('The resource already exists'), { name: 'PreconditionFailed' });
+      }
+      if (input.IfNoneMatch === '*' && objects.has(key)) {
+        throw Object.assign(new Error('The resource already exists'), { name: 'PreconditionFailed' });
+      }
+      const body = input.Body;
+      objects.set(key, typeof body === 'string' ? body : Buffer.from(body ?? '').toString('binary'));
+      return {};
+    }
+    if (command instanceof GetObjectCommand) {
+      if (!objects.has(input.Key)) {
+        throw Object.assign(new Error('Object not found'), { name: 'NoSuchKey' });
+      }
+      const text = objects.get(input.Key)!;
+      return {
+        Body: { transformToByteArray: async () => new TextEncoder().encode(text) },
+      };
+    }
+    if (command instanceof DeleteObjectCommand) {
+      objects.delete(input.Key);
+      return {};
+    }
+    if (command instanceof ListObjectsV2Command) {
+      const prefix = input.Prefix || '';
+      return {
+        Contents: [...objects.keys()].filter((k) => k.startsWith(prefix)).map((Key) => ({ Key })),
+        CommonPrefixes: [],
+        IsTruncated: false,
+      };
+    }
+    return {};
+  },
+};
+
 function installFakeStorage() {
   objects = new Map();
   conflictOnce = new Set();
+  orderRow = null;
+  orderError = null;
+  assignedNumbers = new Map();
+  counterSeq = 0;
+  counterFail = false;
 
-  const bucket = {
-list: async (prefix: string) => {
-      // Real Storage returns bare names for the requested prefix, no slash.
-      const out = [...objects.keys()]
-        .filter((k) => k.startsWith(prefix))
-        .filter((k) => k !== prefix)
-        .map((key) => ({ name: key.slice(prefix.length).replace(/^\//, '') }));
-      return { data: out, error: null };
-    },
-    upload: async (path: string, body: any, opts: any) => {
-      if (conflictOnce.has(path)) {
-        conflictOnce.delete(path);
-        // The competing worker really did create it, so a re-list sees it.
-        objects.set(path, '');
-        return { error: { message: 'The resource already exists' } };
-      }
-      if (objects.has(path) && !opts?.upsert) {
-        return { error: { message: 'The resource already exists' } };
-      }
-      objects.set(path, String(body ?? ''));
-      return { error: null };
-    },
-    download: async (path: string) => {
-      if (!objects.has(path)) return { data: null, error: { message: 'Object not found' } };
-      const text = objects.get(path)!;
-      return {
-        data: { text: async () => text, arrayBuffer: async () => new TextEncoder().encode(text).buffer },
-        error: null,
-      };
-    },
-createSignedUrl: async (path: string) => ({
-      data: { signedUrl: objects.has(path) ? `https://signed.test/${path}` : null },
-      error: objects.has(path) ? null : { message: 'Object not found' },
-    }),
-    remove: async (paths: string[]) => {
-      for (const p of paths) objects.delete(p);
-      return { data: [], error: null };
-    },
+  __setR2ClientForTests(fakeR2 as any);
+
+  (invoicesRepo as any).assignInvoiceNumber = async (orderId: string) => {
+    if (counterFail) throw new Error('Database counter unavailable');
+    const existing = assignedNumbers.get(orderId);
+    if (existing) return existing;
+    counterSeq += 1;
+    const number = `MV/26-27/${String(counterSeq).padStart(6, '0')}`;
+    assignedNumbers.set(orderId, number);
+    return number;
   };
 
-  (supabase.storage as any).from = () => bucket;
-  (supabase.storage as any).createBucket = async () => ({ error: null });
-// PostgREST stub: returns `orderRow`, so a test can make the dispatcher see a
-  // real order (or nothing at all).
-  const builder = () => ({
-    select: () => ({
-      eq: () => ({
-        single: async () =>
-          orderRow ? { data: orderRow, error: null } : { data: null, error: { code: 'PGRST116' } },
-        maybeSingle: async () =>
-          orderRow ? { data: orderRow, error: null } : { data: null, error: null },
-      }),
-      update: () => ({ eq: async () => ({ data: null, error: null }) }),
-    }),
-  });
-  (supabase as any).from = builder;
+  (invoiceServiceModule as any).getOrderForInvoice = async () => {
+    if (orderError) throw orderError;
+    if (!orderRow) {
+      throw Object.assign(new Error('Order not found'), { status: 404 });
+    }
+    return orderRow;
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -313,26 +332,13 @@ test('a failure while issuing leaves NO claim and NO half-issued order', async (
   // Break the renderer the only way the dispatcher cannot route around: make
   // reading the order itself throw, so it dies before the claim is taken.
   const { sendInvoiceDispatch } = invoiceDispatchModule;
-  const originalFrom = (supabase as any).from;
-  (supabase as any).from = () => ({
-    select: () => ({
-      eq: () => ({
-        single: async () => {
-          const e: any = new Error('PostgREST exploded');
-          e.code = 'XX000';
-          throw e;
-        },
-      }),
-    }),
-  });
+  orderError = Object.assign(new Error('Postgres exploded'), { code: 'XX000' });
 
   let threw = false;
   try {
     await sendInvoiceDispatch('order-dbdown');
   } catch {
     threw = true;
-  } finally {
-    (supabase as any).from = originalFrom;
   }
   assert.equal(threw, true, 'a dead database must surface, not be swallowed');
 
@@ -358,54 +364,47 @@ test('the health check reports fonts and logo without throwing', async () => {
 /* Numbering                                                           */
 /* ------------------------------------------------------------------ */
 
-test('numbers are allocated from the FY counter and are unique', async () => {
+test('numbers come from the database and are unique per order', async () => {
   installFakeStorage();
-  const issued = new Date('2026-10-15T00:00:00Z');
 
-  const s2:any=require('../database/supabase').supabase; console.error('DBG', s2 && typeof s2.storage, s2.storage && String(s2.storage.from).slice(0,50));
-  const n1 = await allocateInvoiceNumber(issued);
-  const n2 = await allocateInvoiceNumber(issued);
-  const n3 = await allocateInvoiceNumber(issued);
+  const n1 = await allocateInvoiceNumber('order-n1');
+  const n2 = await allocateInvoiceNumber('order-n2');
+  const n3 = await allocateInvoiceNumber('order-n3');
 
   assert.match(n1, /^MV\/26-27\/\d{6}$/);
   assert.notEqual(n1, n2);
   assert.notEqual(n2, n3);
-  // Sequential, because each allocation takes highest + 1.
+  // Sequential: the database counter is the single allocator.
   assert.equal(Number(n2.split('/')[2]), Number(n1.split('/')[2]) + 1);
   assert.equal(Number(n3.split('/')[2]), Number(n2.split('/')[2]) + 1);
 });
 
-test('a lost counter race retries with the next number instead of failing', async () => {
+test('the database-assigned number is returned verbatim, including after a race', async () => {
   installFakeStorage();
-  const issued = new Date('2026-10-15T00:00:00Z');
-  const fy = invoiceFyLabel(issued);
+  // A competing worker already took 000001; the DB hands us 000002.
+  assignedNumbers.set('order-race', 'MV/26-27/000002');
 
-  // Another worker wins 000001, so our first attempt must fail and retry.
-  conflictOnce.add(`counters/${fy}/000001`);
-
-  const n = await allocateInvoiceNumber(issued);
-  assert.equal(n, `MV/${fy}/000002`, 'it skipped the taken number and took the next');
+  const n = await allocateInvoiceNumber('order-race');
+  assert.equal(n, 'MV/26-27/000002', 'the service must not re-derive or re-allocate it');
 });
 
-test('a different financial year gets its own counter', async () => {
+test('a retry for the same order returns the same number, never a second one', async () => {
   installFakeStorage();
-  const thisFy = await allocateInvoiceNumber(new Date('2026-10-15T00:00:00Z'));
-  const nextFy = await allocateInvoiceNumber(new Date('2027-06-01T00:00:00Z'));
-  assert.match(thisFy, /^MV\/26-27\//);
-  assert.match(nextFy, /^MV\/27-28\//);
+
+  const first = await allocateInvoiceNumber('order-idempotent');
+  const second = await allocateInvoiceNumber('order-idempotent');
+  assert.equal(second, first, 'numbering is idempotent per order');
 });
 
 test('when the series cannot be allocated, the order number is used instead', async () => {
   installFakeStorage();
-  // Make every counter create fail by pre-filling every candidate as a conflict.
-  const fy = invoiceFyLabel(new Date());
-  for (let i = 1; i <= 25; i++) conflictOnce.add(`counters/${fy}/${String(i).padStart(6, '0')}`);
+  counterFail = true;
 
   const order: any = { id: 'order-fallback', order_number: 'MV-748373' };
   const n = await claimInvoiceNumber(order);
   // Never left without an invoice, and it is the order number, not a thrown error.
   assert.ok(n, 'an invoice number is always produced');
-  assert.ok(n!.length > 0);
+  assert.equal(n, 'MV-748373');
 });
 
 test('a buildInvoiceNumber fallback is deterministic for the same order', () => {
@@ -439,10 +438,27 @@ test('state round-trips through the bucket', async () => {
   assert.equal(state?.invoiceNumber, 'MV/26-27/000009');
 });
 
-test('a missing bucket is auto-created rather than failing the invoice', async () => {
+test('an unconfigured bucket is reported as unavailable, never auto-created', async () => {
   installFakeStorage();
+  __setR2ClientForTests(null);
+  const saved = {
+    account: process.env.R2_ACCOUNT_ID,
+    access: process.env.R2_ACCESS_KEY_ID,
+    secret: process.env.R2_SECRET_ACCESS_KEY,
+  };
+  delete process.env.R2_ACCOUNT_ID;
+  delete process.env.R2_ACCESS_KEY_ID;
+  delete process.env.R2_SECRET_ACCESS_KEY;
   resetInvoiceBucketCache();
-  assert.equal(await ensureInvoiceBucket(), true);
+
+  try {
+    assert.equal(await ensureInvoiceBucket(), false);
+  } finally {
+    if (saved.account !== undefined) process.env.R2_ACCOUNT_ID = saved.account;
+    if (saved.access !== undefined) process.env.R2_ACCESS_KEY_ID = saved.access;
+    if (saved.secret !== undefined) process.env.R2_SECRET_ACCESS_KEY = saved.secret;
+    resetInvoiceBucketCache();
+  }
 });
 
 /* ------------------------------------------------------------------ */

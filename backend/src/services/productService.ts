@@ -1,4 +1,5 @@
-import { supabase } from '../database/supabase';
+import { isDbConfigured } from '../database/db';
+import * as productsRepo from '../database/repos/products';
 import { config } from '../config/env';
 import { slugify, toCamelCase } from '@meruveda/shared';
 import { storageService } from './storageService';
@@ -7,7 +8,7 @@ const buildProductData = (rawData: any) => {
   const stock = rawData.stock !== undefined ? Number(rawData.stock) : 0;
   const minStock = rawData.minimumStock !== undefined ? Number(rawData.minimumStock) : 10;
   const stockStatus = stock === 0 ? 'out_of_stock' : stock <= minStock ? 'low_stock' : 'in_stock';
-  
+
   const productData: any = {
     stock_status: stockStatus
   };
@@ -38,7 +39,7 @@ const buildProductData = (rawData: any) => {
 
   // Extra fields stored in seo_metadata
   const extraFields = ['seoTitle', 'seoDescription', 'isFeatured', 'isTrending', 'isBestSeller', 'isRecommended', 'benefits', 'dosage', 'ingredients', 'warnings', 'expiryDate', 'manufacturer', 'country', 'gst', 'gst_rate', 'gstRate', 'hsn_code', 'hsnCode', 'shortDescription', 'categoryName'];
-  
+
   const seo_metadata: any = {};
   let hasMetadata = false;
   for (const field of extraFields) {
@@ -47,7 +48,7 @@ const buildProductData = (rawData: any) => {
       hasMetadata = true;
     }
   }
-  
+
   if (hasMetadata) {
     productData.seo_metadata = seo_metadata;
   }
@@ -55,118 +56,89 @@ const buildProductData = (rawData: any) => {
   return productData;
 };
 
+function mapProduct(raw: any, isAdmin: boolean) {
+  const camelItem = toCamelCase(raw) as any;
+
+  if (camelItem.seoMetadata) {
+    Object.assign(camelItem, camelItem.seoMetadata);
+  }
+
+  camelItem.longDescription = camelItem.description;
+  camelItem.thumbnail = camelItem.images?.[0]?.url || '';
+  camelItem.category = camelItem.categories;
+  camelItem.categoryName = camelItem.categories?.name || camelItem.seoMetadata?.categoryName || 'No category';
+
+  if (!isAdmin) {
+    // Internal inventory figures are an admin concern only.
+    delete camelItem.minimumStock;
+    delete camelItem.minimum_stock;
+  }
+
+  return camelItem;
+}
+
 export const productService = {
-  async getProducts(params: any) {
-    // Fail with an actionable message instead of a cryptic fetch failure
-    // when the backend service is missing its Supabase env vars on Vercel
-    // (local dev works because backend/.env exists there).
-    if (!config.supabaseUrl || !config.supabaseServiceKey) {
+  async getProducts(params: any, opts: { isAdmin?: boolean } = {}) {
+    if (!isDbConfigured()) {
       throw new Error(
-        'Supabase is not configured (SUPABASE_URL / SUPABASE_SERVICE_KEY missing). ' +
-        'Set them on the backend service in Vercel and redeploy.'
+        'Database is not configured (DATABASE_URL missing). ' +
+        'Set it on the backend service in Vercel and redeploy.'
       );
     }
-    const { isFeatured, categoryId, search, status, stockStatus, page = 1, limit = 10, sortBy = 'created_at', sortOrder = 'desc' } = params;
 
-    let query = supabase.from('products').select('*, categories(id, name, slug)', { count: 'exact' });
+    const {
+      isFeatured, categoryId, search, status, stockStatus,
+      page = 1, limit = 10, sortBy = 'created_at', sortOrder = 'desc',
+      isBestSeller,
+    } = params;
 
-    if (categoryId) query = query.eq('category_id', categoryId);
-    if (status) query = query.eq('status', status);
-    if (stockStatus) query = query.eq('stock_status', stockStatus);
-    if (isFeatured !== undefined) {
-      const isFeaturedVal = isFeatured === 'true' || isFeatured === true;
-      query = query.eq('seo_metadata->>isFeatured', String(isFeaturedVal));
-    }
-    if (search) {
-      query = query.or(`name.ilike.%${search}%,sku.ilike.%${search}%,brand.ilike.%${search}%`);
-    }
+    const isAdmin = opts.isAdmin === true;
+    const pageNum = Number(page) || 1;
+    const requestedLimit = Number(limit) || 10;
+    // Public/customer lists are capped; admin pagination is not.
+    const limitNum = isAdmin ? requestedLimit : Math.min(requestedLimit, 100);
 
-    if (params.isFeatured !== undefined) {
-      const isFeaturedVal = params.isFeatured === 'true' || params.isFeatured === true;
-      query = query.eq('seo_metadata->>isFeatured', String(isFeaturedVal));
-    }
-    if (params.isBestSeller !== undefined) {
-      const isBestSellerVal = params.isBestSeller === 'true' || params.isBestSeller === true;
-      query = query.eq('seo_metadata->>isBestSeller', String(isBestSellerVal));
-    }
+    const toBool = (v: any) => v === 'true' || v === true;
 
-    const pageNum = Number(page);
-    const limitNum = Number(limit);
-    const from = (pageNum - 1) * limitNum;
-    const to = from + limitNum - 1;
-
-    query = query
-      .order(sortBy as string, { ascending: sortOrder === 'asc' })
-      .range(from, to);
-
-    const { data, count, error } = await query;
-
-    if (error) throw error;
-
-    const camelData = toCamelCase(data) as any[];
-    const mappedData = camelData.map(item => ({
-      ...item,
-      ...item.seoMetadata,
-      longDescription: item.description,
-      thumbnail: item.images?.[0]?.url || '',
-      category: item.categories,
-      categoryName: item.categories?.name || item.seoMetadata?.categoryName || 'No category'
-    }));
+    const { rows, count } = await productsRepo.listProducts({
+      categoryId,
+      status,
+      stockStatus,
+      isFeatured: isFeatured !== undefined ? toBool(isFeatured) : undefined,
+      isBestSeller: isBestSeller !== undefined ? toBool(isBestSeller) : undefined,
+      search,
+      sortBy: String(sortBy),
+      sortOrder: sortOrder === 'asc' ? 'asc' : 'desc',
+      limit: limitNum,
+      offset: (pageNum - 1) * limitNum,
+      isAdmin,
+    });
 
     return {
-      data: mappedData,
+      data: rows.map((row) => mapProduct(row, isAdmin)),
       total: count,
       page: pageNum,
       limit: limitNum,
-      totalPages: count ? Math.ceil(count / limitNum) : 0
+      totalPages: count ? Math.ceil(count / limitNum) : 0,
     };
   },
 
-  async getProductById(id: string) {
-    const { data, error } = await supabase
-      .from('products')
-      .select('*, categories(id, name, slug)')
-      .eq('id', id)
-      .single();
+  async getProductById(id: string, opts: { isAdmin?: boolean } = {}) {
+    const row = await productsRepo.getProductById(id);
 
-    if (error || !data) {
+    if (!row) {
       const notFoundError = new Error('Product not found');
       (notFoundError as any).status = 404;
       throw notFoundError;
     }
 
-    const camelItem = toCamelCase(data) as any;
-    
-    // Merge seoMetadata into the main object so fields like shortDescription are accessible
-    if (camelItem.seoMetadata) {
-      Object.assign(camelItem, camelItem.seoMetadata);
-    }
-    
-    camelItem.longDescription = camelItem.description;
-    camelItem.thumbnail = camelItem.images?.[0]?.url || '';
-    camelItem.category = camelItem.categories;
-    camelItem.categoryName = camelItem.categories?.name || camelItem.seoMetadata?.categoryName || 'No category';
-    return camelItem;
+    return mapProduct(row, opts.isAdmin === true);
   },
 
   async createProduct(payload: any) {
     const productData = buildProductData(payload);
-
-    const { data, error } = await supabase
-      .from('products')
-      .insert(productData)
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    const camelItem = toCamelCase(data) as any;
-    if (camelItem.seoMetadata) {
-      Object.assign(camelItem, camelItem.seoMetadata);
-    }
-    camelItem.longDescription = camelItem.description;
-    camelItem.thumbnail = camelItem.images?.[0]?.url || '';
-    return camelItem;
+    const data = await productsRepo.insertProduct(productData);
+    return mapProduct(data, true);
   },
 
   async updateProduct(id: string, payload: any) {
@@ -178,12 +150,12 @@ export const productService = {
 
     // Handle image cleanup
     if (productData.images) {
-      const existingProduct = await this.getProductById(id);
+      const existingProduct = await this.getProductById(id, { isAdmin: true });
       const existingImageUrls = existingProduct.images?.map((img: any) => img.url) || [];
       const newImageUrls = productData.images.map((img: any) => img.url);
-      
+
       const imagesToRemove = existingImageUrls.filter((url: string) => !newImageUrls.includes(url));
-      
+
       if (imagesToRemove.length > 0) {
         storageService.deleteImagesByUrls(imagesToRemove).catch((err: any) => {
           console.error('Failed to cleanup old product images:', err);
@@ -191,28 +163,19 @@ export const productService = {
       }
     }
 
-    const { data, error } = await supabase
-      .from('products')
-      .update(productData)
-      .eq('id', id)
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    const camelItem = toCamelCase(data) as any;
-    if (camelItem.seoMetadata) {
-      Object.assign(camelItem, camelItem.seoMetadata);
+    const data = await productsRepo.updateProduct(id, productData);
+    if (!data) {
+      const err = new Error('Product not found');
+      (err as any).status = 404;
+      throw err;
     }
-    camelItem.longDescription = camelItem.description;
-    camelItem.thumbnail = camelItem.images?.[0]?.url || '';
-    return camelItem;
+    return mapProduct(data, true);
   },
 
   async deleteProduct(id: string) {
     // Handle image cleanup
     try {
-      const existingProduct = await this.getProductById(id);
+      const existingProduct = await this.getProductById(id, { isAdmin: true });
       if (existingProduct.images && existingProduct.images.length > 0) {
         const imageUrls = existingProduct.images.map((img: any) => img.url);
         storageService.deleteImagesByUrls(imageUrls).catch((err: any) => {
@@ -223,11 +186,6 @@ export const productService = {
       console.error('Error fetching product for image cleanup before delete:', e);
     }
 
-    const { error } = await supabase
-      .from('products')
-      .delete()
-      .eq('id', id);
-
-    if (error) throw error;
+    await productsRepo.deleteProduct(id);
   }
 };

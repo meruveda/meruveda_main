@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
-import { supabase } from '../database/supabase';
+import * as analyticsRepo from '../database/repos/analytics';
+import * as productsRepo from '../database/repos/products';
 import { hasTable } from '../services/schemaGuard';
 
 /**
@@ -40,31 +41,31 @@ export const getDashboardStats = async (req: Request, res: Response, next: NextF
   try {
     // Parallelize queries for dashboard performance
     const [
-      { count: totalOrders },
-      { count: totalProducts },
-      { count: totalCustomers },
-      { data: recentOrders },
-      { data: allOrders },
-      { data: productsStock }
+      totalOrders,
+      totalProducts,
+      totalCustomers,
+      recentOrders,
+      allOrders,
+      productsStock
     ] = await Promise.all([
-      supabase.from('orders').select('*', { count: 'exact', head: true }),
-      supabase.from('products').select('*', { count: 'exact', head: true }),
-      supabase.from('users').select('*', { count: 'exact', head: true }).eq('role', 'customer'),
-      supabase.from('orders').select('*, users(first_name, last_name)').order('created_at', { ascending: false }).limit(5),
-      supabase.from('orders').select('id, created_at, status, payment_status, payment_method, subtotal, discount, tax, shipping_fee, total'),
-      supabase.from('products').select('stock, minimum_stock')
+      analyticsRepo.countOrders(),
+      analyticsRepo.countProducts(),
+      analyticsRepo.countCustomers(),
+      analyticsRepo.recentOrders(5),
+      analyticsRepo.orderStatsRows(),
+      analyticsRepo.productStockRows()
     ]);
 
     // Calculate dynamic stock alerts
-    const outOfStock = productsStock?.filter((p: any) => Number(p.stock || 0) <= 0).length || 0;
-    const lowStock = productsStock?.filter((p: any) => {
+    const outOfStock = productsStock.filter((p: any) => Number(p.stock || 0) <= 0).length;
+    const lowStock = productsStock.filter((p: any) => {
       const stock = Number(p.stock || 0);
       const minStock = Number(p.minimum_stock !== undefined && p.minimum_stock !== null ? p.minimum_stock : 10);
       return stock > 0 && stock <= minStock;
-    }).length || 0;
+    }).length;
 
     // Filter qualifying orders for revenue metrics
-    const qualifyingOrders = allOrders?.filter(isOrderQualifying) || [];
+    const qualifyingOrders = allOrders.filter(isOrderQualifying);
 
     // Sum financial metrics
     // Revenue = Subtotal - Discount - Tax (GST)
@@ -86,9 +87,9 @@ export const getDashboardStats = async (req: Request, res: Response, next: NextF
       .reduce((sum, o) => sum + orderRevenue(o), 0);
 
     // Order status counts
-    const pendingOrders = allOrders?.filter((o: any) => o.status === 'Pending').length || 0;
-    const deliveredOrders = allOrders?.filter((o: any) => o.status === 'Delivered').length || 0;
-    const cancelledOrders = allOrders?.filter((o: any) => o.status === 'Cancelled').length || 0;
+    const pendingOrders = allOrders.filter((o: any) => o.status === 'Pending').length;
+    const deliveredOrders = allOrders.filter((o: any) => o.status === 'Delivered').length;
+    const cancelledOrders = allOrders.filter((o: any) => o.status === 'Cancelled').length;
 
     // Generate last 7 days' daily data for weekly revenueChart
     const revenueChart = [];
@@ -133,7 +134,7 @@ export const getDashboardStats = async (req: Request, res: Response, next: NextF
       d.setDate(d.getDate() - i);
       const dayLabel = d.toLocaleDateString('en-US', { weekday: 'short' });
       
-      const dayOrdersCount = allOrders?.filter(o => new Date(o.created_at).toDateString() === d.toDateString()).length || 0;
+      const dayOrdersCount = allOrders.filter(o => new Date(o.created_at).toDateString() === d.toDateString()).length;
       ordersGraph.push({
         day: dayLabel,
         orders: dayOrdersCount
@@ -147,18 +148,18 @@ export const getDashboardStats = async (req: Request, res: Response, next: NextF
         gstCollected: Number(gstCollected.toFixed(2)),
         todayRevenue: Number(todayRevenue.toFixed(2)),
         monthlyRevenue: Number(monthlyRevenue.toFixed(2)),
-        totalOrders: totalOrders || 0,
+        totalOrders,
         pendingOrders,
         deliveredOrders,
         cancelledOrders,
-        totalCustomers: totalCustomers || 0,
-        totalProducts: totalProducts || 0,
+        totalCustomers,
+        totalProducts,
         lowStock,
         outOfStock,
         revenueChart,
         salesChart,
         ordersGraph,
-        recentOrders: recentOrders || []
+        recentOrders
       }
     });
   } catch (error) {
@@ -168,15 +169,12 @@ export const getDashboardStats = async (req: Request, res: Response, next: NextF
 
 export const getSummary = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const [
-      { data: allOrders },
-      { count: totalCustomers }
-    ] = await Promise.all([
-      supabase.from('orders').select('id, created_at, status, payment_status, payment_method, subtotal, discount, tax, total'),
-      supabase.from('users').select('*', { count: 'exact', head: true }).eq('role', 'customer')
+    const [allOrders, totalCustomers] = await Promise.all([
+      analyticsRepo.summaryOrderRows(),
+      analyticsRepo.countCustomers()
     ]);
 
-    const qualifyingOrders = allOrders?.filter(isOrderQualifying) || [];
+    const qualifyingOrders = allOrders.filter(isOrderQualifying);
     const totalRevenue = qualifyingOrders.reduce((sum, o) => sum + orderRevenue(o), 0);
 
     const salesByMonth = [];
@@ -205,7 +203,7 @@ export const getSummary = async (req: Request, res: Response, next: NextFunction
         revenueGrowth: 15.5,
         totalOrders: qualifyingOrders.length,
         ordersGrowth: 8.2,
-        totalCustomers: totalCustomers || 0,
+        totalCustomers,
         customersGrowth: 5.0,
         conversionRate: 2.8,
         conversionGrowth: 0.5,
@@ -268,13 +266,12 @@ export const recordPageview = async (req: Request, res: Response, next: NextFunc
     const deviceRaw = String(req.body?.deviceType || 'desktop');
     const deviceType = DEVICE_TYPES.has(deviceRaw) ? deviceRaw : 'desktop';
 
-    const { error } = await supabase.from('page_views').insert({
+    await analyticsRepo.insertPageview({
       path,
       referrer: referrer || null,
       session_id: sessionId,
       device_type: deviceType,
     });
-    if (error) throw error;
 
     res.status(204).end();
   } catch (error) {
@@ -324,7 +321,7 @@ export const recordEvent = async (req: Request, res: Response, next: NextFunctio
     const rawValue = Number(req.body?.value);
     const value = Number.isFinite(rawValue) && rawValue >= 0 ? Math.round(rawValue * 100) / 100 : null;
 
-    const { error } = await supabase.from('analytics_events').insert({
+    await analyticsRepo.insertEvent({
       event_name: eventName,
       path: path || null,
       session_id: sessionId || null,
@@ -333,7 +330,6 @@ export const recordEvent = async (req: Request, res: Response, next: NextFunctio
       value,
       currency: 'INR',
     });
-    if (error) throw error;
 
     res.status(204).end();
   } catch (error) {
@@ -369,15 +365,11 @@ async function buildFunnel(since: string, _days: number) {
   }
 
   // Counts per event name over the window (bounded like the pageviews query).
-  const { data: eventRows } = await supabase
-    .from('analytics_events')
-    .select('event_name, product_id')
-    .gte('created_at', since)
-    .limit(50_000);
+  const eventRows = await analyticsRepo.eventRowsSince(since);
 
   const counts = new Map<string, number>();
   const productViews = new Map<string, number>();
-  for (const row of eventRows || []) {
+  for (const row of eventRows) {
     const name = String(row.event_name || '');
     counts.set(name, (counts.get(name) || 0) + 1);
     if ((name === 'view_item' || name === 'add_to_cart') && row.product_id) {
@@ -396,11 +388,11 @@ async function buildFunnel(since: string, _days: number) {
     .sort((a, b) => b[1] - a[1])
     .slice(0, 10);
   if (topIds.length) {
-    const { data: products } = await supabase
-      .from('products')
-      .select('id, name')
-      .in('id', topIds.map(([id]) => id));
-    const names = new Map((products || []).map((p: any) => [p.id, p.name]));
+    const products = await productsRepo.getProductsByIds(
+      topIds.map(([id]) => id),
+      'id, name',
+    );
+    const names = new Map(products.map((p: any) => [p.id, p.name]));
     topProducts = topIds.map(([productId, views]) => ({
       productId,
       name: String(names.get(productId) || 'Unknown product'),
@@ -410,14 +402,10 @@ async function buildFunnel(since: string, _days: number) {
 
   // COD vs PayU from the orders table itself rather than the beacon, so the
   // split reflects what was actually sold.
-  const { data: orders } = await supabase
-    .from('orders')
-    .select('payment_method, created_at')
-    .gte('created_at', since)
-    .limit(50_000);
+  const orders = await analyticsRepo.paymentMethodsSince(since);
   let cod = 0;
   let payu = 0;
-  for (const order of orders || []) {
+  for (const order of orders) {
     const method = String(order.payment_method || '').toLowerCase();
     if (method.includes('cash') || method === 'cod') cod += 1;
     else payu += 1;
@@ -452,20 +440,14 @@ export const getTrafficStats = async (req: Request, res: Response, next: NextFun
 
     // Cap rows so a high-traffic month cannot OOM the function; 50k is far
     // beyond realistic Hobby-plan volume and keeps aggregation in JS simple.
-    const { data: rows, error } = await supabase
-      .from('page_views')
-      .select('path, session_id, device_type, created_at')
-      .gte('created_at', since)
-      .order('created_at', { ascending: true })
-      .limit(50_000);
-    if (error) throw error;
+    const rows = await analyticsRepo.pageViewRowsSince(since);
 
     const sessions = new Set<string>();
     const byPath = new Map<string, number>();
     const byDevice = new Map<string, number>();
     const byDay = new Map<string, number>();
 
-    for (const row of rows || []) {
+    for (const row of rows) {
       if (row.session_id) sessions.add(row.session_id);
       byPath.set(row.path, (byPath.get(row.path) || 0) + 1);
       byDevice.set(row.device_type, (byDevice.get(row.device_type) || 0) + 1);
@@ -489,7 +471,7 @@ export const getTrafficStats = async (req: Request, res: Response, next: NextFun
     res.json({
       data: {
         range: `${days}d`,
-        totalViews: rows?.length || 0,
+        totalViews: rows.length,
         uniqueSessions: sessions.size,
         topPages,
         deviceSplit: Object.fromEntries(byDevice),

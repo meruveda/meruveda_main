@@ -1,4 +1,7 @@
-import { supabase } from '../database/supabase';
+import * as ordersRepo from '../database/repos/orders';
+import * as productsRepo from '../database/repos/products';
+import * as transactionsRepo from '../database/repos/transactions';
+import * as trackingRepo from '../database/repos/tracking';
 import { addressService } from './addressService';
 import { shiprocketOrderService } from './shiprocket/order.service';
 import { shiprocketTrackingService } from './shiprocket/tracking.service';
@@ -52,44 +55,21 @@ export const orderService = {
   async getOrders(params: any) {
     const { status, page = 1, limit = 10, sortBy = 'created_at', sortOrder = 'desc', includeItems, search, paymentMethod, startDate, endDate } = params;
 
-    const selectQuery = includeItems === 'true' 
-      ? '*, users(email), order_items(*, products(*))' 
-      : '*, users(email)';
-    let query = supabase.from('orders').select(selectQuery, { count: 'exact' });
-
-    if (status) query = query.eq('status', status);
-
-    if (startDate) query = query.gte('created_at', startDate);
-    if (endDate) query = query.lte('created_at', endDate);
-
-    if (paymentMethod) {
-      if (paymentMethod === 'cod') {
-        query = query.ilike('payment_method', '%cash%');
-      } else if (paymentMethod === 'upi') {
-        query = query.ilike('payment_method', '%upi%');
-      } else if (paymentMethod === 'card') {
-        query = query.ilike('payment_method', '%card%');
-      } else {
-        query = query.ilike('payment_method', `%${paymentMethod}%`);
-      }
-    }
-
-    if (search) {
-      query = query.or(`order_number.ilike.%${search}%,shipping_address->>fullName.ilike.%${search}%`);
-    }
-
     const pageNum = Number(page);
     const limitNum = Number(limit);
-    const from = (pageNum - 1) * limitNum;
-    const to = from + limitNum - 1;
 
-    query = query
-      .order(sortBy as string, { ascending: sortOrder === 'asc' })
-      .range(from, to);
-
-    const { data, count, error } = await query;
-
-    if (error) throw error;
+    const { rows: data, count } = await ordersRepo.listOrders({
+      status,
+      startDate,
+      endDate,
+      paymentMethod,
+      search,
+      sortBy,
+      sortOrder,
+      limit: limitNum,
+      offset: (pageNum - 1) * limitNum,
+      includeItems: includeItems === 'true',
+    });
 
     return {
       data,
@@ -101,13 +81,9 @@ export const orderService = {
   },
 
   async getOrderById(id: string) {
-    const { data, error } = await supabase
-      .from('orders')
-      .select('*, users(email), order_items(*, products(*)), order_tracking_history(*)')
-      .eq('id', id)
-      .single();
+    const data = await ordersRepo.getOrderById(id);
 
-    if (error || !data) {
+    if (!data) {
       const err = new Error('Order not found');
       (err as any).status = 404;
       throw err;
@@ -150,11 +126,10 @@ export const orderService = {
     if (items && items.length > 0) {
       const productIds = items.map((item: any) => item.product_id).filter(Boolean);
       if (productIds.length > 0) {
-        const { data } = await supabase
-          .from('products')
-          .select('id, name, sku, images, seo_metadata, seoMetadata')
-          .in('id', productIds);
-        dbProducts = data || [];
+        dbProducts = await productsRepo.getProductsByIds(
+          productIds,
+          'id, name, sku, images, seo_metadata',
+        );
       }
     }
 
@@ -202,16 +177,7 @@ export const orderService = {
       );
     }
 
-    const { data: order, error: orderError } = await supabase
-      .from('orders')
-      .insert(orderData)
-      .select()
-      .single();
-
-    if (orderError) {
-      console.error('Supabase Insert Error:', orderError);
-      throw orderError;
-    }
+    const order = await ordersRepo.insertOrder(orderData);
 
     // Insert order items
     if (items && items.length > 0) {
@@ -239,20 +205,11 @@ export const orderService = {
         };
       });
 
-      const { error: itemsError } = await supabase
-        .from('order_items')
-        .insert(orderItems);
+      await ordersRepo.insertOrderItems(orderItems);
 
-      if (itemsError) throw itemsError;
-      
       // Reduce stock (Production feature)
       for (const item of items) {
-        // Fetch current stock
-        const { data: prod } = await supabase.from('products').select('stock').eq('id', item.product_id).single();
-        if (prod) {
-          const newStock = Math.max(0, prod.stock - item.quantity);
-          await supabase.from('products').update({ stock: newStock }).eq('id', item.product_id);
-        }
+        await productsRepo.decrementStock(item.product_id, Number(item.quantity) || 0);
       }
     }
 
@@ -271,7 +228,7 @@ export const orderService = {
           updated_at: new Date().toISOString()
         }
       };
-      await supabase.from('transactions').insert(txData);
+      await transactionsRepo.insertTransaction(txData);
     }
 
     // ============================================
@@ -289,12 +246,12 @@ export const orderService = {
       // Temporarily mark order as processing for testing (PAID)
       // We avoid 'PAID (TEST)' since it violates the DB CHECK constraint for status.
       order.status = 'processing';
-      await supabase.from('orders').update({ status: 'processing' }).eq('id', order.id);
+      await ordersRepo.updateOrderById(order.id, { status: 'processing' });
     }
     if (!config.shiprocketAutoPush && (config.shiprocketTestMode || isCODPlacement)) {
       try {
         await pushOrderToShiprocket(order.id);
-        const { data: refreshed } = await supabase.from('orders').select('shiprocket_order_id, shipment_id').eq('id', order.id).maybeSingle();
+        const refreshed = await ordersRepo.getShiprocketIds(order.id);
         if (refreshed?.shiprocket_order_id) {
           order.shiprocket_order_id = refreshed.shiprocket_order_id;
           order.shipment_id = refreshed.shipment_id;
@@ -317,13 +274,9 @@ export const orderService = {
 
   async updateOrderStatus(id: string, status?: string, tracking_number?: string) {
     // 1. Fetch current order state
-    const { data: order, error: fetchErr } = await supabase
-      .from('orders')
-      .select('*')
-      .eq('id', id)
-      .single();
+    const order = await ordersRepo.getOrderRow(id);
 
-    if (fetchErr || !order) {
+    if (!order) {
       throw new Error('Order not found');
     }
 
@@ -347,15 +300,10 @@ export const orderService = {
 
       // Try to insert a success transaction record if one doesn't exist
       try {
-        const { data: existingTx } = await supabase
-          .from('transactions')
-          .select('id')
-          .eq('order_id', order.id)
-          .eq('status', 'success')
-          .maybeSingle();
+        const existingTx = await transactionsRepo.findSuccessByOrder(order.id);
 
         if (!existingTx) {
-          await supabase.from('transactions').insert({
+          await transactionsRepo.insertTransaction({
             user_id: order.user_id,
             order_id: order.id,
             amount: order.total,
@@ -401,12 +349,8 @@ export const orderService = {
           await shiprocketWebhookService.processWebhook(payload);
           
           // Re-fetch order status to include the updated values from processWebhook
-          const { data: updatedOrder } = await supabase
-            .from('orders')
-            .select('status, tracking_status, last_tracking_update, courier_name, estimated_delivery, tracking_url')
-            .eq('id', id)
-            .single();
-            
+          const updatedOrder = await ordersRepo.getOrderRow(id);
+
           if (updatedOrder) {
             updateData.status = updatedOrder.status;
             updateData.tracking_status = updatedOrder.tracking_status;
@@ -439,14 +383,9 @@ export const orderService = {
     }
 
     // 4. Update the database
-    const { data, error } = await supabase
-      .from('orders')
-      .update(updateData)
-      .eq('id', id)
-      .select('*, users(email)')
-      .single();
-
-    if (error) throw error;
+    await ordersRepo.updateOrderById(id, updateData);
+    const data = await ordersRepo.getOrderWithUser(id);
+    if (!data) throw new Error('Order not found');
 
     // 4b. Push a WhatsApp status update to the customer for the shipment /
     // cancellation milestones. Fire-and-forget: never block the admin action.
@@ -468,7 +407,7 @@ export const orderService = {
 
     // 5. Save cancellation to history
     if (status === 'cancelled' || normalizedStatus === 'cancelled') {
-      await supabase.from('order_tracking_history').insert({
+      await trackingRepo.insertHistory({
         order_id: id,
         tracking_status: 'CANCELED',
         activity: 'Order Cancelled (Fulfillment Update)',
@@ -481,25 +420,14 @@ export const orderService = {
   },
 
   async getMyOrders(userId: string) {
-    const { data, error } = await supabase
-      .from('orders')
-      .select('*, order_items(*, products(*)), order_tracking_history(*)')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false });
-
-    if (error) throw error;
-    return data;
+    return ordersRepo.getMyOrders(userId);
   },
 
   async updateOrder(id: string, updates: any) {
     // 1. Fetch current order
-    const { data: order, error: fetchError } = await supabase
-      .from('orders')
-      .select('*')
-      .eq('id', id)
-      .single();
+    const order = await ordersRepo.getOrderRow(id);
 
-    if (fetchError || !order) {
+    if (!order) {
       throw new Error('Order not found');
     }
 
@@ -539,12 +467,9 @@ export const orderService = {
 
       // Recalculate GST through the SAME helper the invoice uses, so an admin
       // edit can never leave `tax` disagreeing with the printed invoice.
-      const { data: dbOrderItems } = await supabase
-        .from('order_items')
-        .select('*, products(seo_metadata, seoMetadata)')
-        .eq('order_id', id);
+      const dbOrderItems = await ordersRepo.getItemsWithProductMeta(id);
 
-      const gstLines = (dbOrderItems || []).map((item: any) => {
+      const gstLines = dbOrderItems.map((item: any) => {
         const meta = item.products?.seo_metadata || item.products?.seoMetadata || {};
         const raw = meta.gst_rate ?? meta.gstRate ?? meta.gst;
         const ratePercent = Number.isFinite(Number(raw)) && Number(raw) > 0 ? Number(raw) : 5;
@@ -568,14 +493,8 @@ export const orderService = {
       updateData.total = round2(newSubtotal - newDiscount + newShippingFee);
     }
 
-    const { data: updatedOrder, error: updateError } = await supabase
-      .from('orders')
-      .update(updateData)
-      .eq('id', id)
-      .select()
-      .single();
-
-     if (updateError) throw updateError;
+    const updatedOrder = await ordersRepo.updateOrderById(id, updateData);
+    if (!updatedOrder) throw new Error('Order not found');
 
      // Trigger transaction cancellation status update if order is cancelled or returned
      if (updates.status === 'cancelled' || updates.status === 'returned') {
@@ -586,33 +505,7 @@ export const orderService = {
    },
 
     async deleteOrder(id: string) {
-      // 1. Delete associated transactions
-      const { error: txErr } = await supabase
-        .from('transactions')
-        .delete()
-        .eq('order_id', id);
-      if (txErr) throw txErr;
-
-      // 2. Delete associated order_tracking_history
-      const { error: trackingErr } = await supabase
-        .from('order_tracking_history')
-        .delete()
-        .eq('order_id', id);
-      if (trackingErr) throw trackingErr;
-
-      // 3. Delete associated order_items
-      const { error: itemsErr } = await supabase
-        .from('order_items')
-        .delete()
-        .eq('order_id', id);
-      if (itemsErr) throw itemsErr;
-
-      // 4. Delete the order itself
-      const { error: orderErr } = await supabase
-        .from('orders')
-        .delete()
-        .eq('id', id);
-      if (orderErr) throw orderErr;
+      await ordersRepo.deleteOrderCascade(id);
     }
 };
 
@@ -622,13 +515,10 @@ async function markPushFailed(orderId: string, message: string): Promise<void> {
     const statusOk = await hasColumn('orders', 'shiprocket_push_status');
     const errorOk = await hasColumn('orders', 'shiprocket_push_error');
     if (!statusOk && !errorOk) return;
-    await supabase
-      .from('orders')
-      .update({
-        ...(statusOk ? { shiprocket_push_status: 'failed' } : {}),
-        ...(errorOk ? { shiprocket_push_error: String(message).slice(0, 500) } : {}),
-      })
-      .eq('id', orderId);
+    await ordersRepo.updateOrderById(orderId, {
+      ...(statusOk ? { shiprocket_push_status: 'failed' } : {}),
+      ...(errorOk ? { shiprocket_push_error: String(message).slice(0, 500) } : {}),
+    });
   } catch (err: any) {
     console.error('[Shiprocket] could not persist push failure:', err?.message || err);
   }
@@ -641,14 +531,11 @@ async function markPushSucceeded(orderId: string): Promise<void> {
     const atOk = await hasColumn('orders', 'shiprocket_pushed_at');
     const errorOk = await hasColumn('orders', 'shiprocket_push_error');
     if (!statusOk && !atOk) return;
-    await supabase
-      .from('orders')
-      .update({
-        ...(statusOk ? { shiprocket_push_status: 'pushed' } : {}),
-        ...(atOk ? { shiprocket_pushed_at: new Date().toISOString() } : {}),
-        ...(errorOk ? { shiprocket_push_error: null } : {}),
-      })
-      .eq('id', orderId);
+    await ordersRepo.updateOrderById(orderId, {
+      ...(statusOk ? { shiprocket_push_status: 'pushed' } : {}),
+      ...(atOk ? { shiprocket_pushed_at: new Date().toISOString() } : {}),
+      ...(errorOk ? { shiprocket_push_error: null } : {}),
+    });
   } catch (err: any) {
     console.error('[Shiprocket] could not persist push success:', err?.message || err);
   }
@@ -690,39 +577,18 @@ async function claimShiprocketPush(orderId: string): Promise<'claimed' | 'busy'>
   };
 
   try {
-    const { data, error } = await supabase
-      .from('orders')
-      .update(claimPatch)
-      .eq('id', orderId)
-      .is('shiprocket_order_id', null)
-      .or('shiprocket_push_status.is.null,shiprocket_push_status.neq.in_progress')
-      .select('id');
-    if (error) {
-      console.error('[Shiprocket] push claim failed:', error.message);
-      return 'claimed'; // degrade: never block a legitimate push on a probe error
-    }
-    if (data && data.length > 0) return 'claimed';
+    const claimed = await ordersRepo.claimShiprocketPush(orderId, claimPatch);
+    if (claimed) return 'claimed';
 
     // Nobody claimed it => either already pushed, or a push is in flight.
-    const { data: row } = await supabase
-      .from('orders')
-      .select('shiprocket_order_id, shiprocket_push_status, shiprocket_push_started_at')
-      .eq('id', orderId)
-      .maybeSingle();
+    const row = await ordersRepo.getPushState(orderId);
     if (row?.shiprocket_order_id) return 'busy';
 
     const startedAt = row?.shiprocket_push_started_at;
     const staleCutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
     if (row?.shiprocket_push_status === 'in_progress' && startedAt && startedAt < staleCutoff) {
-      const retry = await supabase
-        .from('orders')
-        .update(claimPatch)
-        .eq('id', orderId)
-        .is('shiprocket_order_id', null)
-        .eq('shiprocket_push_status', 'in_progress')
-        .lt('shiprocket_push_started_at', staleCutoff)
-        .select('id');
-      if (!retry.error && retry.data && retry.data.length > 0) return 'claimed';
+      const retried = await ordersRepo.claimStaleShiprocketPush(orderId, claimPatch, staleCutoff);
+      if (retried) return 'claimed';
     }
     return 'busy';
   } catch (err: any) {
@@ -732,8 +598,8 @@ async function claimShiprocketPush(orderId: string): Promise<'claimed' | 'busy'>
 }
 
 export async function pushOrderToShiprocket(orderId: string) {
-  const { data: order, error: fetchErr } = await supabase.from('orders').select('*').eq('id', orderId).single();
-  if (fetchErr || !order) throw new Error('Order not found for Shiprocket push');
+  const order = await ordersRepo.getOrderRow(orderId);
+  if (!order) throw new Error('Order not found for Shiprocket push');
   if ((order as any).shiprocket_order_id) {
     console.log(`[Shiprocket] order ${order.order_number} already pushed (sr_order_id=${(order as any).shiprocket_order_id}), skipping.`);
     await markPushSucceeded(order.id);
@@ -756,20 +622,19 @@ export async function pushOrderToShiprocket(orderId: string) {
 
 async function executeShiprocketPush(order: any) {
   const orderId = order.id;
-  const { data: dbItems } = await supabase.from('order_items').select('*').eq('order_id', orderId);
-  const items = dbItems || [];
+  const items = await ordersRepo.getOrderItems(orderId);
   if (items.length === 0 || !order.shipping_address) {
     throw new Error('Order has no items or shipping address; cannot push to Shiprocket');
   }
 
   const productIds = items.map((i: any) => i.product_id).filter(Boolean);
-  const { data: products } = await supabase
-    .from('products')
-    .select('id, name, sku, weight, length, breadth, height, hsn')
-    .in('id', productIds);
+  const products = await productsRepo.getProductsByIds(
+    productIds,
+    'id, name, sku, weight, length, breadth, height, hsn',
+  );
 
   const shiprocketItems = items.map((item: any) => {
-    const prod: any = products?.find((p: any) => p.id === item.product_id) || {};
+    const prod: any = products.find((p: any) => p.id === item.product_id) || {};
     return {
       name: (prod.name || item.product_name || 'Product').slice(0, 100),
       sku: prod.sku || item.sku || `SKU-${String(item.product_id || 'NA').substring(0, 8).toUpperCase()}`,
@@ -785,15 +650,13 @@ async function executeShiprocketPush(order: any) {
   let maxLength = 10;
   let maxBreadth = 10;
   let maxHeight = 10;
-  if (products) {
-    products.forEach((p: any) => {
-      const itemQty = items.find((i: any) => i.product_id === p.id)?.quantity || 1;
-      totalWeight += (Number(p.weight) || 0.5) * itemQty;
-      maxLength = Math.max(maxLength, Number(p.length) || 10);
-      maxBreadth = Math.max(maxBreadth, Number(p.breadth) || 10);
-      maxHeight += (Number(p.height) || 0) * itemQty;
-    });
-  }
+  products.forEach((p: any) => {
+    const itemQty = items.find((i: any) => i.product_id === p.id)?.quantity || 1;
+    totalWeight += (Number(p.weight) || 0.5) * itemQty;
+    maxLength = Math.max(maxLength, Number(p.length) || 10);
+    maxBreadth = Math.max(maxBreadth, Number(p.breadth) || 10);
+    maxHeight += (Number(p.height) || 0) * itemQty;
+  });
   maxHeight = Math.max(10, maxHeight);
   totalWeight = Math.max(0.1, Number(totalWeight.toFixed(2)));
 
@@ -880,16 +743,16 @@ async function executeShiprocketPush(order: any) {
     // Guarded write: only claim the IDs if no concurrent push (webhook
     // retry, manual push, cron) already stored them. Prevents a slower
     // duplicate response from dissociating the order from the first shipment.
-    const { data: claimed } = await supabase.from('orders').update({
+    const claimed = await ordersRepo.claimShiprocketIds(order.id, {
       shiprocket_order_id: String((srResponse as any).order_id),
       shipment_id: String((srResponse as any).shipment_id || ''),
       pickup_location: pickupLocation,
       tracking_status: 'NEW',
       last_tracking_update: new Date().toISOString(),
-    }).eq('id', order.id).is('shiprocket_order_id', null).select('id');
-    if (!claimed || claimed.length === 0) {
+    });
+    if (!claimed) {
       console.log(`[Shiprocket] order ${order.order_number} was already claimed by a concurrent push; keeping existing IDs.`);
-      return { skipped: true, shiprocket_order_id: (await supabase.from('orders').select('shiprocket_order_id').eq('id', order.id).maybeSingle()).data?.shiprocket_order_id };
+      return { skipped: true, shiprocket_order_id: (await ordersRepo.getShiprocketIds(order.id))?.shiprocket_order_id };
     }
     await markPushSucceeded(order.id);
     return srResponse;
@@ -898,24 +761,18 @@ async function executeShiprocketPush(order: any) {
 }
 
 export async function retryFailedShiprocketPushes(limit = 20) {
-  const { data: pending } = await supabase
-    .from('orders')
-    .select('id, order_number, status, payment_status, payment_method, created_at')
-    .is('shiprocket_order_id', null)
-    .in('status', ['processing', 'confirmed', 'pending'])
-    .order('created_at', { ascending: true })
-    .limit(limit);
+  const pending = await ordersRepo.retryPushCandidates(limit);
   // Only push orders eligible for fulfilment: paid orders (any method) plus
   // COD orders (paid on delivery). Unpaid `pending` / `pending_payment`
   // checkouts are skipped so retries never ship orders prematurely.
-  const eligible = (pending || []).filter((o: any) => {
+  const eligible = pending.filter((o: any) => {
     const method = String(o.payment_method || '').toUpperCase();
     const isCOD = method.includes('COD') || method.includes('CASH');
     if (isCOD) return o.status !== 'pending_payment';
     return o.payment_status === 'paid';
   });
   const results: Array<{ orderId: string; ok: boolean; error?: string }> = [];
-  for (const o of eligible || []) {
+  for (const o of eligible) {
     try {
       await pushOrderToShiprocket(o.id);
       results.push({ orderId: o.id, ok: true });
@@ -929,41 +786,31 @@ export async function retryFailedShiprocketPushes(limit = 20) {
 
 export async function handleTransactionCancellation(orderId: string, orderStatus: string) {
   try {
-    const { data: tx } = await supabase
-      .from('transactions')
-      .select('*')
-      .eq('order_id', orderId)
-      .maybeSingle();
+    const tx = await transactionsRepo.findByOrderId(orderId);
 
     if (tx) {
       if (tx.status === 'success') {
         // Successfully paid/captured -> transition to refunded (refund_pending)
-        await supabase
-          .from('transactions')
-          .update({
-            status: 'refunded',
-            metadata: {
-              ...tx.metadata,
-              detailed_status: 'refund_pending',
-              cancelled_at: new Date().toISOString(),
-              cancellation_reason: orderStatus
-            }
-          })
-          .eq('id', tx.id);
+        await transactionsRepo.updateTransaction(tx.id, {
+          status: 'refunded',
+          metadata: {
+            ...tx.metadata,
+            detailed_status: 'refund_pending',
+            cancelled_at: new Date().toISOString(),
+            cancellation_reason: orderStatus
+          }
+        });
       } else {
         // Pending or failed -> transition to failed (cancelled)
-        await supabase
-          .from('transactions')
-          .update({
-            status: 'failed',
-            metadata: {
-              ...tx.metadata,
-              detailed_status: 'cancelled',
-              cancelled_at: new Date().toISOString(),
-              cancellation_reason: orderStatus
-            }
-          })
-          .eq('id', tx.id);
+        await transactionsRepo.updateTransaction(tx.id, {
+          status: 'failed',
+          metadata: {
+            ...tx.metadata,
+            detailed_status: 'cancelled',
+            cancelled_at: new Date().toISOString(),
+            cancellation_reason: orderStatus
+          }
+        });
       }
     }
   } catch (err) {

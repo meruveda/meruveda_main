@@ -18,7 +18,7 @@ async function backfillSkus() {
       if (!item.sku || /^\d+$/.test(item.sku) || item.sku === '') {
         const fallbackSku = `SKU-${item.product_id.substring(0, 8).toUpperCase()}`;
         console.log(`Updating order item ${item.id} SKU from '${item.sku}' to '${fallbackSku}'`);
-        
+
         const { error: updateError } = await supabase
           .from('order_items')
           .update({ sku: fallbackSku })

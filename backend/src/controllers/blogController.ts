@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { supabase } from '../database/supabase';
+import * as blogsRepo from '../database/repos/blogs';
 import { slugify } from '@meruveda/shared';
 import { storageService } from '../services/storageService';
 import { hasColumn } from '../services/schemaGuard';
@@ -67,12 +67,7 @@ const mapBlogResponse = (item: any) => {
 export const getBlogs = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { status } = req.query;
-    let query = supabase.from('blogs').select('*, users(first_name, last_name)', { count: 'exact' }).order('created_at', { ascending: false });
-
-    if (status) query = query.eq('status', status);
-
-    const { data, count, error } = await query;
-    if (error) throw error;
+    const { rows: data, count } = await blogsRepo.listBlogs(status as string | undefined);
     res.json({ data: data.map(mapBlogResponse), total: count });
   } catch (error) {
     next(error);
@@ -85,15 +80,8 @@ export const getBlogBySlug = async (req: Request, res: Response, next: NextFunct
     const slugStr = typeof slug === 'string' ? slug : (Array.isArray(slug) ? slug[0] : '');
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(slugStr);
 
-    let query = supabase.from('blogs').select('*, users(first_name, last_name)');
-    if (isUuid) {
-      query = query.or(`id.eq.${slugStr},slug.eq.${slugStr}`);
-    } else {
-      query = query.eq('slug', slugStr);
-    }
-
-    const { data, error } = await query.single();
-    if (error || !data) return res.status(404).json({ error: { message: 'Blog not found' } });
+    const data = await blogsRepo.findBlog(slugStr, isUuid);
+    if (!data) return res.status(404).json({ error: { message: 'Blog not found' } });
     res.json({ data: mapBlogResponse(data) });
   } catch (error) {
     next(error);
@@ -112,8 +100,7 @@ export const createBlog = async (req: Request, res: Response, next: NextFunction
 
     const blogData = await buildBlogData(rawBody);
 
-    const { data, error } = await supabase.from('blogs').insert(blogData).select().single();
-    if (error) throw error;
+    const data = await blogsRepo.insertBlog(blogData);
     res.status(201).json({ data: mapBlogResponse(data) });
   } catch (error) {
     next(error);
@@ -133,7 +120,7 @@ export const updateBlog = async (req: Request, res: Response, next: NextFunction
     // Handle image cleanup
     if (updates.featuredImage !== undefined) {
       try {
-        const { data: existingBlog } = await supabase.from('blogs').select('featured_image').eq('id', id).single();
+        const existingBlog = await blogsRepo.getFeaturedImage(id as string);
         if (existingBlog && existingBlog.featured_image && existingBlog.featured_image !== updates.featuredImage) {
           storageService.deleteImagesByUrls([existingBlog.featured_image as string]).catch((err: any) => {
             console.error('Failed to cleanup old blog image:', err);
@@ -146,8 +133,8 @@ export const updateBlog = async (req: Request, res: Response, next: NextFunction
 
     const blogData = await buildBlogData(updates);
 
-    const { data, error } = await supabase.from('blogs').update(blogData).eq('id', id).select().single();
-    if (error) throw error;
+    const data = await blogsRepo.updateBlog(id as string, blogData);
+    if (!data) throw new Error('Blog not found');
     res.json({ data: mapBlogResponse(data) });
   } catch (error) {
     next(error);
@@ -160,7 +147,7 @@ export const deleteBlog = async (req: Request, res: Response, next: NextFunction
 
     // Handle image cleanup
     try {
-      const { data: existingBlog } = await supabase.from('blogs').select('featured_image').eq('id', id).single();
+      const existingBlog = await blogsRepo.getFeaturedImage(id as string);
       if (existingBlog && existingBlog.featured_image) {
         storageService.deleteImagesByUrls([existingBlog.featured_image as string]).catch((err: any) => {
           console.error('Failed to cleanup blog image on delete:', err);
@@ -170,8 +157,7 @@ export const deleteBlog = async (req: Request, res: Response, next: NextFunction
       console.error('Error fetching blog for image cleanup before delete:', e);
     }
 
-    const { error } = await supabase.from('blogs').delete().eq('id', id);
-    if (error) throw error;
+    await blogsRepo.deleteBlog(id as string);
     res.status(204).send();
   } catch (error) {
     next(error);

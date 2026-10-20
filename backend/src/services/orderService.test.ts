@@ -1,12 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { supabase } from '../database/supabase';
+import * as ordersRepo from '../database/repos/orders';
+import * as productsRepo from '../database/repos/products';
+import * as transactionsRepo from '../database/repos/transactions';
+import { addressService } from './addressService';
 import { config } from '../config/env';
 import { orderService } from './orderService';
 import { generateToken } from '../utils/jwt';
 
 /**
- * COD order creation, with the Supabase client faked.
+ * COD order creation, with the repository layer faked.
  *
  * What is worth pinning down here is the money: the client sends prices and a
  * total, and the service recomputes everything server-side. If that ever
@@ -14,8 +17,7 @@ import { generateToken } from '../utils/jwt';
  */
 
 // ---------------------------------------------------------------------------
-// Minimal fluent Supabase fake: every builder method returns the same object,
-// and the terminal methods resolve with whatever the test queued.
+// Minimal repository fake: record the write each service method performs.
 // ---------------------------------------------------------------------------
 type Row = Record<string, any>;
 
@@ -28,45 +30,27 @@ function installSupabaseFake(
 ) {
   const inserted: { table: string; rows: Row[] }[] = [];
   const updated: { table: string; rows: Row[] }[] = [];
+  let stock = opts.stock ?? 10;
 
-  const makeBuilder = (table: string) => {
-    let payload: Row[] = [];
-    const b: any = {
-      select: () => b,
-      in: () => b,
-      eq: () => b,
-      order: () => b,
-      limit: () => b,
-      range: () => b,
-      insert: (rows: any) => {
-        payload = Array.isArray(rows) ? rows : [rows];
-        inserted.push({ table, rows: payload });
-        return b;
-      },
-      update: (rows: any) => {
-        payload = Array.isArray(rows) ? rows : [rows];
-        updated.push({ table, rows: payload });
-        return b;
-      },
-      single: async () => {
-        if (table === 'orders') {
-          return { data: { id: 'order-1', user_id: 'user-1', ...payload[0] }, error: null };
-        }
-        if (table === 'products') {
-          return { data: { id: 'p1', stock: opts.stock ?? 10 }, error: null };
-        }
-        return { data: payload[0] ?? null, error: null };
-      },
-      maybeSingle: async () => ({ data: payload[0] ?? null, error: null }),
-      then: (resolve: any, reject: any) =>
-        Promise.resolve(
-          table === 'products' ? { data: opts.products ?? [], error: null } : { data: [], error: null }
-        ).then(resolve, reject),
-    };
-    return b;
-  };
+  t.mock.method(productsRepo, 'getProductsByIds', async () => opts.products ?? []);
+  t.mock.method(productsRepo, 'decrementStock', async (_productId: string, quantity: number) => {
+    stock = Math.max(0, stock - quantity);
+    updated.push({ table: 'products', rows: [{ stock }] });
+  });
+  t.mock.method(ordersRepo, 'insertOrder', async (data: Row) => {
+    const row = { id: 'order-1', user_id: 'user-1', ...data };
+    inserted.push({ table: 'orders', rows: [row] });
+    return row;
+  });
+  t.mock.method(ordersRepo, 'insertOrderItems', async (rows: Row[]) => {
+    inserted.push({ table: 'order_items', rows });
+  });
+  t.mock.method(transactionsRepo, 'insertTransaction', async (row: Row) => {
+    inserted.push({ table: 'transactions', rows: [row] });
+    return row;
+  });
+  t.mock.method(addressService, 'captureFromOrder', async () => {});
 
-  t.mock.method(supabase, 'from', ((table: string) => makeBuilder(table)) as any);
   return { inserted, updated };
 }
 

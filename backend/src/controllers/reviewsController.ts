@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { supabase } from '../database/supabase';
+import * as reviewsRepo from '../database/repos/reviews';
 import { hasColumn } from '../services/schemaGuard';
 import { verifyToken } from '../utils/jwt';
 
@@ -27,23 +27,20 @@ export const getReviews = async (req: Request, res: Response, next: NextFunction
   try {
     const { productId, status } = req.query;
 
-    let query = supabase.from('reviews').select('*, users(first_name, last_name), products(id, name)', { count: 'exact' });
-
-    if (productId) query = query.eq('product_id', productId);
     // The public list must never leak the moderation queue: only admins may
     // request non-approved statuses. Shoppers always see approved reviews.
+    let statusFilter: string | undefined;
     if (status) {
-      if (String(status) === 'approved' || bearerIsAdmin(req)) {
-        query = query.eq('status', String(status));
-      } else {
-        query = query.eq('status', 'approved');
-      }
+      statusFilter =
+        String(status) === 'approved' || bearerIsAdmin(req) ? String(status) : 'approved';
     } else if (!bearerIsAdmin(req)) {
-      query = query.eq('status', 'approved');
+      statusFilter = 'approved';
     }
 
-    const { data, count, error } = await query;
-    if (error) throw error;
+    const { rows: data, count } = await reviewsRepo.listReviews({
+      productId: productId ? String(productId) : undefined,
+      status: statusFilter,
+    });
     res.json({ data, total: count });
   } catch (error) {
     next(error);
@@ -57,13 +54,8 @@ export const getMyReviews = async (req: Request, res: Response, next: NextFuncti
     if (!userId) {
       return res.status(401).json({ error: { message: 'Unauthorized' } });
     }
-    const { data, error } = await supabase
-      .from('reviews')
-      .select('*, products(id, name)')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false });
-    if (error) throw error;
-    res.json({ data: data || [] });
+    const data = await reviewsRepo.listForUser(userId);
+    res.json({ data });
   } catch (error) {
     next(error);
   }
@@ -90,8 +82,7 @@ export const createReview = async (req: Request, res: Response, next: NextFuncti
     // mass-assigned; new reviews always enter the moderation queue.
     const reviewData = { product_id, rating: ratingNum, comment: comment ?? null, user_id: userId, status: 'pending' };
 
-    const { data, error } = await supabase.from('reviews').insert(reviewData).select().single();
-    if (error) throw error;
+    const data = await reviewsRepo.insertReview(reviewData);
     res.status(201).json({ data });
   } catch (error) {
     next(error);
@@ -107,8 +98,7 @@ export const updateReviewStatus = async (req: Request, res: Response, next: Next
       return res.status(400).json({ error: { message: 'Invalid status. Use pending, approved or rejected.' } });
     }
 
-    const { data, error } = await supabase.from('reviews').update({ status }).eq('id', id).select().single();
-    if (error) throw error;
+    const data = await reviewsRepo.updateReview(id as string, { status });
     if (!data) return res.status(404).json({ error: { message: 'Review not found' } });
     res.json({ data });
   } catch (error) {
@@ -121,19 +111,13 @@ export const deleteReview = async (req: Request, res: Response, next: NextFuncti
     const { id } = req.params;
     // Owner-or-admin: shoppers may delete their own reviews; admins may delete any.
     if (req.user?.role !== 'admin') {
-      const { data: existing, error: fetchErr } = await supabase
-        .from('reviews')
-        .select('id, user_id')
-        .eq('id', id)
-        .maybeSingle();
-      if (fetchErr) throw fetchErr;
+      const existing = await reviewsRepo.findOwnership(id as string);
       if (!existing) return res.status(404).json({ error: { message: 'Review not found' } });
       if (existing.user_id !== req.user?.id) {
         return res.status(403).json({ error: { message: 'Forbidden - You can only delete your own reviews' } });
       }
     }
-    const { error } = await supabase.from('reviews').delete().eq('id', id);
-    if (error) throw error;
+    await reviewsRepo.deleteReview(id as string);
     res.status(204).send();
   } catch (error) {
     next(error);
@@ -148,13 +132,8 @@ export const featureReview = async (req: Request, res: Response, next: NextFunct
       return res.status(503).json({ error: { message: MIGRATION_HINT } });
     }
 
-    const { data, error } = await supabase
-      .from('reviews')
-      .update({ is_featured: featured })
-      .eq('id', id)
-      .select()
-      .single();
-    if (error) throw error;
+    const data = await reviewsRepo.updateReview(id as string, { is_featured: featured });
+    if (!data) throw new Error('Review not found');
     res.json({ data });
   } catch (error) {
     next(error);
@@ -167,18 +146,8 @@ export const getFeaturedReviews = async (req: Request, res: Response, next: Next
     // newest approved reviews so the homepage testimonials are never empty.
     const featuredAvailable = await hasColumn('reviews', 'is_featured');
 
-    let query = supabase
-      .from('reviews')
-      .select('*, users(first_name, last_name), products(id, name)')
-      .eq('status', 'approved');
-    if (featuredAvailable) query = query.eq('is_featured', true);
-
-    const { data, error } = await query
-      .order('created_at', { ascending: false })
-      .limit(6);
-
-    if (error) throw error;
-    res.json({ data: data || [] });
+    const data = await reviewsRepo.listFeatured(featuredAvailable);
+    res.json({ data });
   } catch (error) {
     next(error);
   }
@@ -221,12 +190,7 @@ export const updateReview = async (req: Request, res: Response, next: NextFuncti
 
     // Owner-or-admin: shoppers may edit rating/comment of their own reviews.
     if (req.user?.role !== 'admin') {
-      const { data: existing, error: fetchErr } = await supabase
-        .from('reviews')
-        .select('id, user_id')
-        .eq('id', id)
-        .maybeSingle();
-      if (fetchErr) throw fetchErr;
+      const existing = await reviewsRepo.findOwnership(id as string);
       if (!existing) return res.status(404).json({ error: { message: 'Review not found' } });
       if (existing.user_id !== req.user?.id) {
         return res.status(403).json({ error: { message: 'Forbidden - You can only edit your own reviews' } });
@@ -237,8 +201,8 @@ export const updateReview = async (req: Request, res: Response, next: NextFuncti
       return res.status(503).json({ error: { message: MIGRATION_HINT } });
     }
 
-    const { data, error } = await supabase.from('reviews').update(updateData).eq('id', id).select().single();
-    if (error) throw error;
+    const data = await reviewsRepo.updateReview(id as string, updateData);
+    if (!data) throw new Error('Review not found');
     res.json({ data });
   } catch (error) {
     next(error);

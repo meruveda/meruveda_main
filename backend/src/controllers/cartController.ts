@@ -1,15 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
-import { supabase } from '../database/supabase';
+import * as cartRepo from '../database/repos/cart';
 
 export const getCart = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const userId = req.user?.id;
-    const { data, error } = await supabase
-      .from('cart_items')
-      .select('*, products(*)')
-      .eq('user_id', userId);
-
-    if (error) throw error;
+    const data = await cartRepo.listForUser(req.user?.id as string);
     res.json({ data });
   } catch (error) {
     next(error);
@@ -18,37 +12,19 @@ export const getCart = async (req: Request, res: Response, next: NextFunction) =
 
 export const addToCart = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const userId = req.user?.id;
+    const userId = req.user?.id as string;
     const { product_id, quantity } = req.body;
 
-    // Check if item exists
-    const { data: existing } = await supabase
-      .from('cart_items')
-      .select('id, quantity')
-      .eq('user_id', userId)
-      .eq('product_id', product_id)
-      .single();
+    const existing = await cartRepo.findItem(userId, product_id);
 
     let result;
     if (existing) {
       // Update quantity
-      const { data, error } = await supabase
-        .from('cart_items')
-        .update({ quantity: existing.quantity + quantity })
-        .eq('id', existing.id)
-        .select()
-        .single();
-      if (error) throw error;
-      result = data;
+      result = await cartRepo.updateQuantity(existing.id, existing.quantity + quantity);
+      if (!result) throw new Error('Cart item not found');
     } else {
       // Insert new
-      const { data, error } = await supabase
-        .from('cart_items')
-        .insert({ user_id: userId, product_id, quantity })
-        .select()
-        .single();
-      if (error) throw error;
-      result = data;
+      result = await cartRepo.insertItem({ user_id: userId, product_id, quantity });
     }
 
     res.json({ data: result });
@@ -61,17 +37,9 @@ export const updateCartItem = async (req: Request, res: Response, next: NextFunc
   try {
     const { id } = req.params;
     const { quantity } = req.body;
-    const userId = req.user?.id;
 
-    const { data, error } = await supabase
-      .from('cart_items')
-      .update({ quantity })
-      .eq('id', id)
-      .eq('user_id', userId)
-      .select()
-      .single();
-
-    if (error) throw error;
+    const data = await cartRepo.updateForUser(req.user?.id as string, id as string, { quantity });
+    if (!data) throw new Error('Cart item not found');
     res.json({ data });
   } catch (error) {
     next(error);
@@ -81,15 +49,7 @@ export const updateCartItem = async (req: Request, res: Response, next: NextFunc
 export const removeFromCart = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
-    const userId = req.user?.id;
-
-    const { error } = await supabase
-      .from('cart_items')
-      .delete()
-      .eq('id', id)
-      .eq('user_id', userId);
-
-    if (error) throw error;
+    await cartRepo.removeForUser(req.user?.id as string, id as string);
     res.status(204).send();
   } catch (error) {
     next(error);
@@ -98,13 +58,7 @@ export const removeFromCart = async (req: Request, res: Response, next: NextFunc
 
 export const clearCart = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const userId = req.user?.id;
-    const { error } = await supabase
-      .from('cart_items')
-      .delete()
-      .eq('user_id', userId);
-
-    if (error) throw error;
+    await cartRepo.clearForUser(req.user?.id as string);
     res.status(204).send();
   } catch (error) {
     next(error);

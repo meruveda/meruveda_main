@@ -22,7 +22,7 @@ import {
   round2,
   splitGst,
 } from '@meruveda/shared';
-import { supabase } from '../database/supabase';
+import * as ordersRepo from '../database/repos/orders';
 import { config, storefrontUrl } from '../config/env';
 import {
   INVOICE_FONT_FILES,
@@ -272,17 +272,20 @@ function italic(
  * automatic trigger failing for all of them. Only snake_case columns belong here.
  */
 export async function getOrderForInvoice(orderId: string) {
-  const { data, error } = await supabase
-    .from('orders')
-    .select('*, order_items(*, products(id, name, sku, seo_metadata)), users(email, first_name, last_name, phone)')
-    .eq('id', orderId)
-    .single();
-
-  if (error || !data) {
+  let data: any;
+  try {
+    data = await ordersRepo.getOrderForInvoice(orderId);
+  } catch (error: any) {
     const err = new Error(
-      error ? `Could not load order for invoicing: ${error.code || ''} ${error.message}`.trim() : 'Order not found'
+      `Could not load order for invoicing: ${error?.code || ''} ${error?.message || error}`.trim()
     );
-    (err as any).status = error ? 500 : 404;
+    (err as any).status = 500;
+    throw err;
+  }
+
+  if (!data) {
+    const err = new Error('Order not found');
+    (err as any).status = 404;
     throw err;
   }
   return data;
@@ -980,7 +983,7 @@ export async function claimInvoiceNumber(order: {
 
   let invoiceNumber: string;
   try {
-    invoiceNumber = await allocateInvoiceNumber(issuedAt);
+    invoiceNumber = await allocateInvoiceNumber(orderId, issuedAt);
   } catch (err: any) {
     // Never leave an order without an invoice: fall back to the order number.
     invoiceNumber = String(order.order_number || '') || buildInvoiceNumber(String(order.order_number || ''));

@@ -10,7 +10,6 @@
  */
 import { writeFileSync, mkdirSync } from 'fs';
 import path from 'path';
-import { supabase } from '../database/supabase';
 import { generateInvoicePdf, getOrderForInvoice } from '../services/invoiceService';
 import { grossToTaxable, grossToGst, round2, isIntraState } from '@meruveda/shared';
 

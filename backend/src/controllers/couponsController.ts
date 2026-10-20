@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { supabase } from '../database/supabase';
+import * as couponsRepo from '../database/repos/coupons';
 
 const mapCouponToCamelCase = (dbCoupon: any) => {
   const {
@@ -27,8 +27,7 @@ const mapCouponToCamelCase = (dbCoupon: any) => {
 
 export const getCoupons = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { data, error } = await supabase.from('coupons').select('*');
-    if (error) throw error;
+    const data = await couponsRepo.listCoupons();
     res.json({ data: data.map(mapCouponToCamelCase) });
   } catch (error) {
     next(error);
@@ -38,9 +37,9 @@ export const getCoupons = async (req: Request, res: Response, next: NextFunction
 export const validateCoupon = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { code, orderValue } = req.body;
-    const { data, error } = await supabase.from('coupons').select('*').eq('code', code.toUpperCase()).single();
-    
-    if (error || !data) return res.status(404).json({ error: { message: 'Invalid coupon code' } });
+    const data = await couponsRepo.findByCode(code.toUpperCase());
+
+    if (!data) return res.status(404).json({ error: { message: 'Invalid coupon code' } });
     if (!data.active) return res.status(400).json({ error: { message: 'Coupon is inactive' } });
     if (data.expires_at && new Date(data.expires_at) < new Date()) return res.status(400).json({ error: { message: 'Coupon expired' } });
     if (data.min_purchase > orderValue) return res.status(400).json({ error: { message: `Minimum order value must be ${data.min_purchase}` } });
@@ -86,8 +85,7 @@ export const createCoupon = async (req: Request, res: Response, next: NextFuncti
       delete couponData.usedCount;
     }
     
-    const { data, error } = await supabase.from('coupons').insert(couponData).select().single();
-    if (error) throw error;
+    const data = await couponsRepo.insertCoupon(couponData);
     res.status(201).json({ data: mapCouponToCamelCase(data) });
   } catch (error) {
     next(error);
@@ -129,8 +127,8 @@ export const updateCoupon = async (req: Request, res: Response, next: NextFuncti
       delete updates.usedCount;
     }
 
-    const { data, error } = await supabase.from('coupons').update(updates).eq('id', id).select().single();
-    if (error) throw error;
+    const data = await couponsRepo.updateCoupon(id as string, updates);
+    if (!data) throw new Error('Coupon not found');
     res.json({ data: mapCouponToCamelCase(data) });
   } catch (error) {
     next(error);
@@ -140,8 +138,7 @@ export const updateCoupon = async (req: Request, res: Response, next: NextFuncti
 export const deleteCoupon = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
-    const { error } = await supabase.from('coupons').delete().eq('id', id);
-    if (error) throw error;
+    await couponsRepo.deleteCoupon(id as string);
     res.status(204).send();
   } catch (error) {
     next(error);

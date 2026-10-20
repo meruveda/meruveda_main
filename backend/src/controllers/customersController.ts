@@ -1,5 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
-import { supabase } from '../database/supabase';
+import * as usersRepo from '../database/repos/users';
+import * as ordersRepo from '../database/repos/orders';
+import * as activityRepo from '../database/repos/activityLogs';
+import * as cartRepo from '../database/repos/cart';
 import { config } from '../config/env';
 import { hasColumn } from '../services/schemaGuard';
 import { sendEmail, getPasswordResetTemplate } from '../services/emailService';
@@ -15,59 +18,36 @@ export const getCustomers = async (req: Request, res: Response, next: NextFuncti
   try {
     const { page = 1, limit = 10, search, role } = req.query;
 
-    let query = supabase.from('users').select('*', { count: 'exact' });
-
     // If role is specified and not 'all', filter by it. If not specified, default to 'customer' to keep customers page safe
-    if (role && role !== 'all') {
-      query = query.eq('role', role);
-    } else if (!role) {
-      query = query.eq('role', 'customer');
-    }
+    const roleFilter =
+      role && role !== 'all' ? String(role) : !role ? 'customer' : undefined;
 
-    if (search) {
-      const safe = String(search).replace(/[%(),"]/g, '').trim().slice(0, 80);
-      if (safe) {
-        query = query.or(`first_name.ilike.%${safe}%,last_name.ilike.%${safe}%,email.ilike.%${safe}%,phone.ilike.%${safe}%`);
-      }
-    }
+    const safe = search
+      ? String(search).replace(/[%(),"]/g, '').trim().slice(0, 80)
+      : '';
 
     const pageNum = Math.max(1, Number(page) || 1);
     const limitNum = Math.min(200, Math.max(1, Number(limit) || 10));
-    const from = (pageNum - 1) * limitNum;
-    const to = from + limitNum - 1;
 
-    query = query.range(from, to).order('created_at', { ascending: false });
+    const { rows: data, count } = await usersRepo.listUsers({
+      role: roleFilter,
+      search: safe || undefined,
+      limit: limitNum,
+      offset: (pageNum - 1) * limitNum,
+    });
 
-    const { data, count, error } = await query;
-
-    if (error) throw error;
-
-    const userIds = data ? data.map((u: any) => u.id) : [];
+    const userIds = data.map((u: any) => u.id);
 
     // Fetch order metrics for returned users
-    let orders: any[] = [];
-    if (userIds.length > 0) {
-      const { data: ordersData } = await supabase
-        .from('orders')
-        .select('user_id, total, created_at, shipping_address')
-        .in('user_id', userIds);
-      orders = ordersData || [];
-    }
+    const orders = await ordersRepo.listByUserIds(userIds);
 
     // Fetch latest activity log timestamps for returned users
-    let logs: any[] = [];
-    if (userIds.length > 0) {
-      const { data: logsData } = await supabase
-        .from('activity_logs')
-        .select('user_id, created_at')
-        .in('user_id', userIds);
-      logs = logsData || [];
-    }
+    const logs = await activityRepo.timestampsForUsers(userIds);
 
     // Remove password hashes and map calculated metrics
-    const sanitizedData = (data || []).map((user: any) => {
+    const sanitizedData = data.map((user: any) => {
       const { password_hash, ...rest } = user;
-      
+
       const userOrders = orders.filter((o: any) => o.user_id === user.id);
       const totalOrders = userOrders.length;
       const lifetimeSpend = userOrders.reduce((sum: number, o: any) => sum + Number(o.total || 0), 0);
@@ -93,7 +73,7 @@ export const getCustomers = async (req: Request, res: Response, next: NextFuncti
       const logDates = logs.filter((l: any) => l.user_id === user.id).map((l: any) => toTime(l.created_at)).filter(Boolean);
       const lastLoginTime = toTime(user.last_login_at ?? user.last_login);
       const createdAtTime = toTime(user.created_at);
-      
+
       const maxTime = Math.max(0, createdAtTime, lastLoginTime, ...orderDates, ...logDates);
       const lastLogin = maxTime > 0 ? new Date(maxTime).toISOString() : null;
 
@@ -122,16 +102,16 @@ export const getCustomers = async (req: Request, res: Response, next: NextFuncti
 export const getCustomerById = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
-    const { data, error } = await supabase
-      .from('users')
-      .select('id, email, first_name, last_name, phone, role, active, created_at, orders(*)')
-      .eq('id', id)
-      .single();
+    const data = await usersRepo.findById(
+      id as string,
+      'id, email, first_name, last_name, phone, role, active, created_at',
+    );
 
-    if (error || !data) {
+    if (!data) {
       return res.status(404).json({ error: { message: 'User not found' } });
     }
 
+    data.orders = await ordersRepo.listAllForUser(id as string);
     res.json({ data });
   } catch (error) {
     next(error);
@@ -143,15 +123,13 @@ export const updateCustomerStatus = async (req: Request, res: Response, next: Ne
     const { id } = req.params;
     const { active } = req.body;
 
-    const { data, error } = await supabase
-      .from('users')
-      .update({ active })
-      .eq('id', id)
-      .select('id, email, first_name, last_name, role, active')
-      .single();
+    const data = await usersRepo.updateUserReturning(
+      id as string,
+      { active },
+      'id, email, first_name, last_name, role, active',
+    );
 
-    if (error) throw error;
-
+    if (!data) throw new Error('User not found');
     res.json({ data });
   } catch (error) {
     next(error);
@@ -172,15 +150,13 @@ export const updateCustomer = async (req: Request, res: Response, next: NextFunc
     if (role !== undefined) updates.role = role;
     if (active !== undefined) updates.active = active;
 
-    const { data, error } = await supabase
-      .from('users')
-      .update(updates)
-      .eq('id', id)
-      .select('id, email, first_name, last_name, role, active, phone')
-      .single();
+    const data = await usersRepo.updateUserReturning(
+      id as string,
+      updates,
+      'id, email, first_name, last_name, role, active, phone',
+    );
 
-    if (error) throw error;
-
+    if (!data) throw new Error('User not found');
     res.json({ data });
   } catch (error) {
     next(error);
@@ -190,14 +166,7 @@ export const updateCustomer = async (req: Request, res: Response, next: NextFunc
 export const deleteCustomer = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
-
-    const { error } = await supabase
-      .from('users')
-      .delete()
-      .eq('id', id);
-
-    if (error) throw error;
-
+    await usersRepo.deleteUser(id as string);
     res.json({ success: true, message: 'User deleted successfully' });
   } catch (error) {
     next(error);
@@ -232,13 +201,7 @@ export const resetUserPassword = async (req: Request, res: Response, next: NextF
       return res.json(generic);
     }
 
-    const { data: user, error: userError } = await supabase
-      .from('users')
-      .select('id, email, first_name')
-      .eq('id', id)
-      .maybeSingle();
-
-    if (userError) throw userError;
+    const user = await usersRepo.findById(id as string, 'id, email, first_name');
 
     if (!user) {
       console.warn(`[resetUserPassword] no user with id ${id} — generic reply sent.`);
@@ -246,16 +209,11 @@ export const resetUserPassword = async (req: Request, res: Response, next: NextF
     }
 
     const token = generateResetToken();
-    const { error: updateError } = await supabase
-      .from('users')
-      .update({
-        reset_password_token: hashResetToken(token),
-        reset_password_expires: new Date(Date.now() + RESET_TOKEN_TTL_MS).toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', user.id);
-
-    if (updateError) throw updateError;
+    await usersRepo.updateUser(user.id, {
+      reset_password_token: hashResetToken(token),
+      reset_password_expires: new Date(Date.now() + RESET_TOKEN_TTL_MS).toISOString(),
+      updated_at: new Date().toISOString(),
+    });
 
     // Phone-only / placeholder-inbox accounts have nowhere to receive the link.
     // Support still helps them out of band; the reply does not change.
@@ -284,42 +242,37 @@ export const resetUserPassword = async (req: Request, res: Response, next: NextF
 export const getCustomerAddresses = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
-    
-    // We don't have a dedicated addresses table yet, so let's extract them from user's orders
-    const { data, error } = await supabase
-      .from('orders')
-      .select('shipping_address')
-      .eq('user_id', id)
-      .order('created_at', { ascending: false });
 
-    if (error) {
+    // We don't have a dedicated addresses table yet, so let's extract them from user's orders
+    let data: any[] = [];
+    try {
+      data = await ordersRepo.listShippingAddresses(id as string);
+    } catch {
       return res.json({ data: [] });
     }
 
     const addresses = [];
     const seen = new Set();
-    
-    if (data) {
-      for (const row of data) {
-        if (row.shipping_address) {
-          const addr = row.shipping_address;
-          // Create a unique key for deduplication
-          const key = `${addr.addressLine1}-${addr.city}-${addr.pincode}`;
-          if (!seen.has(key)) {
-            seen.add(key);
-            addresses.push({
-              id: key, // Mock ID
-              fullName: addr.fullName || '',
-              addressLine1: addr.addressLine1 || '',
-              addressLine2: addr.addressLine2 || '',
-              city: addr.city || '',
-              state: addr.state || '',
-              pincode: addr.pincode || '',
-              country: addr.country || 'India',
-              phone: addr.phone || '',
-              isDefault: addresses.length === 0, // First one is default
-            });
-          }
+
+    for (const row of data) {
+      if (row.shipping_address) {
+        const addr = row.shipping_address;
+        // Create a unique key for deduplication
+        const key = `${addr.addressLine1}-${addr.city}-${addr.pincode}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          addresses.push({
+            id: key, // Mock ID
+            fullName: addr.fullName || '',
+            addressLine1: addr.addressLine1 || '',
+            addressLine2: addr.addressLine2 || '',
+            city: addr.city || '',
+            state: addr.state || '',
+            pincode: addr.pincode || '',
+            country: addr.country || 'India',
+            phone: addr.phone || '',
+            isDefault: addresses.length === 0, // First one is default
+          });
         }
       }
     }
@@ -333,17 +286,15 @@ export const getCustomerAddresses = async (req: Request, res: Response, next: Ne
 export const getCustomerCart = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
-    
-    const { data, error } = await supabase
-      .from('cart_items')
-      .select('*, products(*)')
-      .eq('user_id', id);
 
-    if (error) {
+    let data: any[] = [];
+    try {
+      data = await cartRepo.listForUser(id as string);
+    } catch {
       return res.json({ data: [] });
     }
 
-    res.json({ data: data || [] });
+    res.json({ data });
   } catch (error) {
     next(error);
   }

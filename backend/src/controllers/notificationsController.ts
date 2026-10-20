@@ -1,16 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
-import { supabase } from '../database/supabase';
+import * as notificationsRepo from '../database/repos/notifications';
 
 export const getNotifications = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const userId = req.user?.id;
-    const { data, error } = await supabase
-      .from('notifications')
-      .select('*')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false });
-
-    if (error) throw error;
+    const data = await notificationsRepo.listForUser(req.user?.id as string);
     res.json({ data });
   } catch (error) {
     next(error);
@@ -20,17 +13,8 @@ export const getNotifications = async (req: Request, res: Response, next: NextFu
 export const markAsRead = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
-    const userId = req.user?.id;
-
-    const { data, error } = await supabase
-      .from('notifications')
-      .update({ is_read: true })
-      .eq('id', id)
-      .eq('user_id', userId)
-      .select()
-      .single();
-
-    if (error) throw error;
+    const data = await notificationsRepo.markRead(req.user?.id as string, id as string);
+    if (!data) throw new Error('Notification not found');
     res.json({ data });
   } catch (error) {
     next(error);
@@ -39,14 +23,7 @@ export const markAsRead = async (req: Request, res: Response, next: NextFunction
 
 export const markAllAsRead = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const userId = req.user?.id;
-
-    const { error } = await supabase
-      .from('notifications')
-      .update({ is_read: true })
-      .eq('user_id', userId);
-
-    if (error) throw error;
+    await notificationsRepo.markAllRead(req.user?.id as string);
     res.status(204).send();
   } catch (error) {
     next(error);
@@ -56,15 +33,7 @@ export const markAllAsRead = async (req: Request, res: Response, next: NextFunct
 export const deleteNotification = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
-    const userId = req.user?.id;
-
-    const { error } = await supabase
-      .from('notifications')
-      .delete()
-      .eq('id', id)
-      .eq('user_id', userId);
-
-    if (error) throw error;
+    await notificationsRepo.remove(req.user?.id as string, id as string);
     res.status(204).send();
   } catch (error) {
     next(error);

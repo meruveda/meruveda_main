@@ -1,4 +1,4 @@
-import { supabase } from '../database/supabase';
+import * as addressesRepo from '../database/repos/addresses';
 import { hasTable } from './schemaGuard';
 
 /**
@@ -109,14 +109,7 @@ function normalize(input: any): Omit<UserAddress, 'id' | 'user_id' | 'created_at
 
 async function listFor(userId: string): Promise<UserAddress[]> {
   await assertAvailable();
-  const { data, error } = await supabase
-    .from(TABLE)
-    .select('*')
-    .eq('user_id', userId)
-    .order('is_default', { ascending: false })
-    .order('created_at', { ascending: false });
-  if (error) throw error;
-  return (data || []) as UserAddress[];
+  return (await addressesRepo.listForUser(userId)) as UserAddress[];
 }
 
 /**
@@ -124,10 +117,11 @@ async function listFor(userId: string): Promise<UserAddress[]> {
  * Non-fatal: the subsequent write still lands with the correct flag.
  */
 async function clearDefaults(userId: string, exceptId?: string): Promise<void> {
-  let q = supabase.from(TABLE).update({ is_default: false }).eq('user_id', userId);
-  if (exceptId) q = q.neq('id', exceptId);
-  const { error } = await q;
-  if (error) console.error('[addresses] could not clear existing defaults:', error.message);
+  try {
+    await addressesRepo.clearDefaults(userId, exceptId);
+  } catch (error: any) {
+    console.error('[addresses] could not clear existing defaults:', error?.message || error);
+  }
 }
 
 export const addressService = {
@@ -157,12 +151,7 @@ export const addressService = {
     const isDefault = row.is_default || existing.length === 0;
     if (isDefault) await clearDefaults(userId);
 
-    const { data, error } = await supabase
-      .from(TABLE)
-      .insert({ ...row, is_default: isDefault, user_id: userId })
-      .select('*')
-      .single();
-    if (error) throw error;
+    const data = await addressesRepo.insertAddress({ ...row, is_default: isDefault, user_id: userId });
     return { address: data as UserAddress, created: true };
   },
 
@@ -174,26 +163,22 @@ export const addressService = {
     const row = normalize({ ...current, ...input });
     if (row.is_default) await clearDefaults(userId, id);
 
-    const { data, error } = await supabase
-      .from(TABLE)
-      .update({ ...row, updated_at: new Date().toISOString() })
-      .eq('id', id)
-      .eq('user_id', userId) // never update another user's row
-      .select('*')
-      .single();
-    if (error) throw error;
+    const data = await addressesRepo.updateAddress(userId, id, {
+      ...row,
+      updated_at: new Date().toISOString(),
+    });
+    if (!data) throw new Error('Address not found');
     return data as UserAddress;
   },
 
   async remove(userId: string, id: string): Promise<boolean> {
     await assertAvailable();
-    const { error } = await supabase.from(TABLE).delete().eq('id', id).eq('user_id', userId);
-    if (error) throw error;
+    await addressesRepo.deleteAddress(userId, id);
 
     // Never leave a customer with no default address.
     const rest = await listFor(userId);
     if (rest.length && !rest.some((a) => a.is_default)) {
-      await supabase.from(TABLE).update({ is_default: true }).eq('id', rest[0].id).eq('user_id', userId);
+      await addressesRepo.setDefault(userId, rest[0].id);
     }
     return true;
   },
@@ -203,14 +188,8 @@ export const addressService = {
     const current = await this.get(userId, id);
     if (!current) return null;
     await clearDefaults(userId);
-    const { data, error } = await supabase
-      .from(TABLE)
-      .update({ is_default: true })
-      .eq('id', id)
-      .eq('user_id', userId)
-      .select('*')
-      .single();
-    if (error) throw error;
+    const data = await addressesRepo.setDefault(userId, id);
+    if (!data) throw new Error('Address not found');
     return data as UserAddress;
   },
 

@@ -1,6 +1,8 @@
 import crypto from 'crypto';
 import bcrypt from 'bcrypt';
-import { supabase } from '../database/supabase';
+import { isUniqueViolation } from '../database/db';
+import * as otpsRepo from '../database/repos/otps';
+import * as usersRepo from '../database/repos/users';
 import { config } from '../config/env';
 import { hasColumn, hasTable } from './schemaGuard';
 import { normalizePhone, sendAuthenticationTemplate, sendOnce, logMessage, isWhatsappConfigured, WHATSAPP_TEMPLATES } from './whatsappService';
@@ -65,16 +67,10 @@ export const otpService = {
     // filtered on consumed_at: a code that was just verified must still hold
     // the cooldown, otherwise verifying and immediately re-sending is a free
     // extra send on every request.
-    const { data: recent } = await supabase
-      .from('otps')
-      .select('created_at')
-      .eq('phone', phone)
-      .eq('purpose', PURPOSE)
-      .order('created_at', { ascending: false })
-      .limit(1);
+    const recentCreatedAt = await otpsRepo.latestCreatedAt(phone, PURPOSE);
 
-    if (recent && recent.length > 0) {
-      const ageSeconds = (Date.now() - new Date(recent[0].created_at).getTime()) / 1000;
+    if (recentCreatedAt) {
+      const ageSeconds = (Date.now() - new Date(recentCreatedAt).getTime()) / 1000;
       if (ageSeconds < RESEND_COOLDOWN_SECONDS) {
         throw Object.assign(
           new Error(`Please wait ${Math.ceil(RESEND_COOLDOWN_SECONDS - ageSeconds)}s before requesting a new code.`),
@@ -88,17 +84,14 @@ export const otpService = {
     const code = String(crypto.randomInt(100000, 1000000));
     const expiresAt = new Date(Date.now() + OTP_TTL_MINUTES * 60 * 1000).toISOString();
 
-    const { data: inserted, error } = await supabase.from('otps').insert({
+    const inserted = await otpsRepo.insertOtp({
       phone,
       code_hash: hashOtpCode(code, phone),
       purpose: PURPOSE,
       attempts: 0,
       max_attempts: OTP_MAX_ATTEMPTS,
       expires_at: expiresAt,
-    })
-      .select('id')
-      .single();
-    if (error) throw error;
+    });
 
     // AUTHENTICATION-category template: the code is delivered as the body
     // parameter AND as the copy-code button parameter at index 0. Template
@@ -132,10 +125,7 @@ export const otpService = {
       // The stored row is rolled back too: the code never left the building, so
       // leaving it would make the resend cooldown block a retry that could
       // actually succeed.
-      await supabase.from('otps').delete().eq('id', inserted.id).then(
-        () => undefined,
-        () => undefined
-      );
+      await otpsRepo.deleteOtp(inserted.id).catch(() => undefined);
       console.error(
         '[OTP] WhatsApp delivery failed — the code was NOT sent. Check WHATSAPP_API_TOKEN, ' +
           'WHATSAPP_PHONE_NUMBER_ID and that the Meta template is approved. ' +
@@ -167,25 +157,13 @@ export const otpService = {
 
     await assertOtpStoreAvailable();
 
-    const { data: rows } = await supabase
-      .from('otps')
-      .select('*')
-      .eq('phone', phone)
-      .eq('purpose', PURPOSE)
-      .is('consumed_at', null)
-      .order('created_at', { ascending: false })
-      .limit(1);
-
-    const row = rows && rows[0];
+    const row = await otpsRepo.findActive(phone, PURPOSE);
     if (!row) return { ok: false, reason: 'not_found' };
     if (new Date(row.expires_at).getTime() < Date.now()) return { ok: false, reason: 'expired' };
     if (Number(row.attempts) >= Number(row.max_attempts)) return { ok: false, reason: 'too_many_attempts' };
 
     if (!verifyOtpCode(submitted, phone, row.code_hash)) {
-      await supabase
-        .from('otps')
-        .update({ attempts: Number(row.attempts) + 1 })
-        .eq('id', row.id);
+      await otpsRepo.incrementAttempts(row.id);
       const remaining = Number(row.max_attempts) - (Number(row.attempts) + 1);
       if (remaining <= 0) return { ok: false, reason: 'too_many_attempts' };
       return { ok: false, reason: 'invalid' };
@@ -195,14 +173,8 @@ export const otpService = {
     // returned rows are checked. Without the guard two concurrent verifies of
     // the same code both read an unconsumed row, both pass the hash check, and
     // both mint a JWT from one code. With it, exactly one update matches.
-    const { data: consumed, error } = await supabase
-      .from('otps')
-      .update({ consumed_at: new Date().toISOString() })
-      .eq('id', row.id)
-      .is('consumed_at', null)
-      .select('id');
-    if (error) throw error;
-    if (!consumed || consumed.length === 0) {
+    const consumed = await otpsRepo.consume(row.id);
+    if (!consumed) {
       // Lost the race: someone else consumed this exact row first.
       return { ok: false, reason: 'already_used' };
     }
@@ -223,15 +195,10 @@ export const otpService = {
     const variants = phoneVariants(phoneRaw);
     const lookup = variants.length > 0 ? variants : [phone];
 
-    const { data: existing } = await supabase
-      .from('users')
-      .select('*')
-      .in('phone', lookup)
-      .order('created_at', { ascending: false })
-      .limit(1);
+    const existing = await usersRepo.findByPhoneVariants(lookup, '*');
 
-    if (existing && existing.length > 0) {
-      const user = existing[0];
+    if (existing) {
+      const user = existing;
       const patch: any = { updated_at: new Date().toISOString() };
       // `users.last_login_at` arrives in delta 005 — never let a missing
       // timestamp column roll back the name/phone refresh below.
@@ -243,7 +210,7 @@ export const otpService = {
         patch.first_name = firstName || user.first_name;
         if (rest.length) patch.last_name = rest.join(' ');
       }
-      const { data: updated } = await supabase.from('users').update(patch).eq('id', user.id).select('*').single();
+      const updated = await usersRepo.updateUser(user.id, patch);
       return { user: updated || user, created: false };
     }
 
@@ -266,17 +233,14 @@ export const otpService = {
       insertData.last_login_at = new Date().toISOString();
     }
 
-    const { data: created, error } = await supabase
-      .from('users')
-      .insert(insertData)
-      .select('*')
-      .single();
-
-    if (error) {
+    let created: any;
+    try {
+      created = await usersRepo.insertUser(insertData, '*');
+    } catch (error: any) {
       // UNIQUE violation = a racing request created it first; re-read.
-      if (error.code === '23505') {
-        const { data: retry } = await supabase.from('users').select('*').in('phone', lookup).limit(1);
-        if (retry && retry[0]) return { user: retry[0], created: false };
+      if (isUniqueViolation(error)) {
+        const retry = await usersRepo.findByPhoneVariants(lookup, '*');
+        if (retry) return { user: retry, created: false };
       }
       throw error;
     }

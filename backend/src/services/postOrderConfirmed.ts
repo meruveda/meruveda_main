@@ -1,5 +1,5 @@
 import { config } from '../config/env';
-import { supabase } from '../database/supabase';
+import * as ordersRepo from '../database/repos/orders';
 import { hasColumn } from './schemaGuard';
 import { orderNotifyService } from './orderNotifyService';
 import { invoiceDispatchService } from './invoiceDispatchService';
@@ -81,15 +81,12 @@ async function saveInvoiceError(orderId: string, message: string): Promise<void>
 async function saveShiprocketError(orderId: string, message: string): Promise<void> {
   try {
     if (await hasColumn('orders', 'shiprocket_push_error')) {
-      await supabase
-        .from('orders')
-        .update({
-          shiprocket_push_error: message.slice(0, 500),
-          ...(await hasColumn('orders', 'shiprocket_push_status'))
-            ? { shiprocket_push_status: 'failed' }
-            : {},
-        })
-        .eq('id', orderId);
+      await ordersRepo.updateOrderById(orderId, {
+        shiprocket_push_error: message.slice(0, 500),
+        ...(await hasColumn('orders', 'shiprocket_push_status'))
+          ? { shiprocket_push_status: 'failed' }
+          : {},
+      });
     }
   } catch (err: any) {
     console.error('[PostOrder] could not persist shiprocket_push_error:', err?.message || err);
@@ -133,11 +130,7 @@ export function postOrderConfirmed(
 
     const invoiceJob = (async () => {
       try {
-        const { data: order } = await supabase
-          .from('orders')
-          .select('id, payment_method, payment_status, status')
-          .eq('id', orderId)
-          .maybeSingle();
+        const order = await ordersRepo.getOrderRow(orderId);
 
         const issue = shouldIssueInvoice(invoice, order, source);
 

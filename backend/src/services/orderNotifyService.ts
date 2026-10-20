@@ -1,5 +1,5 @@
 import { config } from '../config/env';
-import { supabase } from '../database/supabase';
+import * as ordersRepo from '../database/repos/orders';
 import {
   WHATSAPP_TEMPLATES,
   normalizePhone,
@@ -34,8 +34,7 @@ function customerPhone(order: any): string {
 }
 
 async function loadOrder(orderId: string) {
-  const { data } = await supabase.from('orders').select('*').eq('id', orderId).maybeSingle();
-  return data;
+  return ordersRepo.getOrderRow(orderId);
 }
 
 export const orderNotifyService = {

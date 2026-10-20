@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { config } from '../config/env';
-import { supabase } from '../database/supabase';
+import * as whatsappLogRepo from '../database/repos/whatsappLog';
 import { timingSafeEqualStr } from '../utils/timingSafe';
 
 /**
@@ -75,7 +75,7 @@ export const receiveWebhook = async (req: Request, res: Response, next: NextFunc
         // Delivery / read / failure receipts
         for (const status of value.statuses || []) {
           try {
-            await supabase.from('whatsapp_message_log').insert({
+            await whatsappLogRepo.insertMessage({
               recipient: status.recipient_id || 'unknown',
               message_type: 'status_receipt',
               purpose: 'meta_status',
@@ -92,7 +92,7 @@ export const receiveWebhook = async (req: Request, res: Response, next: NextFunc
         // Inbound messages (replies from customers)
         for (const message of messages) {
           try {
-            await supabase.from('whatsapp_message_log').insert({
+            await whatsappLogRepo.insertMessage({
               recipient: contacts[0]?.wa_id || message.from || 'unknown',
               message_type: 'inbound',
               purpose: 'inbound_message',

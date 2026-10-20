@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import Image from "next/image";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
 interface Banner {
@@ -141,11 +142,19 @@ export default function HeroCarousel({ initialBanners }: HeroCarouselProps) {
           >
             {/* Background image with subtle ken-burns on active */}
             <div
-              className={`absolute inset-0 bg-cover bg-center transition-transform duration-[8000ms] ease-out ${
+              className={`absolute inset-0 transition-transform duration-[8000ms] ease-out ${
                 isActive ? "scale-[1.04]" : "scale-100"
               }`}
-              style={{ backgroundImage: `url(${slide.image_url})` }}
-            />
+            >
+              <Image
+                src={slide.image_url}
+                alt={slide.heading || "Banner"}
+                fill
+                sizes="100vw"
+                className="object-cover"
+                priority={isActive}
+              />
+            </div>
 
             {/* Dark vignette */}
             <div className="absolute inset-0 bg-gradient-to-b from-black/35 via-black/15 to-[#220330]/85" />

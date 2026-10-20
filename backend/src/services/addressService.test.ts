@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { supabase } from '../database/supabase';
+import * as addressesRepo from '../database/repos/addresses';
+import * as schemaGuard from './schemaGuard';
 
 /**
  * Address book behaviour.
@@ -21,64 +22,45 @@ let store: Row[] = [];
 
 function installFake(t: any) {
   let nextId = 1;
-  const original = (supabase as any).from;
+  store = [];
 
-  (supabase as any).from = () => {
-    let filters: Array<[string, any]> = [];
-    let op: 'select' | 'insert' | 'update' | 'delete' = 'select';
-    let payload: Row | null = null;
+  const owned = (userId: string) => store.filter((r) => r.user_id === userId);
 
-    const matches = () => store.filter((r) => filters.every(([c, v]) => (v === null ? r[c] === null : r[c] === v)));
-
-    // Terminal: perform whichever operation the chain ended on.
-    const run = () => {
-      if (op === 'insert') {
-        const row = { id: `a${nextId++}`, created_at: new Date().toISOString(), ...(payload as Row) };
-        inserted.push(row);
-        store.push(row);
-        return { data: row, error: null };
-      }
-      if (op === 'update') {
-        const hits = matches();
-        updated.push({ ...(payload as Row), _filters: [...filters] });
-        for (const h of hits) Object.assign(h, payload);
-        return { data: hits.length ? hits : null, error: null };
-      }
-      if (op === 'delete') {
-        const hits = matches();
-        deleted.push({ _filters: [...filters] });
-        store = store.filter((r) => !hits.includes(r));
-        return { data: hits, error: null };
-      }
-      const rows = matches();
-      return { data: rows, error: null };
-    };
-
-    const b: any = {
-      _op: () => op,
-      select: () => b,
-      order: () => b,
-      limit: () => b,
-      range: () => b,
-      insert: (row: any) => { op = 'insert'; payload = row; return b; },
-      update: (row: any) => { op = 'update'; payload = row; return b; },
-      delete: () => { op = 'delete'; return b; },
-      eq: (c: string, v: any) => { filters.push([c, v]); return b; },
-      neq: () => b,
-      is: (c: string, v: any) => { filters.push([c, v]); return b; },
-      // run() exactly once: calling it twice would perform the write twice.
-      single: () => {
-        const res = run();
-        const first = Array.isArray(res.data) ? res.data[0] : res.data;
-        return Promise.resolve({ ...res, data: first ?? null });
-      },
-      then: (resolve: any) => resolve(run()),
-    };
-    return b;
-  };
+  t.mock.method(schemaGuard, 'hasTable', async () => true);
+  t.mock.method(addressesRepo, 'listForUser', async (userId: string) => owned(userId));
+  t.mock.method(addressesRepo, 'clearDefaults', async (userId: string, exceptId?: string) => {
+    for (const row of owned(userId)) {
+      if (exceptId && row.id === exceptId) continue;
+      row.is_default = false;
+    }
+  });
+  t.mock.method(addressesRepo, 'insertAddress', async (data: Row) => {
+    const row = { id: `a${nextId++}`, created_at: new Date().toISOString(), ...data };
+    inserted.push(row);
+    store.push(row);
+    return row;
+  });
+  t.mock.method(addressesRepo, 'updateAddress', async (userId: string, id: string, data: Row) => {
+    const row = store.find((r) => r.user_id === userId && r.id === id);
+    if (!row) return null;
+    Object.assign(row, data);
+    updated.push({ ...data, _filters: [['user_id', userId], ['id', id]] });
+    return row;
+  });
+  t.mock.method(addressesRepo, 'deleteAddress', async (userId: string, id: string) => {
+    const hits = store.filter((r) => r.user_id === userId && r.id === id);
+    deleted.push({ _filters: [['user_id', userId], ['id', id]] });
+    store = store.filter((r) => !hits.includes(r));
+    return hits;
+  });
+  t.mock.method(addressesRepo, 'setDefault', async (userId: string, id: string) => {
+    const row = store.find((r) => r.user_id === userId && r.id === id);
+    if (!row) return null;
+    row.is_default = true;
+    return row;
+  });
 
   t.after(() => {
-    (supabase as any).from = original;
     inserted.length = 0;
     updated.length = 0;
     deleted.length = 0;
@@ -92,7 +74,7 @@ const address = (over: Row = {}) => ({
   postalCode: '560001', ...over,
 });
 
-// Loaded lazily so the module-level supabase fake is installed first.
+// Loaded lazily so the repository mocks are installed first.
 function svc() {
   // require, not dynamic import(): ts-node's transpile-only loader cannot
   // resolve a .ts path through ESM import().

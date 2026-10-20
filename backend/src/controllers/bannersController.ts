@@ -1,15 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
-import { supabase } from '../database/supabase';
+import * as bannersRepo from '../database/repos/banners';
 
 export const getBanners = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { data, error } = await supabase
-      .from('banners')
-      .select('*')
-      .eq('is_active', true)
-      .order('display_order', { ascending: true });
-
-    if (error) throw error;
+    const data = await bannersRepo.listBanners(true);
     res.json({ data });
   } catch (error) {
     next(error);
@@ -18,12 +12,7 @@ export const getBanners = async (req: Request, res: Response, next: NextFunction
 
 export const adminGetBanners = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { data, error } = await supabase
-      .from('banners')
-      .select('*')
-      .order('display_order', { ascending: true });
-
-    if (error) throw error;
+    const data = await bannersRepo.listBanners(false);
     res.json({ data });
   } catch (error) {
     next(error);
@@ -32,14 +21,7 @@ export const adminGetBanners = async (req: Request, res: Response, next: NextFun
 
 export const createBanner = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const bannerData = req.body;
-    const { data, error } = await supabase
-      .from('banners')
-      .insert(bannerData)
-      .select()
-      .single();
-
-    if (error) throw error;
+    const data = await bannersRepo.insertBanner(req.body);
     res.status(201).json({ data });
   } catch (error) {
     next(error);
@@ -49,15 +31,8 @@ export const createBanner = async (req: Request, res: Response, next: NextFuncti
 export const updateBanner = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
-    const bannerData = req.body;
-    const { data, error } = await supabase
-      .from('banners')
-      .update(bannerData)
-      .eq('id', id)
-      .select()
-      .single();
-
-    if (error) throw error;
+    const data = await bannersRepo.updateBanner(id as string, req.body);
+    if (!data) throw new Error('Banner not found');
     res.json({ data });
   } catch (error) {
     next(error);
@@ -67,12 +42,7 @@ export const updateBanner = async (req: Request, res: Response, next: NextFuncti
 export const deleteBanner = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
-    const { error } = await supabase
-      .from('banners')
-      .delete()
-      .eq('id', id);
-
-    if (error) throw error;
+    await bannersRepo.deleteBanner(id as string);
     res.json({ success: true, message: 'Banner deleted successfully' });
   } catch (error) {
     next(error);

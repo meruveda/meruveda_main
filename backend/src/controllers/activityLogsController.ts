@@ -1,29 +1,23 @@
 import { Request, Response, NextFunction } from 'express';
-import { supabase } from '../database/supabase';
+import * as activityRepo from '../database/repos/activityLogs';
 
 export const getActivityLogs = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { module: moduleFilter, action, limit } = req.query;
 
-    let query = supabase
-      .from('activity_logs')
-      .select('*, users(first_name, last_name, email)')
-      .order('created_at', { ascending: false });
+    const actionFilter = action
+      ? String(action).replace(/[%(),"]/g, '').trim().slice(0, 80)
+      : undefined;
 
-    // `entity_type` holds the module name the admin UI filters by.
-    if (moduleFilter && moduleFilter !== 'all') {
-      query = query.eq('entity_type', String(moduleFilter));
-    }
-    if (action) {
-      const safe = String(action).replace(/[%(),"]/g, '').trim().slice(0, 80);
-      if (safe) query = query.ilike('action', `%${safe}%`);
-    }
+    const { rows } = await activityRepo.listActivity({
+      page: 1,
+      limit: Math.min(500, Math.max(1, Number(limit) || 100)),
+      action: actionFilter || undefined,
+      entityType:
+        moduleFilter && moduleFilter !== 'all' ? String(moduleFilter) : undefined,
+    });
 
-    query = query.limit(Math.min(500, Math.max(1, Number(limit) || 100)));
-
-    const { data, error } = await query;
-    if (error) throw error;
-    res.json({ data: data || [], total: (data || []).length });
+    res.json({ data: rows, total: rows.length });
   } catch (error) {
     next(error);
   }
@@ -64,8 +58,7 @@ export const logActivity = async (req: Request, res: Response, next: NextFunctio
     if (entityId) logData.entity_id = entityId;
     if (details !== undefined) logData.details = details;
 
-    const { data, error } = await supabase.from('activity_logs').insert(logData).select().single();
-    if (error) throw error;
+    const data = await activityRepo.logActivity(logData);
     res.status(201).json({ data });
   } catch (error) {
     next(error);

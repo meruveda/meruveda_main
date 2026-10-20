@@ -1,9 +1,29 @@
-import { supabase } from '../database/supabase';
 import crypto from 'crypto';
 import path from 'path';
+import sharp from 'sharp';
+import * as mediaRepo from '../database/repos/media';
+import { deleteObjects, mediaBucket, publicUrlFor, putObject, r2Configured } from './r2';
 
 const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
 const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5 MB
+
+/** Old Supabase bucket names are now key prefixes inside the single media bucket. */
+export const MEDIA_FOLDERS = ['general-media', 'banners', 'journal'] as const;
+export type MediaFolder = (typeof MEDIA_FOLDERS)[number];
+
+export function resolveMediaFolder(value: unknown): MediaFolder {
+  const candidate = String(value || '').trim();
+  return (MEDIA_FOLDERS as readonly string[]).includes(candidate)
+    ? (candidate as MediaFolder)
+    : 'general-media';
+}
+
+const VARIANTS = [400, 800, 1600] as const;
+const IMMUTABLE = 'public, max-age=31536000, immutable';
+
+function variantKey(baseKey: string, width: number): string {
+  return `${baseKey}-${width}.webp`;
+}
 
 export const storageService = {
   validateImage(file: Express.Multer.File): void {
@@ -26,123 +46,96 @@ export const storageService = {
     return `${uniqueSuffix}${ext}`;
   },
 
-  async uploadImage(file: Express.Multer.File, bucket: string): Promise<{ storagePath: string; publicUrl: string }> {
+  /**
+   * Store the original as WebP plus 400/800/1600 px variants, all with immutable
+   * cache headers. The returned `storagePath` is the full-size WebP object —
+   * that is the stable key written to `media.storage_path`.
+   */
+  async uploadImage(
+    file: Express.Multer.File,
+    folder: string,
+  ): Promise<{ storagePath: string; publicUrl: string; variants: string[] }> {
     this.validateImage(file);
 
-    const fileExt = file.originalname.split('.').pop();
-    const fileName = `${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
-    const filePath = `${fileName}`;
-
-    console.log(`[StorageService] Uploading to Supabase: bucket=${bucket}, path=${filePath}, mimetype=${file.mimetype}`);
-
-    let { data, error } = await supabase.storage
-      .from(bucket)
-      .upload(filePath, file.buffer, {
-        contentType: file.mimetype,
-        cacheControl: '3600',
-        upsert: false
-      });
-
-    if (error && error.message === 'Bucket not found') {
-      console.log(`[StorageService] Bucket '${bucket}' not found. Creating it...`);
-      const { error: createError } = await supabase.storage.createBucket(bucket, {
-        public: true,
-        fileSizeLimit: MAX_FILE_SIZE
-      });
-
-      if (createError) {
-        console.error(`[StorageService] Failed to create bucket:`, createError);
-        const uploadError = new Error(`Failed to create bucket '${bucket}': ${createError.message}`);
-        (uploadError as any).status = 500;
-        throw uploadError;
-      }
-
-      // Retry upload
-      console.log(`[StorageService] Bucket '${bucket}' created successfully. Retrying upload...`);
-      const retryResponse = await supabase.storage
-        .from(bucket)
-        .upload(filePath, file.buffer, {
-          contentType: file.mimetype,
-          cacheControl: '3600',
-          upsert: false
-        });
-        
-      data = retryResponse.data;
-      error = retryResponse.error;
+    if (!r2Configured()) {
+      const err = new Error('Media storage is not configured (R2 credentials missing).');
+      (err as any).status = 503;
+      throw err;
     }
 
-    if (error) {
-      console.error(`[StorageService] Supabase upload error:`, error);
-      const uploadError = new Error(`Failed to upload to Supabase: ${error.message}`);
-      (uploadError as any).status = 500;
-      throw uploadError;
+    const safeFolder = resolveMediaFolder(folder);
+    const baseName = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+    const baseKey = `${safeFolder}/${baseName}.webp`;
+
+    const full = await sharp(file.buffer).rotate().webp({ quality: 82 }).toBuffer();
+    await putObject(mediaBucket(), baseKey, full, {
+      contentType: 'image/webp',
+      cacheControl: IMMUTABLE,
+    });
+
+    const metadata = await sharp(file.buffer).metadata();
+    const variants: string[] = [];
+    for (const width of VARIANTS) {
+      if (metadata.width && metadata.width <= width) continue;
+      const resized = await sharp(file.buffer).rotate().resize({ width, withoutEnlargement: true }).webp({ quality: 80 }).toBuffer();
+      const key = variantKey(baseKey, width);
+      await putObject(mediaBucket(), key, resized, {
+        contentType: 'image/webp',
+        cacheControl: IMMUTABLE,
+      });
+      variants.push(key);
     }
 
-    console.log(`[StorageService] Upload completed, getting public URL...`);
-    const publicUrl = this.getPublicUrl(filePath, bucket);
-
-    return { storagePath: filePath, publicUrl };
+    return {
+      storagePath: baseKey,
+      publicUrl: publicUrlFor(baseKey),
+      variants,
+    };
   },
 
-  getPublicUrl(storagePath: string, bucket: string): string {
-    const { data } = supabase.storage.from(bucket).getPublicUrl(storagePath);
-    return data.publicUrl;
+  getPublicUrl(storagePath: string): string {
+    return publicUrlFor(storagePath);
   },
 
-  async deleteImage(storagePath: string, bucket: string): Promise<void> {
-    const { error } = await supabase.storage.from(bucket).remove([storagePath]);
-    
-    if (error) {
-      console.error(`Failed to delete image ${storagePath} from bucket ${bucket}:`, error);
-      // We log but don't strictly throw to prevent blocking record deletion if the file is already gone
+  async deleteImage(storagePath: string, _bucket?: string): Promise<void> {
+    try {
+      await deleteObjects(mediaBucket(), [storagePath, ...VARIANTS.map((w) => variantKey(storagePath, w))]);
+    } catch (err: any) {
+      console.error(`Failed to delete image ${storagePath} from R2:`, err?.message || err);
+      // Log but do not throw: a missing object must not block record deletion.
     }
   },
 
   async deleteImagesByUrls(urls: string[]): Promise<void> {
     if (!urls || urls.length === 0) return;
 
-    // Fetch media records to get storage_path and bucket
-    const { data: mediaRecords, error: fetchError } = await supabase
-      .from('media')
-      .select('id, storage_path, bucket')
-      .in('public_url', urls);
+    const mediaRecords = await mediaRepo.findMediaByUrls(urls).catch((err) => {
+      console.error('Failed to fetch media records for deletion by URLs:', err);
+      return [];
+    });
 
-    if (fetchError) {
-      console.error('Failed to fetch media records for deletion by URLs:', fetchError);
-      return;
-    }
+    if (mediaRecords.length === 0) return;
 
-    if (!mediaRecords || mediaRecords.length === 0) return;
-
+    const keys: string[] = [];
     const idsToDelete: string[] = [];
-
-    // Group by bucket for efficient deletion
-    const recordsByBucket = mediaRecords.reduce((acc: any, record: any) => {
-      if (record.storage_path && record.bucket) {
-        if (!acc[record.bucket]) acc[record.bucket] = [];
-        acc[record.bucket].push(record.storage_path);
+    for (const record of mediaRecords) {
+      if (record.storage_path) {
+        keys.push(record.storage_path);
+        for (const width of VARIANTS) keys.push(variantKey(record.storage_path, width));
         idsToDelete.push(record.id);
       }
-      return acc;
-    }, {});
-
-    // Delete from Supabase Storage
-    for (const bucket of Object.keys(recordsByBucket)) {
-      const paths = recordsByBucket[bucket];
-      if (paths.length > 0) {
-        const { error } = await supabase.storage.from(bucket).remove(paths);
-        if (error) {
-          console.error(`Failed to bulk delete images from bucket ${bucket}:`, error);
-        }
-      }
     }
 
-    // Delete from Media Table
+    try {
+      await deleteObjects(mediaBucket(), keys);
+    } catch (err: any) {
+      console.error('Failed to bulk delete images from R2:', err?.message || err);
+    }
+
     if (idsToDelete.length > 0) {
-      const { error: deleteError } = await supabase.from('media').delete().in('id', idsToDelete);
-      if (deleteError) {
-        console.error('Failed to delete media records:', deleteError);
-      }
+      await mediaRepo.deleteMediaByIds(idsToDelete).catch((err) => {
+        console.error('Failed to delete media records:', err);
+      });
     }
-  }
+  },
 };

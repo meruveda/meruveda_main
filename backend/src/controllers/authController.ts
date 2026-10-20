@@ -1,6 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
 import bcrypt from 'bcrypt';
-import { supabase } from '../database/supabase';
+import { isUniqueViolation } from '../database/db';
+import * as usersRepo from '../database/repos/users';
+import * as activityRepo from '../database/repos/activityLogs';
+import * as settingsRepo from '../database/repos/settings';
 import { generateToken } from '../utils/jwt';
 import { config } from '../config/env';
 import { sendEmail, getPasswordResetTemplate } from '../services/emailService';
@@ -48,21 +51,15 @@ export const register = async (req: Request, res: Response, next: NextFunction) 
       return res.status(400).json({ error: { message: 'Password must be at least 6 characters long' } });
     }
 
-    // Public registrations are always customers. Only an admin token may ask for
-    // another role; unknown values fall back to 'customer'.
     const trustedAdminCaller = requestedRoleIsAdminTrusted(req);
     const requestedRole = trustedAdminCaller && (role === 'admin' || role === 'customer') ? role : 'customer';
 
-    // Mobile number is the primary login identifier for storefront accounts.
-    // Admin-created staff accounts are allowed to be email-only, so the phone is
-    // mandatory only when no email was supplied at all.
     const hasPhoneInput = isValidPhone10(phone);
     let phone10: string | null = null;
     if (hasPhoneInput) {
       phone10 = normalizePhone10(phone);
     }
 
-    // Email is optional for storefront signups — kept for order notifications.
     const cleanEmail = typeof email === 'string' ? email.trim() : '';
     if (cleanEmail && !isValidEmail(cleanEmail)) {
       return res.status(400).json({ error: { message: 'Please enter a valid email address' } });
@@ -74,35 +71,21 @@ export const register = async (req: Request, res: Response, next: NextFunction) 
     if (!phone10 && !cleanEmail) {
       return res.status(400).json({ error: { message: 'Please enter a 10-digit mobile number' } });
     }
-    // Phone supplied in an unusable shape: keep the storefront's strict message so
-    // no half-entered number creates a broken account.
     if (phone !== undefined && phone !== null && String(phone).trim() !== '' && !phone10) {
       return res.status(400).json({ error: { message: 'Please enter a valid 10-digit mobile number' } });
     }
 
     const storedPhone = phone10 ? canonicalPhone(phone10) : null;
 
-    // Prevent duplicate accounts for the same normalized mobile number,
-    // matching every legacy stored spelling of it.
     if (phone10) {
-      const { data: phoneOwner, error: phoneCheckError } = await supabase
-        .from('users')
-        .select('id')
-        .in('phone', phoneVariants(phone10))
-        .maybeSingle();
-      if (phoneCheckError) throw phoneCheckError;
+      const phoneOwner = await usersRepo.findByPhoneVariants(phoneVariants(phone10), 'id');
       if (phoneOwner) {
         return res.status(400).json({ error: { message: 'This mobile number is already registered. Please log in instead.' } });
       }
     }
 
     if (cleanEmail) {
-      const { data: emailOwner, error: emailCheckError } = await supabase
-        .from('users')
-        .select('id')
-        .ilike('email', cleanEmail)
-        .maybeSingle();
-      if (emailCheckError) throw emailCheckError;
+      const emailOwner = await usersRepo.findByEmail(cleanEmail, 'id');
       if (emailOwner) {
         return res.status(400).json({ error: { message: 'This email address is already registered' } });
       }
@@ -110,28 +93,24 @@ export const register = async (req: Request, res: Response, next: NextFunction) 
 
     const passwordHash = await bcrypt.hash(password, 10);
 
-    // users.email is NOT NULL + UNIQUE, so phone-only accounts keep the same
-    // deterministic placeholder identity the OTP flow already uses.
     const emailToStore = cleanEmail || placeholderEmailFor(storedPhone as string);
 
-    // Create user
-    const { data: newUser, error: createError } = await supabase
-      .from('users')
-      .insert({
-        email: emailToStore,
-        password_hash: passwordHash,
-        first_name: firstName,
-        last_name: lastName,
-        phone: storedPhone,
-        role: requestedRole,
-        active: true
-      })
-      .select('id, email, first_name, last_name, role, phone')
-      .single();
-
-    if (createError) {
-      // UNIQUE race (placeholder email or phone taken between check and insert).
-      if ((createError as any).code === '23505') {
+    let newUser: any;
+    try {
+      newUser = await usersRepo.insertUser(
+        {
+          email: emailToStore,
+          password_hash: passwordHash,
+          first_name: firstName,
+          last_name: lastName,
+          phone: storedPhone,
+          role: requestedRole,
+          active: true,
+        },
+        'id, email, first_name, last_name, role, phone',
+      );
+    } catch (createError: any) {
+      if (isUniqueViolation(createError)) {
         return res.status(400).json({ error: { message: 'This mobile number is already registered. Please log in instead.' } });
       }
       throw createError;
@@ -140,7 +119,7 @@ export const register = async (req: Request, res: Response, next: NextFunction) 
     const token = generateToken({
       id: newUser.id,
       email: newUser.email,
-      role: newUser.role
+      role: newUser.role,
     });
 
     const { first_name, last_name, ...rest } = newUser;
@@ -149,7 +128,7 @@ export const register = async (req: Request, res: Response, next: NextFunction) 
     res.status(201).json({
       message: 'Registration successful',
       user: userToReturn,
-      token
+      token,
     });
   } catch (error) {
     next(error);
@@ -158,9 +137,6 @@ export const register = async (req: Request, res: Response, next: NextFunction) 
 
 export const login = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    // Mobile-first: the storefront sends { phone } (or { identifier });
-    // the admin portal still sends { email }. All three are accepted so no
-    // existing account or client breaks.
     const { email, phone, identifier, password } = req.body;
 
     if (!password) {
@@ -168,56 +144,27 @@ export const login = async (req: Request, res: Response, next: NextFunction) => 
     }
 
     let user: any = null;
-    let lookupError: any = null;
-
     const selectCols = 'id, email, phone, password_hash, first_name, last_name, role, active';
 
     if (phone && String(phone).trim()) {
       if (!isValidPhone10(phone)) {
         return res.status(401).json({ error: { message: 'Invalid credentials' } });
       }
-      const found = await supabase
-        .from('users')
-        .select(selectCols)
-        .in('phone', phoneVariants(phone))
-        .order('created_at', { ascending: false })
-        .limit(1);
-      lookupError = found.error;
-      user = found.data && found.data[0];
+      user = await usersRepo.findByPhoneVariants(phoneVariants(phone), selectCols);
     } else if (email && String(email).trim()) {
-      const found = await supabase
-        .from('users')
-        .select(selectCols)
-        .ilike('email', String(email).trim())
-        .maybeSingle();
-      lookupError = found.error;
-      user = found.data;
+      user = await usersRepo.findByEmail(String(email).trim(), selectCols);
     } else if (identifier && String(identifier).trim()) {
       const classified = classifyIdentifier(identifier);
       if (classified.kind === 'phone') {
-        const found = await supabase
-          .from('users')
-          .select(selectCols)
-          .in('phone', phoneVariants(classified.phone10))
-          .order('created_at', { ascending: false })
-          .limit(1);
-        lookupError = found.error;
-        user = found.data && found.data[0];
+        user = await usersRepo.findByPhoneVariants(phoneVariants(classified.phone10), selectCols);
       } else {
-        const found = await supabase
-          .from('users')
-          .select(selectCols)
-          .ilike('email', classified.email)
-          .maybeSingle();
-        lookupError = found.error;
-        user = found.data;
+        user = await usersRepo.findByEmail(classified.email, selectCols);
       }
     } else {
       return res.status(401).json({ error: { message: 'Invalid credentials' } });
     }
 
-    // Generic message either way — never reveal whether an identifier has an account.
-    if (lookupError || !user) {
+    if (!user) {
       return res.status(401).json({ error: { message: 'Invalid credentials' } });
     }
 
@@ -233,30 +180,28 @@ export const login = async (req: Request, res: Response, next: NextFunction) => 
     const token = generateToken({
       id: user.id,
       email: user.email,
-      role: user.role
+      role: user.role,
     });
 
-    // Log the login activity (phone numbers are operational identifiers, not logged in full).
     try {
-      await supabase.from('activity_logs').insert({
+      await activityRepo.logActivity({
         user_id: user.id,
         action: 'login',
         entity_type: 'users',
         entity_id: user.id,
-        details: {}
+        details: {},
       });
     } catch (logError) {
       console.error('Failed to log login activity:', logError);
     }
 
-    // Remove password hash from response and map snake_case to camelCase
     const { password_hash, first_name, last_name, ...rest } = user;
     const userToReturn = { ...rest, firstName: first_name, lastName: last_name };
 
     res.json({
       message: 'Login successful',
       user: userToReturn,
-      token
+      token,
     });
   } catch (error) {
     next(error);
@@ -268,13 +213,10 @@ export const getMe = async (req: Request, res: Response, next: NextFunction) => 
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ error: { message: 'Unauthorized' } });
 
-    const { data: user, error } = await supabase
-      .from('users')
-      .select('id, email, first_name, last_name, role, phone, active')
-      .eq('id', userId)
-      .single();
-
-    if (error || !user) throw error;
+    const user = await usersRepo.findById(userId, 'id, email, first_name, last_name, role, phone, active');
+    if (!user) {
+      return res.status(404).json({ error: { message: 'User not found' } });
+    }
 
     const { first_name, last_name, ...rest } = user;
     const userToReturn = { ...rest, firstName: first_name, lastName: last_name };
@@ -287,100 +229,54 @@ export const getMe = async (req: Request, res: Response, next: NextFunction) => 
 
 export const forgotPassword = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    // Accepts a mobile number ({ phone } / { identifier }) or a legacy email
-    // ({ email }). The reset link is always delivered to the account's
-    // registered email address — there is no SMS/WhatsApp reset channel, so a
-    // phone-only account without a real email on file is directed to support.
     const GENERIC_OK = 'If an account exists, password reset instructions have been sent to its registered email address.';
     const { email, phone, identifier } = req.body;
 
     let user: any = null;
     if (phone && String(phone).trim()) {
       if (!isValidPhone10(phone)) return res.status(200).json({ message: GENERIC_OK });
-      const { data, error: findError } = await supabase
-        .from('users')
-        .select('id, email, first_name')
-        .in('phone', phoneVariants(phone))
-        .order('created_at', { ascending: false })
-        .limit(1);
-      if (!findError && data && data[0]) user = data[0];
+      user = await usersRepo.findByPhoneVariants(phoneVariants(phone), 'id, email, first_name');
     } else if (email && String(email).trim()) {
-      const { data, error: checkError } = await supabase
-        .from('users')
-        .select('id, email, first_name')
-        .ilike('email', String(email).trim())
-        .maybeSingle();
-      if (!checkError && data) user = data;
+      user = await usersRepo.findByEmail(String(email).trim(), 'id, email, first_name');
     } else if (identifier && String(identifier).trim()) {
       const classified = classifyIdentifier(identifier);
       if (classified.kind === 'phone') {
-        const { data, error: findError } = await supabase
-          .from('users')
-          .select('id, email, first_name')
-          .in('phone', phoneVariants(classified.phone10))
-          .order('created_at', { ascending: false })
-          .limit(1);
-        if (!findError && data && data[0]) user = data[0];
+        user = await usersRepo.findByPhoneVariants(phoneVariants(classified.phone10), 'id, email, first_name');
       } else if (classified.email) {
-        const { data, error: checkError } = await supabase
-          .from('users')
-          .select('id, email, first_name')
-          .ilike('email', classified.email)
-          .maybeSingle();
-        if (!checkError && data) user = data;
+        user = await usersRepo.findByEmail(classified.email, 'id, email, first_name');
       }
     } else {
       return res.status(400).json({ error: { message: 'Mobile number or email address is required' } });
     }
 
-    // Always return success to protect user privacy and prevent enumeration.
     if (!user) {
       return res.status(200).json({ message: GENERIC_OK });
     }
 
     if (isPlaceholderEmail(user.email)) {
-      // No real inbox on file — the generic reply avoids confirming account
-      // existence; support can verify ownership out of band.
       console.log(`Password reset requested for phone-only account ${user.id} (no email on file)`);
       return res.status(200).json({ message: GENERIC_OK });
     }
 
-    // reset_password_token / reset_password_expires arrive with delta 007. If
-    // the migration has not been applied yet, fail soft (generic reply) rather
-    // than surfacing a PostgREST 500.
     if (!(await hasColumn('users', 'reset_password_token')) || !(await hasColumn('users', 'reset_password_expires'))) {
       console.error('[forgotPassword] users.reset_password_token/expires columns missing — apply database/deltas/007_mobile_auth.sql.');
       return res.status(200).json({ message: GENERIC_OK });
     }
 
-    // Random 32-byte token, 30-minute expiry. Only the SHA-256 hash of the
-    // token is stored — the raw value leaves this function inside the email
-    // link and is never persisted (see utils/resetToken).
     const token = generateResetToken();
     const tokenHash = hashResetToken(token);
     const expiry = new Date(Date.now() + RESET_TOKEN_TTL_MS).toISOString();
 
-    // Storing the new token replaces any previous one, so at most one reset
-    // link per account is ever valid (older links stop working immediately).
-    const { error: updateError } = await supabase
-      .from('users')
-      .update({
-        reset_password_token: tokenHash,
-        reset_password_expires: expiry,
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', user.id);
+    await usersRepo.updateUser(user.id, {
+      reset_password_token: tokenHash,
+      reset_password_expires: expiry,
+      updated_at: new Date().toISOString(),
+    });
 
-    if (updateError) {
-      throw updateError;
-    }
-
-    // Send password reset email
     const resetLink = buildResetLink(config.frontendUrl, token);
     const htmlContent = getPasswordResetTemplate(resetLink, user.first_name || 'Customer');
-    
-    // Asynchronously send email so response is instant, but catch errors
-    sendEmail(user.email, 'Reset Your MeruVeda Password', htmlContent).catch(mailErr => {
+
+    sendEmail(user.email, 'Reset Your MeruVeda Password', htmlContent).catch((mailErr) => {
       console.error('[forgotPassword] Failed to send email background task:', mailErr);
     });
 
@@ -401,47 +297,36 @@ export const resetPassword = async (req: Request, res: Response, next: NextFunct
       return res.status(400).json({ error: { message: 'Password must be at least 6 characters long' } });
     }
 
-    // Token columns arrive with delta 007; without them no token can be valid.
     if (!(await hasColumn('users', 'reset_password_token')) || !(await hasColumn('users', 'reset_password_expires'))) {
       return res.status(400).json({ error: { message: 'Invalid or expired password reset token' } });
     }
 
-    // Find the user by the SHA-256 hash of the submitted token (only hashes
-    // are stored) and only while the token is unexpired.
-    const { data: user, error: findError } = await supabase
-      .from('users')
-      .select('id, email')
-      .eq('reset_password_token', hashResetToken(String(token)))
-      .gt('reset_password_expires', new Date().toISOString())
-      .maybeSingle();
-
-    if (findError || !user) {
+    const user = await usersRepo.findByResetTokenHash(hashResetToken(String(token)));
+    if (!user) {
       return res.status(400).json({ error: { message: 'Invalid or expired password reset token' } });
     }
 
-    // Hash the new password using bcrypt (matching rounds = 10 from register)
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(newPassword, salt);
 
-    // Update the password and clear reset token columns
-    const { error: updateError } = await supabase
-      .from('users')
-      .update({
-        password_hash: passwordHash,
-        reset_password_token: null,
-        reset_password_expires: null,
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', user.id);
-
-    if (updateError) {
-      throw updateError;
-    }
+    await usersRepo.updateUser(user.id, {
+      password_hash: passwordHash,
+      reset_password_token: null,
+      reset_password_expires: null,
+      updated_at: new Date().toISOString(),
+    });
 
     res.status(200).json({ message: 'Password has been reset successfully.' });
   } catch (error) {
     next(error);
   }
+};
+
+const DEFAULT_PREFS = {
+  emailPromo: true,
+  smsOrder: true,
+  emailNewsletter: false,
+  whatsappAlerts: true,
 };
 
 export const getPreferences = async (req: Request, res: Response, next: NextFunction) => {
@@ -451,23 +336,8 @@ export const getPreferences = async (req: Request, res: Response, next: NextFunc
       return res.status(401).json({ error: { message: 'Unauthorized' } });
     }
 
-    const key = `notification_preferences_${userId}`;
-    const { data: setting, error } = await supabase
-      .from('settings')
-      .select('*')
-      .eq('key', key)
-      .maybeSingle();
-
-    const defaultPrefs = {
-      emailPromo: true,
-      smsOrder: true,
-      emailNewsletter: false,
-      whatsappAlerts: true
-    };
-
-    if (error) throw error;
-
-    res.json({ data: setting ? setting.value : defaultPrefs });
+    const setting = await settingsRepo.getByKey(`notification_preferences_${userId}`);
+    res.json({ data: setting ? setting.value : DEFAULT_PREFS });
   } catch (error) {
     next(error);
   }
@@ -481,26 +351,7 @@ export const updatePreferences = async (req: Request, res: Response, next: NextF
     }
 
     const key = `notification_preferences_${userId}`;
-    const value = req.body;
-
-    const { data: existing } = await supabase
-      .from('settings')
-      .select('id')
-      .eq('key', key)
-      .maybeSingle();
-
-    if (existing) {
-      const { error } = await supabase
-        .from('settings')
-        .update({ value })
-        .eq('id', existing.id);
-      if (error) throw error;
-    } else {
-      const { error } = await supabase
-        .from('settings')
-        .insert({ key, value });
-      if (error) throw error;
-    }
+    await settingsRepo.upsertSetting(key, req.body);
 
     res.json({ success: true, message: 'Preferences updated successfully.' });
   } catch (error) {
@@ -517,28 +368,12 @@ export const getCustomerPreferences = async (req: Request, res: Response, next: 
       return res.status(401).json({ error: { message: 'Unauthorized' } });
     }
 
-    // Only allow admin or the owner
     if (currentUser.role !== 'admin' && currentUser.id !== userId) {
       return res.status(403).json({ error: { message: 'Forbidden' } });
     }
 
-    const key = `notification_preferences_${userId}`;
-    const { data: setting, error } = await supabase
-      .from('settings')
-      .select('*')
-      .eq('key', key)
-      .maybeSingle();
-
-    const defaultPrefs = {
-      emailPromo: true,
-      smsOrder: true,
-      emailNewsletter: false,
-      whatsappAlerts: true
-    };
-
-    if (error) throw error;
-
-    res.json({ data: setting ? setting.value : defaultPrefs });
+    const setting = await settingsRepo.getByKey(`notification_preferences_${userId}`);
+    res.json({ data: setting ? setting.value : DEFAULT_PREFS });
   } catch (error) {
     next(error);
   }

@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
-import { supabase } from '../database/supabase';
+import * as usersRepo from '../database/repos/users';
+import * as activityRepo from '../database/repos/activityLogs';
 import { generateToken } from '../utils/jwt';
 import { otpService } from '../services/otpService';
 import { normalizePhone, isWhatsappConfigured } from '../services/whatsappService';
@@ -76,13 +77,13 @@ export const verifyOtp = async (req: Request, res: Response, next: NextFunction)
 
     // A successful OTP is the proof of ownership — flip phone_verified on.
     if (await hasColumn('users', 'phone_verified')) {
-      await supabase.from('users').update({ phone_verified: true }).eq('id', user.id);
+      await usersRepo.setPhoneVerified(user.id, true);
     }
 
     const token = generateToken({ id: user.id, email: user.email, role: user.role, phone_verified: true });
 
     try {
-      await supabase.from('activity_logs').insert({
+      await activityRepo.logActivity({
         user_id: user.id,
         action: created ? 'register_otp' : 'login_otp',
         entity_type: 'users',
@@ -114,15 +115,8 @@ export const verifyOtp = async (req: Request, res: Response, next: NextFunction)
 // been applied yet the column does not exist, and selecting/patching it would
 // fail the entire profile update — silently dropping name, email and phone as
 // well. Probe the column and skip it until the migration has run.
-let addressColumnOk = false;
-
 async function supportsAddressColumn(): Promise<boolean> {
-  if (addressColumnOk) return true;
-  const { error } = await supabase.from('users').select('address').limit(1);
-  // Only remember successes so a freshly applied migration is picked up without
-  // a restart, while transient failures are simply retried next time.
-  addressColumnOk = !error;
-  return !error;
+  return hasColumn('users', 'address');
 }
 
 export const updateCheckoutProfile = async (req: Request, res: Response, next: NextFunction) => {
@@ -152,33 +146,22 @@ export const updateCheckoutProfile = async (req: Request, res: Response, next: N
         return res.status(400).json({ error: { message: 'Please enter a valid email address' } });
       }
       // Only adopt the email if nobody else already owns it (users.email is UNIQUE).
-      const { data: owner } = await supabase
-        .from('users')
-        .select('id')
-        .ilike('email', cleanEmail)
-        .maybeSingle();
+      const owner = await usersRepo.findByEmail(cleanEmail, 'id');
       if (!owner || owner.id === userId) patch.email = cleanEmail;
     }
 
-    // Two literal selects: a dynamically built column list makes the Supabase
-    // client fall back to an untyped result, and the missing-column case has to
-    // be kept out of the request entirely.
-    const result = persistAddress
-      ? await supabase
-          .from('users')
-          .update(patch)
-          .eq('id', userId)
-          .select('id, email, first_name, last_name, phone, role, active, address')
-          .single()
-      : await supabase
-          .from('users')
-          .update(patch)
-          .eq('id', userId)
-          .select('id, email, first_name, last_name, phone, role, active')
-          .single();
-
-    if (result.error) throw result.error;
-    const updated = result.data as any;
+    // Two literal column lists: the missing-column case must stay out of the
+    // request entirely, and the response shape must not change.
+    const updated = await usersRepo.updateUserReturning(
+      userId,
+      patch,
+      persistAddress
+        ? 'id, email, first_name, last_name, phone, role, active, address'
+        : 'id, email, first_name, last_name, phone, role, active',
+    );
+    if (!updated) {
+      return res.status(404).json({ error: { message: 'User not found' } });
+    }
 
     res.json({
       message: 'Profile updated.',
@@ -228,7 +211,7 @@ export const quickLogin = async (req: Request, res: Response, next: NextFunction
     let phoneVerified = true;
     if (await hasColumn('users', 'phone_verified')) {
       if (created) {
-        await supabase.from('users').update({ phone_verified: false }).eq('id', user.id);
+        await usersRepo.setPhoneVerified(user.id, false);
         phoneVerified = false;
       } else {
         phoneVerified = user.phone_verified !== false;
@@ -243,7 +226,7 @@ export const quickLogin = async (req: Request, res: Response, next: NextFunction
     });
 
     try {
-      await supabase.from('activity_logs').insert({
+      await activityRepo.logActivity({
         user_id: user.id,
         action: created ? 'register_quick' : 'login_quick',
         entity_type: 'users',

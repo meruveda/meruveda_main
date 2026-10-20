@@ -9,7 +9,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'crypto';
-import { supabase } from '../database/supabase';
+import fs from 'node:fs';
+import path from 'node:path';
+import * as otpsRepo from '../database/repos/otps';
+import * as schemaGuard from './schemaGuard';
 import { config } from '../config/env';
 import { otpService } from './otpService';
 import { hashOtpCode } from '../utils/otpHash';
@@ -17,56 +20,46 @@ import { isWhatsappConfigured } from './whatsappService';
 
 type Row = Record<string, any>;
 
-const originalFrom = (supabase as any).from;
-
 /**
- * A fluent stand-in for the `otps` table, mirroring the one in
- * otpService.test.ts. It records the filters attached to each update so the
- * atomic single-use guard can be asserted structurally.
+ * Repository stand-in for the `otps` table, mirroring the one in
+ * otpService.test.ts.
  */
 function installFake(t: any, rows: Row[] = []) {
-  const state = { inserts: [] as Row[], updates: [] as Row[], updateBuilders: [] as any[] };
-  let result = rows;
+  const state = { inserts: [] as Row[], updates: [] as Row[] };
+  const store = rows.map((r) => ({ ...r }));
 
-  (supabase as any).from = () => {
-    const b: any = {
-      select: () => b,
-      insert: (payload: any) => {
-        state.inserts.push(...(Array.isArray(payload) ? payload : [payload]));
-        return { select: () => ({ single: () => Promise.resolve({ data: { id: 'otp-inserted' }, error: null }) }) };
-      },
-      update: (payload: any) => {
-        state.updates.push(payload);
-        // The builder is kept so the filters attached AFTER update() are visible.
-        state.updateBuilders.push(b);
-        return b;
-      },
-      delete: () => b,
-      eq: (col: string, val: any) => {
-        b._filters = b._filters || [];
-        b._filters.push([col, val]);
-        result = result.filter((r) => r[col] === val);
-        return b;
-      },
-      is: (col: string, val: any) => {
-        b._filters = b._filters || [];
-        b._filters.push([col, val]);
-        if (val === null) result = result.filter((r) => r[col] === null || r[col] === undefined);
-        return b;
-      },
-      order: () => b,
-      limit: () => b,
-      range: () => b,
-      maybeSingle: () => Promise.resolve({ data: null, error: null }),
-      upsert: () => Promise.resolve({ data: null, error: null }),
-      then: (resolve: any) => resolve({ data: result, error: null }),
-    };
-    return b;
-  };
-
-  t.after(() => {
-    (supabase as any).from = originalFrom;
+  t.mock.method(schemaGuard, 'hasTable', async () => true);
+  t.mock.method(otpsRepo, 'latestCreatedAt', async (phone: string, purpose: string) => {
+    const hits = store
+      .filter((r) => r.phone === phone && r.purpose === purpose)
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+    return hits[0]?.created_at ?? null;
   });
+  t.mock.method(otpsRepo, 'insertOtp', async (data: Row) => {
+    state.inserts.push(data);
+    store.push({ id: 'otp-inserted', created_at: new Date().toISOString(), ...data });
+    return { id: 'otp-inserted' };
+  });
+  t.mock.method(otpsRepo, 'deleteOtp', async () => {});
+  t.mock.method(otpsRepo, 'findActive', async (phone: string, purpose: string) => {
+    const hits = store
+      .filter((r) => r.phone === phone && r.purpose === purpose && !r.consumed_at)
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+    return hits[0] ?? null;
+  });
+  t.mock.method(otpsRepo, 'incrementAttempts', async (id: string) => {
+    const row = store.find((r) => r.id === id);
+    if (row) row.attempts = Number(row.attempts || 0) + 1;
+    state.updates.push({ attempts: row?.attempts });
+  });
+  t.mock.method(otpsRepo, 'consume', async (id: string) => {
+    const row = store.find((r) => r.id === id);
+    if (!row || row.consumed_at) return false;
+    row.consumed_at = new Date().toISOString();
+    state.updates.push({ consumed_at: row.consumed_at });
+    return true;
+  });
+
   return state;
 }
 
@@ -156,17 +149,11 @@ test('the consuming update is guarded on consumed_at IS NULL — one code, one u
 
   // Without this guard two concurrent verifies both read an unconsumed row,
   // both pass the hash check, and both mint a JWT from one code.
-  const consumeIndex = fake.updates.findIndex((u) => u.consumed_at);
-  const builder = fake.updateBuilders[consumeIndex];
-  const filters: Array<[string, any]> = builder._filters || [];
-  assert.ok(
-    filters.some(([col, val]) => col === 'consumed_at' && val === null),
-    `the update must carry .is(consumed_at, null); got ${JSON.stringify(filters)}`
-  );
-  assert.ok(
-    filters.some(([col, val]) => col === 'id' && val === 'otp-1'),
-    'the update must still be scoped to the single row'
-  );
+  const source = fs.readFileSync(path.join(__dirname, '../database/repos/otps.ts'), 'utf8');
+  const consumeFn = source.slice(source.indexOf('export async function consume'));
+  assert.match(consumeFn, /UPDATE otps SET consumed_at = NOW\(\)/, 'the consume must be a single UPDATE');
+  assert.match(consumeFn, /WHERE id = \$1 AND consumed_at IS NULL/, 'the update must be guarded on consumed_at');
+  assert.match(consumeFn, /RETURNING id/, 'the winner is identified by the returned row');
 });
 
 /* ------------------------------------------------------------------ */

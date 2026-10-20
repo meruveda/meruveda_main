@@ -7,7 +7,8 @@ import {
   shiprocketTrackingService, 
   shiprocketOrderService 
 } from '../services/shiprocket';
-import { supabase } from '../database/supabase';
+import * as ordersRepo from '../database/repos/orders';
+import * as trackingRepo from '../database/repos/tracking';
 import { handleTransactionCancellation } from '../services/orderService';
 import { timingSafeEqualStr } from '../utils/timingSafe';
 
@@ -56,17 +57,14 @@ export const shiprocketController = {
 
       if (awbCode) {
         // Update database
-        const { error } = await supabase
-          .from('orders')
-          .update({
+        try {
+          await ordersRepo.updateByShipmentId(String(shipmentId), {
             awb_code: awbCode,
             courier_name: courierName || 'Shiprocket Courier',
             tracking_status: 'AWB ASSIGNED',
             last_tracking_update: new Date().toISOString()
-          })
-          .eq('shipment_id', String(shipmentId));
-
-        if (error) {
+          });
+        } catch (error) {
           console.error('Error updating order AWB in DB:', error);
         }
       }
@@ -93,16 +91,13 @@ export const shiprocketController = {
       const response = await shiprocketPickupService.schedulePickup(shipmentId);
 
       // Update pickup status in DB
-      const { error } = await supabase
-        .from('orders')
-        .update({
+      try {
+        await ordersRepo.updateByShipmentId(String(shipmentId), {
           pickup_status: 'SCHEDULED',
           tracking_status: 'PICKUP SCHEDULED',
           last_tracking_update: new Date().toISOString()
-        })
-        .eq('shipment_id', String(shipmentId));
-
-      if (error) {
+        });
+      } catch (error) {
         console.error('Error updating order pickup status in DB:', error);
       }
 
@@ -137,7 +132,7 @@ export const shiprocketController = {
           // potentially update the WRONG order.
           awb: awb,
           current_status: track.current_status,
-          // Only set shipment_id if explicitly present — do NOT fall back to track.id
+          // Only set shipment_id if explicitly present â€” do NOT fall back to track.id
           // (track.id is the Shiprocket tracking record ID, not the shipment ID)
           shipment_id: track.shipment_id ? String(track.shipment_id) : null,
           sr_order_id: track.order_id ? String(track.order_id) : null,
@@ -195,13 +190,9 @@ export const shiprocketController = {
       }
 
       // Fetch the order to get the correct Shiprocket Order ID
-      const { data: order, error } = await supabase
-        .from('orders')
-        .select('shiprocket_order_id, user_id')
-        .eq('shipment_id', shipmentId)
-        .maybeSingle();
+      const order = await ordersRepo.findShipmentInfo(shipmentId as string);
 
-      if (error || !order || !order.shiprocket_order_id) {
+      if (!order || !order.shiprocket_order_id) {
         return res.status(404).json({ success: false, message: 'Matching Shiprocket order not found' });
       }
 
@@ -231,13 +222,9 @@ export const shiprocketController = {
       }
 
       // Fetch the order details
-      const { data: order, error: fetchErr } = await supabase
-        .from('orders')
-        .select('id, awb_code, status, shiprocket_order_id, user_id')
-        .eq('id', orderId)
-        .maybeSingle();
+      const order = await ordersRepo.findCancelInfo(orderId);
 
-      if (fetchErr || !order) {
+      if (!order) {
         return res.status(404).json({ success: false, message: 'Order not found' });
       }
 
@@ -263,22 +250,17 @@ export const shiprocketController = {
       }
 
       // Update Database status
-      const { error: updateErr } = await supabase
-        .from('orders')
-        .update({
-          status: 'cancelled',
-          tracking_status: 'CANCELED',
-          last_tracking_update: new Date().toISOString()
-        })
-        .eq('id', order.id);
-
-      if (updateErr) throw updateErr;
+      await ordersRepo.updateOrderById(order.id, {
+        status: 'cancelled',
+        tracking_status: 'CANCELED',
+        last_tracking_update: new Date().toISOString()
+      });
 
       // Update transaction status on cancel
       await handleTransactionCancellation(order.id, 'cancelled');
 
       // Add to tracking history
-      await supabase.from('order_tracking_history').insert({
+      await trackingRepo.insertHistory({
         order_id: order.id,
         tracking_status: 'CANCELED',
         activity: 'Order Cancelled',

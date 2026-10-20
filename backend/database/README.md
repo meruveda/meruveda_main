@@ -22,24 +22,39 @@ by hand, in the order below.
 | 8 | `deltas/008_reviews_is_featured.sql` | (duplicate of 006 reviews part — idempotent, safe) |
 | 9 | `deltas/009_page_views.sql` | page_views table, users.phone_verified |
 | 10 | `deltas/010_auto_invoice_shiprocket.sql` | invoice_sent_at/invoice_error, shiprocket_push_* |
-| 11 | `sql/migrations/2026-10-14_invoice_sequence.sql` | orders.invoice_number, invoice_sequences counter, `assign_invoice_number()` |
-| 12 | `sql/migrations/2026-10-14_row_level_security.sql` | RLS enabled + forced on all public tables, all policies dropped (deny-all to anon/authenticated), storage bucket visibility |
-| 13 | `sql/migrations/2026-10-14_analytics_events.sql` | analytics_events table (storefront funnel: view_item / add_to_cart / begin_checkout / purchase) |
+| 11 | `deltas/011_admin_columns.sql` | blogs/categories/support_tickets admin columns |
+| 12 | `sql/migrations/2026-10-14_invoice_sequence.sql` | orders.invoice_number, invoice_sequences counter, `assign_invoice_number()` |
+| 13 | `sql/migrations/2026-10-14_row_level_security.sql` | **Supabase only** - RLS + storage policies; do NOT run on Neon |
+| 14 | `sql/migrations/2026-10-14_analytics_events.sql` | analytics_events table (storefront funnel: view_item / add_to_cart / begin_checkout / purchase) |
 
-**Live database already at delta 010?** Run only steps 11–13 (or the
-consolidated copy below for step 11).
+**Live database already at delta 010?** Run only steps 11-14 (or the
+consolidated `PENDING_DELTAS.sql`).
 
-Step 13 is what feeds the admin Analytics funnel cards (top products viewed,
+### Neon Postgres
+
+Neon has no Supabase roles, no RLS requirement and no `storage` schema. Use the
+single consolidated script instead of the per-feature order above:
+
+| Step | File | Notes |
+|------|------|-------|
+| 1 | `deltas/001`-`004` | base schema; `002` is destructive on first run (RENAMEs), do not re-run |
+| 2 | `sql/migrations/2026-10-19_neon_pending_deltas.sql` | steps 5-12 + analytics, no RLS / policies / storage, additive and idempotent |
+
+Do **not** run `deltas/004`'s `CREATE POLICY ... TO service_role` or
+`2026-10-14_row_level_security.sql` on Neon: the backend connects as the owner
+and there is no `service_role` role.
+
+Step 14 is what feeds the admin Analytics funnel cards (top products viewed,
 add-to-cart, checkout started vs completed, COD vs PayU split). The endpoint
 answers 204 until it is applied, so the storefront and the dashboard both work
 before and after.
 
-Step 12 is a **security lockdown**: after it runs, the anon key cannot read any
+Step 13 is a **security lockdown**: after it runs, the anon key cannot read any
 table. That is intended — the storefront and admin panel go through the backend
 (service-role key), which bypasses RLS. Read the "BEFORE YOU RUN IT" notes in
 that file, and check your existing policies first.
 
-**Consolidated convenience copy:** `PENDING_DELTAS.sql` contains steps 5–11 in
+**Consolidated convenience copy:** `PENDING_DELTAS.sql` contains steps 5–12 in
 one script (including the invoice sequence). It does **not** contain steps 1–4
 — for a fresh database, run `deltas/001`–`004` first, then `PENDING_DELTAS.sql`
 once. The per-feature `deltas/` files remain the source of truth; keep

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { supabase } from '../database/supabase';
+import * as otpsRepo from '../database/repos/otps';
+import * as schemaGuard from './schemaGuard';
 import { config } from '../config/env';
 import { otpService } from './otpService';
 import { hashOtpCode, verifyOtpCode } from '../utils/otpHash';
@@ -22,58 +23,45 @@ interface Fake {
   deletes: number;
 }
 
-const originalFrom = (supabase as any).from;
-
 function installFake(t: any, rows: Row[] = []) {
   const state: Fake = { inserts: [], updates: [], deletes: 0 };
-  let result = rows;
+  const store = rows.map((r) => ({ ...r }));
 
-  (supabase as any).from = () => {
-    const b: any = {
-      _filters: [] as Array<[string, any]>,
-      select: () => b,
-      insert: (payload: any) => {
-        state.inserts.push(...(Array.isArray(payload) ? payload : [payload]));
-        const single = { id: 'otp-inserted' };
-        b._selectSingle = single;
-        return {
-          ...b,
-          select: () => ({
-            single: () => Promise.resolve({ data: single, error: null }),
-          }),
-        };
-      },
-      update: (payload: any) => {
-        state.updates.push(payload);
-        return b;
-      },
-      delete: () => {
-        state.deletes += 1;
-        return b;
-      },
-      eq: (col: string, val: any) => {
-        b._filters.push([col, val]);
-        result = result.filter((r) => r[col] === val);
-        return b;
-      },
-      is: (col: string, val: any) => {
-        b._filters.push([col, val]);
-        if (val === null) result = result.filter((r) => r[col] === null || r[col] === undefined);
-        return b;
-      },
-      order: () => b,
-      limit: () => b,
-      range: () => b,
-      maybeSingle: () => Promise.resolve({ data: null, error: null }),
-      upsert: () => Promise.resolve({ data: null, error: null }),
-      then: (resolve: any) => resolve({ data: result, error: null }),
-    };
-    return b;
-  };
-
-  t.after(() => {
-    (supabase as any).from = originalFrom;
+  t.mock.method(schemaGuard, 'hasTable', async () => true);
+  t.mock.method(otpsRepo, 'latestCreatedAt', async (phone: string, purpose: string) => {
+    const hits = store
+      .filter((r) => r.phone === phone && r.purpose === purpose)
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+    return hits[0]?.created_at ?? null;
   });
+  t.mock.method(otpsRepo, 'insertOtp', async (data: Row) => {
+    state.inserts.push(data);
+    const row = { id: 'otp-inserted', created_at: new Date().toISOString(), ...data };
+    store.push(row);
+    return { id: row.id };
+  });
+  t.mock.method(otpsRepo, 'deleteOtp', async () => {
+    state.deletes += 1;
+  });
+  t.mock.method(otpsRepo, 'findActive', async (phone: string, purpose: string) => {
+    const hits = store
+      .filter((r) => r.phone === phone && r.purpose === purpose && !r.consumed_at)
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+    return hits[0] ?? null;
+  });
+  t.mock.method(otpsRepo, 'incrementAttempts', async (id: string) => {
+    const row = store.find((r) => r.id === id);
+    if (row) row.attempts = Number(row.attempts || 0) + 1;
+    state.updates.push({ attempts: row?.attempts });
+  });
+  t.mock.method(otpsRepo, 'consume', async (id: string) => {
+    const row = store.find((r) => r.id === id);
+    if (!row || row.consumed_at) return false;
+    row.consumed_at = new Date().toISOString();
+    state.updates.push({ consumed_at: row.consumed_at });
+    return true;
+  });
+
   return state;
 }
 

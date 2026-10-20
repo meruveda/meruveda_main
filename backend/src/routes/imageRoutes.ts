@@ -10,18 +10,16 @@ import { imageProxyLimiter } from '../middleware/rateLimit';
 /**
  * Image derivative proxy used by the storefront's custom Next.js image loader.
  *
- * Product photos live in Supabase Storage and are multi-megabyte PNGs. Next's
- * own optimizer aborts upstream downloads after a hard-coded 7 seconds, so on a
- * slow link every remote image came back as an error and the site rendered with
- * no photos. This endpoint fetches with a longer timeout, resizes with sharp
- * and caches the result on disk, so the browser only ever receives a small WebP.
+ * The canonical path is now a 302 redirect to the object on the R2 public
+ * domain (R2_PUBLIC_BASE_URL). The proxy path is retained for any allowlisted
+ * upstream that is not on R2, and for deployments where the public base is not
+ * configured yet.
  *
  * SSRF hardening (this endpoint is a server-side fetcher, so treat the `url`
  * param as attacker-controlled):
  *   1. `new URL()` parse; https only (no http, not even in dev).
- *   2. Hostname allowlist: the EXACT host of SUPABASE_URL + optional
- *      IMAGE_PROXY_EXTRA_HOSTS (comma-separated). No wildcards — a sibling
- *      Supabase project's storage host must never be fetchable here.
+ *   2. Hostname allowlist: the R2 public host + the legacy SUPABASE_URL host +
+ *      optional IMAGE_PROXY_EXTRA_HOSTS (comma-separated). No wildcards.
  *   3. DNS resolution: every resolved address is checked against private /
  *      loopback / link-local / metadata ranges (IPv4 and IPv6) so a hostname
  *      that rebinds to 127.0.0.1 or 169.254.169.254 is rejected.
@@ -54,21 +52,82 @@ const supabaseHost = (() => {
   }
 })();
 
-// Extra allowlisted hosts (e.g. the hostname from next.config
-// images.remotePatterns if it ever moves off Supabase). Comma-separated.
+// Extra allowlisted hosts (comma-separated). Kept for any non-R2 origin.
 const extraHosts = (process.env.IMAGE_PROXY_EXTRA_HOSTS || '')
   .split(',')
   .map((h) => h.trim().toLowerCase())
   .filter(Boolean);
 
+const r2PublicBase = (process.env.R2_PUBLIC_BASE_URL || '').replace(/\/+$/, '');
+const r2PublicHost = (() => {
+  try {
+    return r2PublicBase ? new URL(r2PublicBase).hostname.toLowerCase() : '';
+  } catch {
+    return '';
+  }
+})();
+
 function isAllowedHost(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/\.$/, ''); // strip trailing dot
   if (extraHosts.includes(host)) return true;
+  if (r2PublicHost && host === r2PublicHost) return true;
   // Exact match only — deliberately NO *.supabase.co / *.supabase.in wildcards.
   // If SUPABASE_URL is unset the allowlist is empty and every source is
   // rejected (fail closed): a deployed backend missing its env must never
   // become an open relay.
   return Boolean(supabaseHost) && host === supabaseHost;
+}
+
+/**
+ * Old Supabase Storage URLs keep working: map them onto the same key inside the
+ * R2 public bucket and 302 there. Returns null when the URL is not a storage
+ * object we can map (the caller then falls back to the proxy path).
+ */
+function r2RedirectTarget(rawUrl: string, width: number): string | null {
+  if (!r2PublicBase) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'https:') return null;
+
+  const host = parsed.hostname.toLowerCase();
+  let key = '';
+
+  if (supabaseHost && host === supabaseHost) {
+    // /storage/v1/object/public/<bucket>/<path>  (or /sign/)
+    const match = /\/storage\/v1\/object\/(?:public|sign)\/([^/]+)\/(.+)$/.exec(parsed.pathname);
+    if (!match) return null;
+    key = `${match[1]}/${match[2]}`;
+  } else if (r2PublicHost && host === r2PublicHost) {
+    key = parsed.pathname.replace(/^\/+/, '');
+  } else {
+    return null;
+  }
+
+  if (!key) return null;
+
+  // Prefer a pre-rendered variant when the requested width is smaller than the
+  // original. Uploaded media always has 400/800/1600 variants; legacy assets may
+  // not, in which case the original key is the correct answer.
+  if (/\.webp$/i.test(key)) {
+    for (const variant of [1600, 800, 400]) {
+      if (width <= variant) {
+        const candidate = key.replace(/\.webp$/i, `-${variant}.webp`);
+        // We cannot cheaply HEAD every request here; the CDN will 404 a missing
+        // variant, so only rewrite when we know variants are generated for this
+        // path (uploaded media always is). Legacy asset keys are left untouched
+        // by the upload-assets script, so use the original for non-media paths.
+        if (/^(general-media|banners|journal)\//.test(key) && /\d{13}-[a-f0-9]{8}\.webp$/i.test(key)) {
+          return `${r2PublicBase}/${candidate}`;
+        }
+      }
+    }
+  }
+
+  return `${r2PublicBase}/${key}`;
 }
 
 function isAllowedSource(rawUrl: string): URL | null {
@@ -299,13 +358,21 @@ router.get('/fetch', imageProxyLimiter, async (req: Request, res: Response) => {
 
   try {
     const source = String(req.query.url || '');
-    // Cheap allowlist pass first (no DNS) so junk never reaches the resolver.
+    const width = snapWidth(String(req.query.w || ''));
+    const quality = clamp(String(req.query.q || ''), 30, 95, 75);
+
+    // Canonical path: the object already exists on R2. Redirecting (rather than
+    // proxying/resizing again) removes the per-cold-start re-download entirely.
+    const redirect = r2RedirectTarget(source, width);
+    if (redirect) {
+      res.setHeader('Cache-Control', 'public, max-age=300');
+      return res.redirect(302, redirect);
+    }
+
+    // Cheap allowlist pass (no DNS) so junk never reaches the resolver.
     if (!isAllowedSource(source)) {
       return res.status(400).json({ error: { message: 'Unsupported image URL.' } });
     }
-
-    const width = snapWidth(String(req.query.w || ''));
-    const quality = clamp(String(req.query.q || ''), 30, 95, 75);
 
     // Two-tier cache: the (slow) upstream download is stored once per URL, then
     // every requested width is rendered from disk — a single srcset page would

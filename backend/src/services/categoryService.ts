@@ -1,4 +1,4 @@
-import { supabase } from '../database/supabase';
+import * as categoriesRepo from '../database/repos/categories';
 import { slugify } from '@meruveda/shared';
 import { storageService } from './storageService';
 import { hasColumn } from './schemaGuard';
@@ -13,12 +13,7 @@ const stripMissingImageColumns = async (payload: any) => {
 
 export const categoryService = {
   async getCategories() {
-    const { data, error } = await supabase
-      .from('categories')
-      .select('*, products(id)')
-      .order('name', { ascending: true });
-
-    if (error) throw error;
+    const data = await categoriesRepo.listCategories();
     return data.map((cat: any) => {
       const productCount = cat.products ? cat.products.length : 0;
       const { products, ...rest } = cat;
@@ -32,14 +27,7 @@ export const categoryService = {
   async createCategory(payload: { name: string; description?: string; parent_id?: string }) {
     const slug = slugify(payload.name);
     const clean = await stripMissingImageColumns({ ...payload });
-    const { data, error } = await supabase
-      .from('categories')
-      .insert({ ...clean, slug })
-      .select()
-      .single();
-
-    if (error) throw error;
-    return data;
+    return categoriesRepo.insertCategory({ ...clean, slug });
   },
 
   async updateCategory(id: string, updates: any) {
@@ -55,11 +43,7 @@ export const categoryService = {
         if (columns.includes('banner') && (await hasColumn('categories', 'banner'))) selectCols.push('banner');
 
         if (selectCols.length > 0) {
-          const { data: existingCategory } = (await supabase
-            .from('categories')
-            .select(selectCols.join(', '))
-            .eq('id', id)
-            .single()) as any;
+          const existingCategory = await categoriesRepo.getCategoryColumns(id, selectCols);
           if (existingCategory) {
             const urlsToDelete: string[] = [];
             if (updates.image !== undefined && existingCategory.image && existingCategory.image !== updates.image) {
@@ -83,14 +67,12 @@ export const categoryService = {
 
     await stripMissingImageColumns(updates);
 
-    const { data, error } = await supabase
-      .from('categories')
-      .update(updates)
-      .eq('id', id)
-      .select()
-      .single();
-
-    if (error) throw error;
+    const data = await categoriesRepo.updateCategory(id, updates);
+    if (!data) {
+      const err = new Error('Category not found');
+      (err as any).status = 404;
+      throw err;
+    }
     return data;
   },
 
@@ -100,15 +82,10 @@ export const categoryService = {
         (await hasColumn('categories', 'image')) ? 'image' : null,
         (await hasColumn('categories', 'banner')) ? 'banner' : null
       ]
-        .filter(Boolean)
-        .join(', ');
+        .filter(Boolean) as string[];
 
-      if (selectCols) {
-        const { data: existingCategory } = (await supabase
-          .from('categories')
-          .select(selectCols)
-          .eq('id', id)
-          .single()) as any;
+      if (selectCols.length > 0) {
+        const existingCategory = await categoriesRepo.getCategoryColumns(id, selectCols);
 
         if (existingCategory) {
           const urlsToDelete: string[] = [];
@@ -125,11 +102,6 @@ export const categoryService = {
       console.error('Error fetching category for image cleanup before delete:', e);
     }
 
-    const { error } = await supabase
-      .from('categories')
-      .delete()
-      .eq('id', id);
-
-    if (error) throw error;
+    await categoriesRepo.deleteCategory(id);
   }
 };

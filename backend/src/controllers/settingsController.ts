@@ -1,13 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
-import { supabase } from '../database/supabase';
+import * as settingsRepo from '../database/repos/settings';
 
 export const getSettings = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { data, error } = await supabase
-      .from('settings')
-      .select('*');
-
-    if (error) throw error;
+    const data = await settingsRepo.listSettings();
 
     // The route is public because the storefront needs store-level config
     // (logo, store hours, announcement). Per-user notification preferences are
@@ -15,7 +11,7 @@ export const getSettings = async (req: Request, res: Response, next: NextFunctio
     // never leave through the public endpoint — they are only returned to the
     // signed-in admin.
     const isAdmin = req.user?.role === 'admin';
-    const rows = (data || []).filter((row: any) =>
+    const rows = data.filter((row: any) =>
       isAdmin || !String(row.key || '').startsWith('notification_preferences_')
     );
 
@@ -34,15 +30,9 @@ export const getSettings = async (req: Request, res: Response, next: NextFunctio
 export const updateSettings = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const updates = req.body;
-    
+
     for (const key of Object.keys(updates)) {
-      const { data: existing } = await supabase.from('settings').select('id').eq('key', key).single();
-      
-      if (existing) {
-        await supabase.from('settings').update({ value: updates[key] }).eq('id', existing.id);
-      } else {
-        await supabase.from('settings').insert({ key, value: updates[key] });
-      }
+      await settingsRepo.upsertSetting(key, updates[key]);
     }
 
     res.json({ message: 'Settings updated successfully' });

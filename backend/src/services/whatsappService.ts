@@ -1,5 +1,5 @@
 import { config, invoiceWhatsapp } from '../config/env';
-import { supabase } from '../database/supabase';
+import * as whatsappLogRepo from '../database/repos/whatsappLog';
 
 /**
  * WhatsApp Cloud API (Meta) client.
@@ -102,23 +102,7 @@ async function logSend(entry: {
 }): Promise<boolean> {
   if (!entry.referenceId) return true;
   try {
-    const { error } = await supabase.from('whatsapp_message_log').upsert(
-      {
-        recipient: entry.recipient,
-        template_name: entry.templateName || null,
-        message_type: entry.messageType,
-        purpose: entry.purpose,
-        reference_id: entry.referenceId,
-        status: entry.status,
-        error: entry.error || null,
-        payload: entry.payload || {},
-      },
-      { onConflict: 'purpose,reference_id' }
-    );
-    if (error) {
-      console.error('[WhatsApp] Failed to write message log:', error.message);
-      return false;
-    }
+    await whatsappLogRepo.logSend(entry);
     return true;
   } catch (err: any) {
     console.error('[WhatsApp] Failed to write message log:', err?.message || err);
@@ -129,12 +113,7 @@ async function logSend(entry: {
 /** Returns true when this (purpose, referenceId) pair was already DELIVERED. */
 export async function wasSent(purpose: string, referenceId: string): Promise<boolean> {
   try {
-    const { data } = await supabase
-      .from('whatsapp_message_log')
-      .select('id, status')
-      .eq('purpose', purpose)
-      .eq('reference_id', referenceId)
-      .maybeSingle();
+    const data = await whatsappLogRepo.findByReference(purpose, referenceId, 'id, status');
     return Boolean(data) && data?.status === 'sent';
   } catch {
     return false;
@@ -153,12 +132,11 @@ export async function getLogEntry(
   referenceId: string
 ): Promise<{ status: string; error?: string | null; message_type?: string | null } | null> {
   try {
-    const { data } = await supabase
-      .from('whatsapp_message_log')
-      .select('status, error, message_type')
-      .eq('purpose', purpose)
-      .eq('reference_id', referenceId)
-      .maybeSingle();
+    const data = await whatsappLogRepo.findByReference(
+      purpose,
+      referenceId,
+      'status, error, message_type',
+    );
     return (data as any) || null;
   } catch {
     return null;

@@ -1,4 +1,6 @@
-import { supabase } from '../../database/supabase';
+import * as ordersRepo from '../../database/repos/orders';
+import * as transactionsRepo from '../../database/repos/transactions';
+import * as trackingRepo from '../../database/repos/tracking';
 import { orderNotifyService } from '../orderNotifyService';
 import { hasColumn } from '../schemaGuard';
 
@@ -20,21 +22,11 @@ export const shiprocketWebhookService = {
       }
 
       // 2. Fetch the corresponding order
-      let query = supabase.from('orders').select('*');
-      if (awb) {
-        query = query.eq('awb_code', awb);
-      } else if (shipmentId) {
-        query = query.eq('shipment_id', shipmentId);
-      } else {
-        query = query.eq('shiprocket_order_id', srOrderId);
-      }
-
-      const { data: order, error: fetchError } = await query.maybeSingle();
-
-      if (fetchError) {
-        console.error('[Webhook] Error fetching order:', fetchError);
-        throw fetchError;
-      }
+      const order = awb
+        ? await ordersRepo.findByAwb(awb)
+        : shipmentId
+        ? await ordersRepo.findByShipmentId(shipmentId)
+        : await ordersRepo.findByShiprocketOrderId(srOrderId!);
 
       if (!order) {
         console.warn(`[Webhook] No matching order found for AWB: ${awb}, Shipment ID: ${shipmentId}, SR Order ID: ${srOrderId}`);
@@ -100,16 +92,10 @@ export const shiprocketWebhookService = {
           const scanStatus = scan['sr-status-label'];
 
           // Deduplicate using date + activity
-          const { data: existingHistory } = await supabase
-            .from('order_tracking_history')
-            .select('id')
-            .eq('order_id', order.id)
-            .eq('activity', scanActivity)
-            .eq('created_at', scanDate)
-            .maybeSingle();
+          const existingHistory = await trackingRepo.findScan(order.id, scanActivity, scanDate);
 
           if (!existingHistory) {
-            await supabase.from('order_tracking_history').insert({
+            await trackingRepo.insertHistory({
               order_id: order.id,
               tracking_status: scanStatus || currentStatus,
               location: scanLocation,
@@ -157,11 +143,7 @@ export const shiprocketWebhookService = {
               
               // Record payment transaction and tracking history entry
               try {
-                const { data: existingTx } = await supabase
-                  .from('transactions')
-                  .select('id')
-                  .eq('order_id', order.id)
-                  .maybeSingle();
+                const existingTx = await transactionsRepo.findByOrderId(order.id);
 
                 const txData = {
                   user_id: order.user_id,
@@ -180,17 +162,12 @@ export const shiprocketWebhookService = {
                 };
 
                 if (existingTx) {
-                  await supabase
-                    .from('transactions')
-                    .update(txData)
-                    .eq('id', existingTx.id);
+                  await transactionsRepo.updateTransaction(existingTx.id, txData);
                 } else {
-                  await supabase
-                    .from('transactions')
-                    .insert(txData);
+                  await transactionsRepo.insertTransaction(txData);
                 }
-                
-                await supabase.from('order_tracking_history').insert({
+
+                await trackingRepo.insertHistory({
                   order_id: order.id,
                   tracking_status: 'paid',
                   activity: 'COD Payment Auto-Confirmed',
@@ -205,14 +182,10 @@ export const shiprocketWebhookService = {
           }
         }
 
-        const { error: updateError } = await supabase
-          .from('orders')
-          .update(updateData)
-          .eq('id', order.id);
-
-        if (updateError) {
-          console.error('[Webhook] Failed to update order status:', updateError);
-          throw updateError;
+        const updated = await ordersRepo.updateOrderById(order.id, updateData);
+        if (!updated) {
+          console.error('[Webhook] Failed to update order status: order disappeared');
+          throw new Error('Order not found');
         }
 
         // 6b. Push a WhatsApp update to the customer (shipped / out for

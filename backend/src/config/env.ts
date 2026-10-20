@@ -44,6 +44,21 @@ export const config = {
   nodeEnv: process.env.NODE_ENV || 'development',
   supabaseUrl: process.env.SUPABASE_URL || '',
   supabaseServiceKey: process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '',
+  // ---- Neon Postgres ----
+  // DATABASE_URL is pooled (runtime). DATABASE_URL_UNPOOLED is used by
+  // migrations/DDL only. Both are read lazily by database/db.ts; leaving them
+  // unset is fine in development so tsc/tests run offline.
+  databaseUrl: process.env.DATABASE_URL || '',
+  databaseUrlUnpooled: process.env.DATABASE_URL_UNPOOLED || '',
+  // ---- Cloudflare R2 ----
+  // The buckets must already exist (created in Phase B). Names/domains are
+  // env-driven; nothing in the code hardcodes a public host.
+  r2AccountId: process.env.R2_ACCOUNT_ID || '',
+  r2AccessKeyId: process.env.R2_ACCESS_KEY_ID || '',
+  r2SecretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
+  r2BucketMedia: process.env.R2_BUCKET_MEDIA || 'meruveda-media',
+  r2BucketInvoices: process.env.R2_BUCKET_INVOICES || 'meruveda-invoices',
+  r2PublicBaseUrl: (process.env.R2_PUBLIC_BASE_URL || '').replace(/\/+$/, ''),
   jwtSecret: process.env.JWT_SECRET,
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '30d',
   shiprocketTestMode: process.env.SHIPROCKET_TEST_MODE === 'true',
@@ -268,9 +283,26 @@ if (nodeEnv === 'production') {
     );
   }
 
-  // Database.
-  if (!process.env.SUPABASE_URL || !(process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY)) {
-    fatal.push('SUPABASE_URL + SUPABASE_SERVICE_KEY — every read/write goes through these');
+  // Database. The API cannot serve a single request without Postgres.
+  if (!process.env.DATABASE_URL) {
+    fatal.push('DATABASE_URL — every read/write goes through Neon Postgres');
+  }
+  if (!process.env.DATABASE_URL_UNPOOLED) {
+    warn.push('DATABASE_URL_UNPOOLED — migrations/DDL cannot run against the pooled endpoint');
+  }
+
+  // Object storage (media + invoice PDFs). Both buckets must exist already.
+  if (
+    !process.env.R2_ACCOUNT_ID ||
+    !process.env.R2_ACCESS_KEY_ID ||
+    !process.env.R2_SECRET_ACCESS_KEY
+  ) {
+    fatal.push(
+      'R2_ACCOUNT_ID + R2_ACCESS_KEY_ID + R2_SECRET_ACCESS_KEY — media and invoice PDFs cannot be stored',
+    );
+  }
+  if (!process.env.R2_PUBLIC_BASE_URL) {
+    warn.push('R2_PUBLIC_BASE_URL — public media URLs cannot be built, so product images will not render');
   }
 
   // Payment gateway. PAYU_MERCHANT_KEY/PAYU_SALT are already fatal above.

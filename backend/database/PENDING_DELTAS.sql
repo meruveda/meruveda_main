@@ -18,6 +18,10 @@
 -- The canonical per-feature files under backend/database/deltas/ are still the
 -- source of truth; this file is the "run all of them at once" convenience copy.
 -- Exact run order for a fresh database: see backend/database/README.md.
+--
+-- Neon Postgres: do NOT run the Supabase RLS/policy files. Use the Neon
+-- equivalent instead, which adds analytics_events too:
+--   backend/sql/migrations/2026-10-19_neon_pending_deltas.sql
 -- =============================================================================
 
 
@@ -29,7 +33,7 @@
 CREATE TABLE IF NOT EXISTS public.otps (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   phone VARCHAR(20) NOT NULL,
-  code VARCHAR(10) NOT NULL,
+  code_hash VARCHAR(64) NOT NULL,
   purpose VARCHAR(30) NOT NULL DEFAULT 'checkout_login',
   attempts INTEGER NOT NULL DEFAULT 0,
   max_attempts INTEGER NOT NULL DEFAULT 5,

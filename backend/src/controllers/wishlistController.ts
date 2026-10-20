@@ -1,15 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
-import { supabase } from '../database/supabase';
+import * as wishlistRepo from '../database/repos/wishlist';
 
 export const getWishlist = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const userId = req.user?.id;
-    const { data, error } = await supabase
-      .from('wishlist_items')
-      .select('*, products(*)')
-      .eq('user_id', userId);
-
-    if (error) throw error;
+    const data = await wishlistRepo.listForUser(req.user?.id as string);
     res.json({ data });
   } catch (error) {
     next(error);
@@ -18,32 +12,18 @@ export const getWishlist = async (req: Request, res: Response, next: NextFunctio
 
 export const toggleWishlist = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const userId = req.user?.id;
+    const userId = req.user?.id as string;
     const { product_id } = req.body;
 
-    const { data: existing } = await supabase
-      .from('wishlist_items')
-      .select('id')
-      .eq('user_id', userId)
-      .eq('product_id', product_id)
-      .single();
+    const existing = await wishlistRepo.findItem(userId, product_id);
 
     if (existing) {
       // Remove
-      const { error } = await supabase
-        .from('wishlist_items')
-        .delete()
-        .eq('id', existing.id);
-      if (error) throw error;
+      await wishlistRepo.deleteItem(existing.id);
       res.json({ action: 'removed', product_id });
     } else {
       // Add
-      const { data, error } = await supabase
-        .from('wishlist_items')
-        .insert({ user_id: userId, product_id })
-        .select()
-        .single();
-      if (error) throw error;
+      const data = await wishlistRepo.insertItem({ user_id: userId, product_id });
       res.json({ action: 'added', data });
     }
   } catch (error) {
@@ -54,15 +34,7 @@ export const toggleWishlist = async (req: Request, res: Response, next: NextFunc
 export const removeFromWishlist = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
-    const userId = req.user?.id;
-
-    const { error } = await supabase
-      .from('wishlist_items')
-      .delete()
-      .eq('id', id)
-      .eq('user_id', userId);
-
-    if (error) throw error;
+    await wishlistRepo.deleteItemForUser(req.user?.id as string, id as string);
     res.status(204).send();
   } catch (error) {
     next(error);

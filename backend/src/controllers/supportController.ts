@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { supabase } from '../database/supabase';
+import * as supportRepo from '../database/repos/support';
 import { hasColumn } from '../services/schemaGuard';
 
 // `support_tickets.ticket_number` is a pending DB column. Until it is applied we still
@@ -20,30 +20,20 @@ export const getTickets = async (req: Request, res: Response, next: NextFunction
   try {
     const { status, priority, search } = req.query;
 
-    let query = supabase
-      .from('support_tickets')
-      .select('*, users(first_name, last_name, email, phone)')
-      .order('created_at', { ascending: false });
+    const safe = search
+      ? String(search).replace(/[%(),"]/g, '').trim().slice(0, 80)
+      : '';
 
-    if (status && TICKET_STATUSES.includes(String(status))) {
-      query = query.eq('status', String(status));
-    }
-    if (priority && TICKET_PRIORITIES.includes(String(priority))) {
-      query = query.eq('priority', String(priority));
-    }
-    if (search) {
-      const safe = String(search).replace(/[%(),"]/g, '').trim().slice(0, 80);
-      if (safe) {
-        query = query.or(`subject.ilike.%${safe}%,message.ilike.%${safe}%`);
-      }
-    }
-
-    const { data, error } = await query;
-    if (error) throw error;
+    const data = await supportRepo.listTickets({
+      status: status && TICKET_STATUSES.includes(String(status)) ? String(status) : undefined,
+      priority:
+        priority && TICKET_PRIORITIES.includes(String(priority)) ? String(priority) : undefined,
+      search: safe || undefined,
+    });
 
     res.json({
-      data: (data || []).map((t: any) => withTicketNumber(t)),
-      total: (data || []).length
+      data: data.map((t: any) => withTicketNumber(t)),
+      total: data.length
     });
   } catch (error) {
     next(error);
@@ -53,14 +43,8 @@ export const getTickets = async (req: Request, res: Response, next: NextFunction
 export const getUserTickets = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user?.id;
-    const { data, error } = await supabase
-      .from('support_tickets')
-      .select('*')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false });
-
-    if (error) throw error;
-    res.json({ data: (data || []).map((t: any) => withTicketNumber(t)) });
+    const data = await supportRepo.listForUser(userId as string);
+    res.json({ data: data.map((t: any) => withTicketNumber(t)) });
   } catch (error) {
     next(error);
   }
@@ -89,8 +73,7 @@ export const createTicket = async (req: Request, res: Response, next: NextFuncti
       ticketData.ticket_number = `TKT-${Date.now().toString(36).toUpperCase()}`;
     }
 
-    const { data, error } = await supabase.from('support_tickets').insert(ticketData).select().single();
-    if (error) throw error;
+    const data = await supportRepo.insertTicket(ticketData);
     res.status(201).json({ data: withTicketNumber(data) });
   } catch (error) {
     next(error);
@@ -106,13 +89,11 @@ export const updateTicketStatus = async (req: Request, res: Response, next: Next
       return res.status(400).json({ error: { message: 'Invalid ticket status.' } });
     }
 
-    const { data, error } = await supabase
-      .from('support_tickets')
-      .update({ status, updated_at: new Date().toISOString() })
-      .eq('id', id)
-      .select()
-      .single();
-    if (error) throw error;
+    const data = await supportRepo.updateTicket(id as string, {
+      status,
+      updated_at: new Date().toISOString(),
+    });
+    if (!data) throw new Error('Ticket not found');
     res.json({ data: withTicketNumber(data) });
   } catch (error) {
     next(error);
@@ -142,19 +123,14 @@ export const replyToTicket = async (req: Request, res: Response, next: NextFunct
       });
     }
 
-    const { data, error } = await supabase
-      .from('support_tickets')
-      .update({
-        reply: reply.slice(0, 5000),
-        // Admin replies resolve the ticket, matching the admin UI's confirmation copy.
-        status: 'resolved',
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', id)
-      .select()
-      .single();
+    const data = await supportRepo.updateTicket(id as string, {
+      reply: reply.slice(0, 5000),
+      // Admin replies resolve the ticket, matching the admin UI's confirmation copy.
+      status: 'resolved',
+      updated_at: new Date().toISOString()
+    });
 
-    if (error) throw error;
+    if (!data) throw new Error('Ticket not found');
     res.json({ data: withTicketNumber(data) });
   } catch (error) {
     next(error);

@@ -2,8 +2,8 @@ import { Request, Response, NextFunction } from 'express';
 import { payuService } from '../services/payuService';
 import { orderService } from '../services/orderService';
 import { postOrderConfirmed } from '../services/postOrderConfirmed';
-import { supabase } from '../database/supabase';
-import { hasColumn } from '../services/schemaGuard';
+import * as ordersRepo from '../database/repos/orders';
+import * as transactionsRepo from '../database/repos/transactions';
 import { config } from '../config/env';
 import { keepAlive } from '../utils/keepAlive';
 
@@ -11,7 +11,7 @@ import { keepAlive } from '../utils/keepAlive';
  * Public base URL of this backend for PayU surl/furl.
  * Prefers BACKEND_URL when set; otherwise derives from the request host.
  * In production the scheme is forced to https (never localhost) so PayU
- * posts the customer's browser back over a secure connection — otherwise
+ * posts the customer's browser back over a secure connection â€” otherwise
  * browsers warn "the information you're about to submit is not secure"
  * and the success redirect can break.
  */
@@ -65,7 +65,7 @@ export const initiatePayUPayment = async (req: Request, res: Response, next: Nex
     const order = await orderService.createOrder(checkoutPayload, req.user?.id);
     
     // Explicitly ensure status is 'pending_payment'
-    await supabase.from('orders').update({ status: 'pending_payment' }).eq('id', order.id);
+    await ordersRepo.updateOrderById(order.id, { status: 'pending_payment' });
 
     const firstItem = checkoutPayload.items?.[0]?.name || 'MeruVeda Order';
     const productInfo = checkoutPayload.items?.length > 1 
@@ -113,15 +113,11 @@ export const handlePayUCallback = async (req: Request, res: Response, next: Next
     const mihpayid = payload.mihpayid || payload.payuMoneyId || '';
 
     // Look up order by order_number
-    const { data: order, error: orderErr } = await supabase
-      .from('orders')
-      .select('*')
-      .eq('order_number', orderNumber)
-      .single();
+    const order = await ordersRepo.getOrderRowByNumber(orderNumber);
 
-    if (orderErr || !order) {
+    if (!order) {
       console.error('[PayU Callback] Order not found for txnid:', orderNumber);
-      // The laptop browser POSTs here and follows redirects — a raw 404 JSON
+      // The laptop browser POSTs here and follows redirects â€” a raw 404 JSON
       // page is the "unexpected page" customers reported. Always redirect to
       // the failed page so the browser lands somewhere meaningful.
       return res.redirect(
@@ -131,7 +127,7 @@ export const handlePayUCallback = async (req: Request, res: Response, next: Next
 
     // Idempotency: PayU may POST the browser callback more than once (retry /
     // double-submit). If the order is already confirmed paid, don't re-run
-    // side effects — just send the browser to the success page.
+    // side effects â€” just send the browser to the success page.
     if (status === 'success' && order.payment_status === 'paid' && order.status === 'processing') {
       console.log(`[PayU] duplicate success callback for already-paid order ${orderNumber}, redirecting to success page`);
       return res.redirect(`${storefrontBaseUrl(req)}/checkout/success/${order.id}`);
@@ -139,11 +135,7 @@ export const handlePayUCallback = async (req: Request, res: Response, next: Next
 
     const upsertTransaction = async (txStatus: 'success' | 'failed', detailedStatus: 'captured' | 'failed' | 'hash_mismatch' | 'amount_mismatch', gatewayRef?: string, extraMeta?: Record<string, unknown>) => {
       try {
-        const { data: existingTx } = await supabase
-          .from('transactions')
-          .select('id')
-          .eq('order_id', order.id)
-          .maybeSingle();
+        const existingTx = await transactionsRepo.findByOrderId(order.id);
 
         const txData = {
           user_id: order.user_id,
@@ -164,14 +156,9 @@ export const handlePayUCallback = async (req: Request, res: Response, next: Next
         };
 
         if (existingTx) {
-          await supabase
-            .from('transactions')
-            .update(txData)
-            .eq('id', existingTx.id);
+          await transactionsRepo.updateTransaction(existingTx.id, txData);
         } else {
-          await supabase
-            .from('transactions')
-            .insert(txData);
+          await transactionsRepo.insertTransaction(txData);
         }
       } catch (txErr) {
         console.error('[PayU Callback] Failed to write transaction log:', txErr);
@@ -180,10 +167,10 @@ export const handlePayUCallback = async (req: Request, res: Response, next: Next
 
     if (!isValidHash) {
       console.error('[PayU Callback] Hash mismatch! Potential spoofing attempt.');
-      await supabase.from('orders').update({ 
+      await ordersRepo.updateOrderById(order.id, {
         status: 'payment_failed',
         notes: `${order.notes || ''} [PayU Error: Hash Verification Failed]`.trim()
-      }).eq('id', order.id);
+      });
 
       await upsertTransaction('failed', 'hash_mismatch');
 
@@ -197,10 +184,10 @@ export const handlePayUCallback = async (req: Request, res: Response, next: Next
       const expected = Number(order.total);
       if (!Number.isFinite(charged) || charged.toFixed(2) !== expected.toFixed(2)) {
         console.error(`[PayU Callback] Amount mismatch for ${orderNumber}: charged=${payload.amount} expected=${order.total}`);
-        await supabase.from('orders').update({
+        await ordersRepo.updateOrderById(order.id, {
           status: 'payment_failed',
           notes: `${order.notes || ''} [PayU Error: Amount mismatch charged=${payload.amount} expected=${order.total}]`.trim()
-        }).eq('id', order.id);
+        });
 
         await upsertTransaction('failed', 'amount_mismatch');
 
@@ -208,21 +195,18 @@ export const handlePayUCallback = async (req: Request, res: Response, next: Next
       }
 
       // Mark as paid / processing. The PayU reference is recorded in the notes
-      // marker, which is the only place it is stored — the invoice reads it back
+      // marker, which is the only place it is stored â€” the invoice reads it back
       // from there rather than depending on a dedicated column.
-      await supabase
-        .from('orders')
-        .update({
-          status: 'processing',
-          payment_status: 'paid',
-          notes: `${order.notes || ''} [PayU mihpayid: ${mihpayid}]`.trim(),
-        })
-        .eq('id', order.id);
+      await ordersRepo.updateOrderById(order.id, {
+        status: 'processing',
+        payment_status: 'paid',
+        notes: `${order.notes || ''} [PayU mihpayid: ${mihpayid}]`.trim(),
+      });
 
       await upsertTransaction('success', 'captured');
 
       // Redirect the customer FIRST. Shiprocket push runs afterwards in the
-      // background — awaiting it here used to stall the browser for up to ~30s
+      // background â€” awaiting it here used to stall the browser for up to ~30s
       // and invited PayU callback retries.
       //
       // This callback does NOT issue an invoice. The invoice was already issued
@@ -234,17 +218,17 @@ export const handlePayUCallback = async (req: Request, res: Response, next: Next
       res.redirect(successUrl);
 
       // Post-confirmation background work: the Shiprocket push. The redirect
-      // above has already been sent, so this cannot delay the customer — but it
+      // above has already been sent, so this cannot delay the customer â€” but it
       // MUST be registered with waitUntil() via keepAlive(), otherwise Vercel
       // tears the invocation down when the response flushes.
       keepAlive(postOrderConfirmed(order.id, { source: 'payu_success', invoice: false }));
       return;
     } else {
       // Payment failed or cancelled
-      await supabase.from('orders').update({
+      await ordersRepo.updateOrderById(order.id, {
         status: 'payment_failed',
         notes: `${order.notes || ''} [PayU Status: ${status}, Error: ${payload.error_Message || 'User cancelled / transaction failed'}]`.trim()
-      }).eq('id', order.id);
+      });
 
       await upsertTransaction('failed', 'failed');
 
@@ -260,7 +244,7 @@ export const handlePayUCallback = async (req: Request, res: Response, next: Next
  * Verified payment-status endpoint (owner or admin only).
  * Powers laptop polling for QR/UPI payments completed on the customer's
  * phone: the laptop polls `GET /api/payu/status/:ref` until the server-side
- * verification (callback above) flips the order to paid — the browser never
+ * verification (callback above) flips the order to paid â€” the browser never
  * trusts redirect parameters alone. Accepts the internal order id or the
  * public order number (PayU txnid).
  */
@@ -273,16 +257,7 @@ export const getPaymentStatus = async (req: Request, res: Response, next: NextFu
     const safeRef = ref.replace(/[^A-Za-z0-9_-]/g, '');
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(safeRef);
 
-    let query = supabase
-      .from('orders')
-      .select('id, order_number, user_id, status, payment_status, payment_method, total')
-      .limit(1);
-    query = isUuid
-      ? query.or(`id.eq.${safeRef},order_number.eq.${safeRef}`)
-      : query.eq('order_number', safeRef);
-
-    const { data: order, error } = await query.maybeSingle();
-    if (error) throw error;
+    const order = await ordersRepo.findPaymentStatus(safeRef, isUuid);
     if (!order) {
       return res.status(404).json({ error: { message: 'Order not found' } });
     }
