@@ -65,3 +65,4 @@ backend/schema.ts
 
 # Data snapshots from scripts/backup-data.js contain customer PII - never commit
 backend/backups/
+backend/scripts/tmp/
