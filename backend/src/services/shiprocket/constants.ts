@@ -1,4 +1,12 @@
-export const SHIPROCKET_BASE_URL = process.env.SHIPROCKET_BASE_URL || 'https://apiv2.shiprocket.in/v1/external';
+// Env values copied from a dashboard can arrive wrapped in quote characters
+// ("https://..."), which produced an unparseable URL and failed every login on
+// Vercel while working locally. Strip quotes and whitespace defensively.
+export const SHIPROCKET_BASE_URL = (
+  process.env.SHIPROCKET_BASE_URL || 'https://apiv2.shiprocket.in/v1/external'
+)
+  .trim()
+  .replace(/^['"]+|['"]+$/g, '')
+  .replace(/\/+$/, '');
 
 export const ENDPOINTS = {
   LOGIN: '/auth/login',
