@@ -34,7 +34,7 @@ app.use(express.json({
 }));
 app.use(express.urlencoded({ extended: true }));
 
-import { supabase } from './database/supabase';
+import { query as dbQuery } from './database/db';
 
 // Root Route
 app.get('/', (req, res) => {
@@ -48,15 +48,7 @@ app.get('/', (req, res) => {
 // Health Check
 app.get('/api/health', async (req, res) => {
   try {
-    const { error } = await supabase.from('products').select('id', { head: true, count: 'exact' }).limit(1);
-    if (error) {
-      return res.status(500).json({
-        status: 'error',
-        database: 'disconnected',
-        error: error.message,
-        timestamp: new Date().toISOString()
-      });
-    }
+    await dbQuery('SELECT 1 AS ok');
     res.status(200).json({
       status: 'online',
       database: 'connected',
