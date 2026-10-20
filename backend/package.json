@@ -16,7 +16,7 @@
     "invoice:diff-reference": "node --require ts-node/register/transpile-only --require ./src/testEnvSetup.ts src/scripts/diffReferenceInvoice.ts",
     "db:migrate": "node scripts/migrate.js",
     "db:migrate:dry": "node scripts/migrate.js --dry-run",
-    "db:verify": "node scripts/db-verify.js",
+    "db:verify": "node scripts/db-verify.js", "db:role": "node scripts/create-app-role.js",
     "db:verify:all": "node scripts/verify-schema.js --all",
     "db:bundle": "node scripts/build-migration-bundle.js",
     "db:bundle:check": "node scripts/build-migration-bundle.js --check",

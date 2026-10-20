@@ -151,9 +151,12 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 }
 
 export function databaseUrl(): string {
+  // Runtime runs as the least-privilege role created by
+  // scripts/create-app-role.js (DATABASE_URL_APP); DATABASE_URL stays the
+  // owner connection as a fallback for local work before that script has run.
   // Vercel/Neon dashboards routinely copy a trailing newline or spaces into
   // the value; neon() rejects that with a message that embeds the whole URL.
-  return (process.env.DATABASE_URL || '').trim();
+  return (process.env.DATABASE_URL_APP || process.env.DATABASE_URL || '').trim();
 }
 
 /** Direct (non-pooled) URL — migrations/DDL only. */
