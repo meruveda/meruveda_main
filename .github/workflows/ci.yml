@@ -74,6 +74,15 @@ jobs:
       - name: Build admin
         run: npm run build -w meruveda-admin
 
+      # --- pre-deploy environment gate ----------------------------------------
+      # Every variable the app needs must be documented in the template, and
+      # no retired variable may still be listed. This is the check that stops
+      # a missing credential from reaching a deployment.
+      - name: Check the environment template
+        run: |
+          node backend/scripts/check-env-names.js
+          npm run env:parity -w backend -- --vercel || true
+
       # --- schema drift -------------------------------------------------------
       # Read-only comparison of the live Neon schema against
       # backend/database/neon/expected-schema.json. Skipped when the repository

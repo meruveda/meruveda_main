@@ -2,12 +2,12 @@ import { notFound } from 'next/navigation';
 import ProductDetailClient from './ProductDetailClient';
 import { API_BASE_URL } from '@/utils/apiUrl';
 
-export const revalidate = 60; // ISR: catalog pages refresh within a minute
+export const revalidate = 300; // ISR: public pages are revalidated every 5 minutes
 
 async function getProduct(id: string) {
   try {
     const res = await fetch(`${API_BASE_URL}/products/${id}`, {
-      next: { revalidate: 60 }
+      next: { revalidate: 300 }
     });
     if (!res.ok) {
       if (res.status === 404) return null;

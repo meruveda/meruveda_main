@@ -1,4 +1,4 @@
-export const revalidate = 60; // ISR: catalog pages refresh within a minute
+export const revalidate = 300; // ISR: public pages are revalidated every 5 minutes
 import MediaImage from "@/components/MediaImage";
 import Link from "next/link";
 import { Search, Leaf, ShieldCheck, Heart, Wind, Sparkles, Droplet, Star, ArrowRight } from "lucide-react";
@@ -16,7 +16,7 @@ export const metadata = {
 async function getBanners() {
   try {
     const res = await fetch(`${API_BASE_URL}/banners`, {
-      next: { revalidate: 60 }
+      next: { revalidate: 300 }
     });
     if (!res.ok) {
       throw new Error('Failed to fetch banners');
@@ -36,7 +36,7 @@ async function getBanners() {
 async function getFeaturedProducts() {
   try {
     const res = await fetch(`${API_BASE_URL}/products?isFeatured=true&limit=4`, {
-      next: { revalidate: 60 }
+      next: { revalidate: 300 }
     });
     if (!res.ok) {
       throw new Error('Failed to fetch featured products');
@@ -107,7 +107,7 @@ function getHomepageReviews() {
 async function getBlogPosts() {
   try {
     const res = await fetch(`${API_BASE_URL}/blogs?status=published`, {
-      next: { revalidate: 60 }
+      next: { revalidate: 300 }
     });
     if (!res.ok) {
       throw new Error('Failed to fetch blog posts');

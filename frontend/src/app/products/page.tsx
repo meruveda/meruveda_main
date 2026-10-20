@@ -1,4 +1,4 @@
-export const revalidate = 60; // ISR: catalog pages refresh within a minute
+export const revalidate = 300; // ISR: public pages are revalidated every 5 minutes
 import ProductGrid from "@/components/ProductGrid";
 import { API_BASE_URL } from "@/utils/apiUrl";
 
@@ -11,7 +11,7 @@ async function getProducts() {
   const targetUrl = `${API_BASE_URL}/products`;
   try {
     const res = await fetch(targetUrl, {
-      next: { revalidate: 60 }
+      next: { revalidate: 300 }
     });
     if (!res.ok) {
       // Log the full internal URL server-side only — never expose the

@@ -14,6 +14,7 @@ import { S3Client, HeadBucketCommand } from '@aws-sdk/client-s3';
 import { query } from '../database/db';
 import { config } from '../config/env';
 import { shiprocketAuth } from './shiprocket/auth.service';
+import { getOtpTemplate, getInvoiceTemplate } from './whatsappTemplateResolver';
 
 export type CheckStatus = 'ok' | 'warn' | 'fail' | 'skip';
 
@@ -268,6 +269,35 @@ async function checkWhatsapp(): Promise<HealthCheck> {
   );
 }
 
+/**
+ * The WhatsApp templates the pipeline would use right now.
+ *
+ * This is the check that answers "is the OTP live yet?" - it resolves the
+ * template from Meta exactly the way the send path does, so the health report
+ * and the actual behaviour can never disagree.
+ */
+async function checkTemplates(): Promise<HealthCheck> {
+  return timed(
+    'whatsapp-templates',
+    async () => {
+      const otp = await getOtpTemplate();
+      const invoice = await getInvoiceTemplate();
+      const otpLabel = otp.template
+        ? `${otp.template.name} (${otp.template.language}, ${otp.template.category})`
+        : `not available - ${otp.reason || 'no approved AUTHENTICATION template'}`;
+      const invoiceLabel = invoice.template
+        ? `${invoice.template.name} (${invoice.template.language}, ${invoice.template.category})`
+        : `not available - ${invoice.reason || 'no approved UTILITY template'}`;
+      const detail = `otp: ${otpLabel} | invoice: ${invoiceLabel}`;
+      // The invoice template is still under Meta review, so its absence is a
+      // warning. The OTP template being unavailable is a warning too - the
+      // store keeps taking orders either way.
+      return { status: 'warn', detail };
+    },
+    8000,
+  );
+}
+
 async function checkQueues(): Promise<HealthCheck> {
   return timed(
     'queues',
@@ -311,6 +341,7 @@ export async function runDeepHealth(): Promise<DeepHealthReport> {
     checkEnvNames(),
     checkShiprocket(),
     checkWhatsapp(),
+    checkTemplates(),
     checkQueues(),
   ]);
 

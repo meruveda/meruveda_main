@@ -5,6 +5,7 @@ import { requireAuth, requireAdmin } from '../middleware/auth';
 import { invoiceDispatchService } from '../services/invoiceDispatchService';
 import { retryFailedShiprocketPushes } from '../services/orderService';
 import { runSweep } from '../services/sweepService';
+import { runBackup, verifyLatestBackup } from '../services/backupService';
 import { timingSafeEqualStr } from '../utils/timingSafe';
 
 /**
@@ -85,8 +86,43 @@ async function sweepHandler(req: Request, res: Response, next: NextFunction) {
   }
 }
 
-router.get('/retry-failures', authorize, retryFailuresHandler);
-router.post('/retry-failures', authorize, retryFailuresHandler);
+/**
+ * GET|POST /api/jobs/backup
+ *
+ * Takes a database backup and writes it to the PRIVATE bucket under
+ * `backups/`. Authenticated with CRON_SECRET (or an admin session).
+ */
+router.get('/backup', authorize, backupHandler);
+router.post('/backup', authorize, backupHandler);
+
+/**
+ * GET|POST /api/jobs/backup/verify
+ *
+ * The rehearsal: proves the newest backup can actually be restored (it is a
+ * valid gzip, it parses, and it holds the tables a restore needs).
+ */
+router.get('/backup/verify', authorize, backupVerifyHandler);
+router.post('/backup/verify', authorize, backupVerifyHandler);
+
+async function backupHandler(_req: Request, res: Response, next: NextFunction) {
+  try {
+    const result = await runBackup();
+    res.status(result.ok ? 200 : 500).json({ data: result });
+  } catch (error) {
+    next(error);
+  }
+}
+
+async function backupVerifyHandler(_req: Request, res: Response, next: NextFunction) {
+  try {
+    const result = await verifyLatestBackup();
+    res.status(result.ok ? 200 : 500).json({ data: result });
+  } catch (error) {
+    next(error);
+  }
+}
+
+router.get('/retry-failures', authorize, retryFailuresHandler);router.post('/retry-failures', authorize, retryFailuresHandler);
 
 async function retryFailuresHandler(req: Request, res: Response, next: NextFunction) {
   try {

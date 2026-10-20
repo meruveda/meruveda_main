@@ -1,4 +1,4 @@
-export const revalidate = 60; // ISR: catalog pages refresh within a minute
+export const revalidate = 300; // ISR: public pages are revalidated every 5 minutes
 import Link from "next/link";
 import MediaImage from "@/components/MediaImage";
 import { ChevronRight, Calendar, Clock, ArrowLeft } from "lucide-react";
@@ -8,7 +8,7 @@ import { notFound } from "next/navigation";
 async function getPost(slug: string) {
   try {
     // Try fetching by slug first, then by ID as fallback
-    const res = await fetch(`${API_BASE_URL}/blogs/${slug}`, { next: { revalidate: 60 } });
+    const res = await fetch(`${API_BASE_URL}/blogs/${slug}`, { next: { revalidate: 300 } });
     if (!res.ok) return null;
     const json = await res.json();
     return json.data || json;

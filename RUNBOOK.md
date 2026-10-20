@@ -78,8 +78,19 @@ dashboard, otherwise object URLs are world-readable.
 
 ```bash
 npm run db:backup              # full JSON backup -> backend/backups/
-npm run db:restore <file>      # restore a backup (writes to Neon)
-npm run db:verify:backup <f>   # check a backup file's shape before restoring
+npm run db:backup:verify       # check the newest backup is restorable
+npm run db:restore             # restore the newest backup (writes to Neon)
+npm run db:restore:rehearse    # restore into a scratch schema - the rehearsal
+```
+
+The backup endpoint also writes the dump to the PRIVATE R2 bucket under
+`backups/` (the last 14 are kept):
+
+```bash
+curl -X POST -H "Authorization: Bearer $CRON_SECRET" \
+  https://meruvedawellness.com/api/jobs/backup
+curl -H "Authorization: Bearer $CRON_SECRET" \
+  https://meruvedawellness.com/api/jobs/backup/verify
 ```
 
 Before any risky migration, take a backup first. Backups are gitignored.
@@ -88,12 +99,17 @@ Before any risky migration, take a backup first. Backups are gitignored.
 
 | Schedule | Endpoint | Purpose |
 |---|---|---|
+| `*/15 * * * *` | `GET /api/jobs/sweep?limit=20` | the pipeline sweep: retry pushes, retry invoices, poll tracking |
 | `0 10 * * *` | `GET /api/jobs/review-requests` | review request messages |
 | `0 3 * * *` | `GET /api/orders/retry-shiprocket-failed?limit=20` | retry failed pushes |
 | `30 3 * * *` | `GET /api/jobs/retry-failures?limit=15` | general retry sweep |
 
 Auth: `Authorization: Bearer $CRON_SECRET` (Vercel sends it automatically once
 `CRON_SECRET` is set). Manual run: `curl -H "Authorization: Bearer $CRON_SECRET" <url>`.
+
+The sweep also runs on its own: after every new order, when an admin opens the
+orders list or an order, and when a customer opens their tracking page. It is
+throttled to once a minute, so none of those add real cost.
 
 ## Rate limits
 
