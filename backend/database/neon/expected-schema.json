@@ -185,6 +185,7 @@
         "discount": "numeric",
         "total": "numeric",
         "shipping_address": "jsonb",
+        "delivery_phone": "text",
         "billing_address": "jsonb",
         "payment_method": "text",
         "notes": "text",

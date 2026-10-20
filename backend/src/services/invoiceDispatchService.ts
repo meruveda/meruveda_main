@@ -73,7 +73,7 @@ const WHATSAPP_PURPOSE = 'invoice_customer';
 const ADMIN_PURPOSE = 'invoice_admin';
 
 function customerPhone(order: any): string {
-  return order?.shipping_address?.phone || order?.billing_address?.phone || '';
+  return order?.delivery_phone || order?.shipping_address?.phone || order?.billing_address?.phone || '';
 }
 function customerEmail(order: any): string {
   return order?.users?.email || order?.user_email || '';

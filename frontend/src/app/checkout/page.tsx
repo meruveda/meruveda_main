@@ -47,6 +47,8 @@ const INDIAN_STATES = STATES;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 const PIN_RE = /^\d{6}$/;
 
+import { COUNTRIES, DEFAULT_COUNTRY, Country, nationalDigits, fullPhoneDigits, isValidNational } from "@/constants/countries";
+
 // Records a completed OTP verification in this browser so a refresh (or an
 // already-signed-in session) is not mistaken for "never verified". This is the
 // same trust level as React state — it only ever holds a code the backend
@@ -55,12 +57,66 @@ const OTP_VERIFIED_KEY = "meruveda_otp_verified_phone";
 
 const ADDRESS_TYPES = ["Home", "Work", "Other"] as const;
 
-/** Digits only, with a leading country/area code removed so 91… and 0… match. */
-function normalizePhoneDigits(value: string): string {
-  let d = (value || "").replace(/\D/g, "");
-  if (d.length === 12 && d.startsWith("91")) d = d.slice(2);
-  else if (d.length === 11 && d.startsWith("0")) d = d.slice(1);
-  return d;
+/**
+ * Country-code dropdown + phone input for the delivery contact.
+ *
+ * India is the default (this is an Indian GST store). The dial-code selector
+ * lets an NRI buyer enter a non-Indian number; the full digits-only phone
+ * (dial + national) is what gets stored on the order as `delivery_phone` and
+ * inside `shipping_address.phone`, so the backend and Shiprocket both see one
+ * canonical value. Non-Indian numbers are accepted at checkout but Shiprocket
+ * push will skip fulfilment for them (recorded as a failed push the admin can
+ * action) — that is intentional, not a bug.
+ */
+function CountryPhoneField({
+  id,
+  country,
+  onCountryChange,
+  value,
+  onValueChange,
+  disabled,
+  invalid,
+}: {
+  id: string;
+  country: Country;
+  onCountryChange: (c: Country) => void;
+  value: string;
+  onValueChange: (v: string) => void;
+  disabled?: boolean;
+  invalid?: boolean;
+}) {
+  const display = country.format ? country.format(nationalDigits(value, country)) : nationalDigits(value, country);
+  return (
+    <div className="flex gap-2">
+      <select
+        aria-label="Country code"
+        value={country.iso}
+        disabled={disabled}
+        onChange={(e) => onCountryChange(COUNTRIES.find((c) => c.iso === e.target.value) || DEFAULT_COUNTRY)}
+        className="w-28 shrink-0 rounded-xl border border-gray-300 bg-white px-2 py-2.5 text-sm text-gray-800 focus:border-gold focus:outline-none disabled:bg-gray-100"
+      >
+        {COUNTRIES.map((c) => (
+          <option key={c.iso} value={c.iso}>
+            {c.name} {c.dial}
+          </option>
+        ))}
+      </select>
+      <input
+        id={id}
+        type="tel"
+        required
+        inputMode="tel"
+        autoComplete="tel-national"
+        value={display}
+        disabled={disabled}
+        onChange={(e) => onValueChange(nationalDigits(e.target.value, country))}
+        placeholder={country.iso === "in" ? "98765 43210" : `national number (${country.digits} digits)`}
+        className={`flex-1 min-w-0 rounded-xl border px-4 py-2.5 text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gold/40 focus:border-gold disabled:bg-gray-100 disabled:text-gray-500 ${
+          invalid ? "border-red-400" : "border-gray-300"
+        }`}
+      />
+    </div>
+  );
 }
 
 type AddressFormState = {
@@ -310,6 +366,7 @@ export default function CheckoutPage() {
   // ---- Contact + OTP (step 1, shown on EVERY order) ----
   const [contactName, setContactName] = useState("");
   const [mobile, setMobile] = useState("");
+  const [phoneCountry, setPhoneCountry] = useState<Country>(DEFAULT_COUNTRY);
   const [otpSent, setOtpSent] = useState(false);
   const [otpCode, setOtpCode] = useState("");
   const [otpVerified, setOtpVerified] = useState(false);
@@ -479,7 +536,7 @@ export default function CheckoutPage() {
     if (otpVerified) return;
     try {
       const verified = localStorage.getItem(OTP_VERIFIED_KEY);
-      if (verified && mobile && verified === normalizePhoneDigits(mobile)) {
+      if (verified && mobile && verified === fullPhoneDigits(mobile, phoneCountry)) {
         setOtpVerified(true);
         setOtpSent(false);
         setOtpError("");
@@ -487,7 +544,7 @@ export default function CheckoutPage() {
     } catch {
       /* storage unavailable */
     }
-  }, [otpVerified, mobile]);
+  }, [otpVerified, mobile, phoneCountry]);
 
   const normalizeMobile = (value: string) => value.replace(/[^\d+]/g, "");
 
@@ -517,9 +574,6 @@ export default function CheckoutPage() {
     }
   };
 
-  /** 10-digit Indian mobile check on the normalized digits. */
-  const isValidIndianMobile = (value: string): boolean => /^[6-9]\d{9}$/.test(normalizePhoneDigits(value));
-
   // Lets a verified customer unlock the number field (fields are locked on success).
   const handleChangeNumber = () => {
     resetVerification("Update your number and send a new OTP.");
@@ -540,9 +594,13 @@ export default function CheckoutPage() {
     setOtpError("");
     setOtpMessage("");
 
-    const digits = mobile.replace(/\D/g, "");
-    if (digits.length < 10) {
-      setOtpError("Please enter a valid 10-digit mobile number.");
+    const digits = nationalDigits(mobile, phoneCountry);
+    if (!isValidNational(digits, phoneCountry)) {
+      setOtpError(
+        phoneCountry.iso === "in"
+          ? "Please enter a valid 10-digit Indian mobile number."
+          : `Please enter a valid ${phoneCountry.digits}-digit ${phoneCountry.name} number.`
+      );
       return;
     }
     if (!contactName.trim()) {
@@ -552,7 +610,7 @@ export default function CheckoutPage() {
 
     setIsSendingOtp(true);
     try {
-      const res = await sendOtp(mobile);
+      const res = await sendOtp(fullPhoneDigits(mobile, phoneCountry));
       setOtpSent(true);
       setOtpResendIn(OTP_RESEND_SECONDS);
       setOtpMessage(
@@ -573,7 +631,7 @@ export default function CheckoutPage() {
     setOtpMessage("");
     setIsSendingOtp(true);
     try {
-      const res = await resendOtp(mobile);
+      const res = await resendOtp(fullPhoneDigits(mobile, phoneCountry));
       setOtpResendIn(OTP_RESEND_SECONDS);
       setOtpMessage(
         res?.devOtp
@@ -596,9 +654,10 @@ export default function CheckoutPage() {
     setIsVerifyingOtp(true);
     try {
       // Registers an unknown number, logs an existing one in — every order.
-      await verifyOtp(mobile, otpCode, contactName);
+      const full = fullPhoneDigits(mobile, phoneCountry);
+      await verifyOtp(full, otpCode, contactName);
       try {
-        localStorage.setItem(OTP_VERIFIED_KEY, normalizePhoneDigits(mobile));
+        localStorage.setItem(OTP_VERIFIED_KEY, full);
       } catch {
         /* storage unavailable */
       }
@@ -631,9 +690,13 @@ export default function CheckoutPage() {
    * and accepted by the backend.
    */
   const handleVerifyMobileClick = async () => {
-    const digits = mobile.replace(/\D/g, "");
-    if (digits.length < 10) {
-      setOtpError("Please enter a valid 10-digit mobile number.");
+    const digits = nationalDigits(mobile, phoneCountry);
+    if (!isValidNational(digits, phoneCountry)) {
+      setOtpError(
+        phoneCountry.iso === "in"
+          ? "Please enter a valid 10-digit Indian mobile number."
+          : `Please enter a valid ${phoneCountry.digits}-digit ${phoneCountry.name} number.`
+      );
     } else if (!contactName.trim()) {
       setOtpError("Please enter your name.");
     } else if (!otpSent) {
@@ -976,12 +1039,14 @@ export default function CheckoutPage() {
       city: selectedAddr.city,
       state: selectedAddr.state,
       zipCode: selectedAddr.zipCode,
-      phone: selectedAddr.phone,
+      // Same canonical digits as delivery_phone so the jsonb copy stays in
+      // sync with the column (the backend also normalises this on write).
+      phone: fullPhoneDigits(mobile, phoneCountry),
       addressLine1: selectedAddr.addressLine1 || selectedAddr.addressLine || "",
       addressLine2: selectedAddr.addressLine2 || "",
       landmark: selectedAddr.landmark || "",
       pincode: selectedAddr.pincode || selectedAddr.zipCode || "",
-      country: selectedAddr.country || "India",
+      country: selectedAddr.country || phoneCountry.name,
     });
 
     const baseCheckoutPayload = {
@@ -997,6 +1062,11 @@ export default function CheckoutPage() {
       tax: gstAmount,
       total: finalTotal,
       notes: orderNotes,
+      // Canonical delivery phone (dial code + national digits, e.g.
+      // 919876543210). The backend copies this into orders.delivery_phone and
+      // into shipping_address.phone so Shiprocket, tracking and WhatsApp
+      // invoicing all read one consistent value.
+      delivery_phone: fullPhoneDigits(mobile, phoneCountry),
       shipping_address: buildAddressPayload(),
       billing_address: buildAddressPayload()
     };
@@ -1089,15 +1159,17 @@ export default function CheckoutPage() {
                 <div>
                   <label className={labelClass}>Mobile Number (WhatsApp)</label>
                   <div className="flex gap-2">
-                    <input
+                    <CountryPhoneField
                       id="checkout-mobile"
-                      type="tel"
-                      required
-                      inputMode="numeric"
+                      country={phoneCountry}
+                      onCountryChange={(c) => {
+                        setPhoneCountry(c);
+                        resetVerification("Country changed - please verify the number again.");
+                      }}
                       value={mobile}
-                      onChange={(e) => handleMobileChange(e.target.value)}
-                      className={`${inputClass} ${mobileError ? "border-red-400" : ""}`}
-                      placeholder="98765 43210"
+                      onValueChange={handleMobileChange}
+                      disabled={otpVerified}
+                      invalid={!!mobileError}
                     />
                     {/* WhatsApp OTP entry point. This button replaced "Sign up":
                         there is no separate login or signup on this page. The

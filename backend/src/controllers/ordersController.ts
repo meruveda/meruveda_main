@@ -106,7 +106,7 @@ export const trackOrder = async (req: Request, res: Response, next: NextFunction
       return res.status(404).json({ error: { message: 'No order found for these details.' } });
     }
 
-    const orderPhone = normalizePhone(order.shipping_address?.phone || '');
+    const orderPhone = normalizePhone(order.delivery_phone || order.shipping_address?.phone || '');
     if (!orderPhone || orderPhone !== phone) {
       // Same message as "not found" so the endpoint cannot be used to enumerate orders.
       return res.status(404).json({ error: { message: 'No order found for these details.' } });

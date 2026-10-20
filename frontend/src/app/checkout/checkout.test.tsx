@@ -143,7 +143,7 @@ describe("checkout — identity is WhatsApp OTP, never a login form", () => {
     expect(otp).toBeTruthy();
     expect((otp as HTMLInputElement).maxLength).toBe(6);
     expect(screen.getByRole("button", { name: /Verify OTP/i })).toBeTruthy();
-    expect(authState.sendOtp).toHaveBeenCalledWith("9876543210");
+    expect(authState.sendOtp).toHaveBeenCalledWith("919876543210");
   });
 
   it("only enables Verify OTP once exactly six digits are typed", async () => {
@@ -174,7 +174,7 @@ describe("checkout — identity is WhatsApp OTP, never a login form", () => {
     fireEvent.click(screen.getByRole("button", { name: /Verify OTP/i }));
 
     await waitFor(() => screen.getByText(/Verified/i));
-    expect(authState.verifyOtp).toHaveBeenCalledWith("9876543210", "123456", "Atharva Bhargava");
+    expect(authState.verifyOtp).toHaveBeenCalledWith("919876543210", "123456", "Atharva Bhargava");
 
     // The OTP block and the Send button are gone once verified.
     expect(screen.queryByPlaceholderText("Enter 6-digit OTP")).toBeNull();

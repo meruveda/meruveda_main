@@ -13,6 +13,7 @@ import { ShiprocketOrderPayload } from './shiprocket/types';
 import { hasColumn } from './schemaGuard';
 import { config } from '../config/env';
 import { computeOrderTotals, isRajasthan, round2 } from '@meruveda/shared';
+import { normalizePhone } from './whatsappService';
 
 /**
  * Re-exported so existing callers keep working; the single implementation now
@@ -165,6 +166,31 @@ export const orderService = {
       orderData.billing_address = orderData.shipping_address;
     }
     const billingAddress = orderData.billing_address;
+
+    // delivery_phone: the dedicated column (migration 003) that Shiprocket push
+    // and tracking prefer over shipping_address->>'phone'. Populated from an
+    // explicit payload field, else derived from the shipping/billing address.
+    // Normalised to digits-only with country code (e.g. 919876543210) so
+    // Shiprocket's 10-digit national check and WhatsApp's E.164-ish check both
+    // work off the same value.
+    {
+      const rawPhone =
+        orderData.delivery_phone ||
+        orderData.shipping_address?.phone ||
+        orderData.billing_address?.phone ||
+        '';
+      // Reuse the WhatsApp normaliser: 10-digit Indian gets 91 prepended,
+      // 12-digit starting 91 passes through, anything else is digits-only as-is.
+      orderData.delivery_phone = normalizePhone(rawPhone);
+      // Keep the jsonb address in sync so old readers (track page, invoice
+      // buyer phone) see the same canonical digits.
+      if (orderData.shipping_address && rawPhone) {
+        orderData.shipping_address = { ...orderData.shipping_address, phone: orderData.delivery_phone };
+      }
+      if (orderData.billing_address && rawPhone) {
+        orderData.billing_address = { ...orderData.billing_address, phone: orderData.delivery_phone };
+      }
+    }
 
     // A tax invoice needs a usable state to pick CGST+SGST vs IGST and a 6-digit
     // pincode for the courier. Checkout already enforces both, but orders can
@@ -759,17 +785,20 @@ async function executeShiprocketPush(order: any) {
       `Cannot push to Shiprocket: shipping ${missingAddress.join(', ')} missing for order ${order.order_number}.`
     );
   }
-  const shippingPhone10 = normalizePhone10(shipping.phone);
+  // delivery_phone (migration 003) is the canonical column; fall back to the
+  // jsonb address for orders created before the column existed.
+  const deliveryPhoneRaw = order.delivery_phone || shipping.phone;
+  const shippingPhone10 = normalizePhone10(deliveryPhoneRaw);
   if (!/^[6-9]\d{9}$/.test(shippingPhone10)) {
     // Shiprocket only accepts Indian mobile numbers. A non-Indian delivery
     // contact must never block the order — it is recorded as a failed push so
     // the admin can follow up, while the order/payment flow stays untouched.
-    const rawDigits = String(shipping.phone || '').replace(/\D/g, '');
+    const rawDigits = String(deliveryPhoneRaw || '').replace(/\D/g, '');
     const looksNonIndian = rawDigits.length > 10;
     throw new Error(
       looksNonIndian
-        ? `Non-Indian phone number: shipping phone "${shipping.phone}" is not a 10-digit Indian mobile (order ${order.order_number}).`
-        : `Cannot push to Shiprocket: shipping phone "${shipping.phone || '(empty)'}" is not a valid 10-digit Indian mobile number for order ${order.order_number}.`
+        ? `Non-Indian phone number: shipping phone "${deliveryPhoneRaw}" is not a 10-digit Indian mobile (order ${order.order_number}).`
+        : `Cannot push to Shiprocket: shipping phone "${deliveryPhoneRaw || '(empty)'}" is not a valid 10-digit Indian mobile number for order ${order.order_number}.`
     );
   }
   if (!/^\d{6}$/.test(String(shipping.zipCode || '').trim())) {
@@ -804,7 +833,7 @@ async function executeShiprocketPush(order: any) {
     shipping_country: 'India',
     shipping_state: shipping.state || '',
     shipping_email: order.user_email || 'customer@meruveda.com',
-    shipping_phone: normalizePhone10(shipping.phone),
+    shipping_phone: shippingPhone10,
     order_items: shiprocketItems,
     payment_method: isCOD ? 'COD' : 'Prepaid',
     shipping_charges: Number(order.shipping_fee ?? 0),

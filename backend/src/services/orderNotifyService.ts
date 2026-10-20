@@ -30,7 +30,7 @@ const STATUS_TEMPLATES: Record<string, { template: string; params: (o: any) => s
 };
 
 function customerPhone(order: any): string {
-  return order?.shipping_address?.phone || order?.billing_address?.phone || '';
+  return order?.delivery_phone || order?.shipping_address?.phone || order?.billing_address?.phone || '';
 }
 
 async function loadOrder(orderId: string) {
