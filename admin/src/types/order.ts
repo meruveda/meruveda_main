@@ -1,12 +1,46 @@
 export type OrderStatus =
   | 'pending'
-  | 'confirmed'
-  | 'packed'
+  | 'processing'
   | 'shipped'
   | 'delivered'
   | 'cancelled'
   | 'returned'
-  | 'refunded'
+
+/** The colour family a state label is drawn in. */
+export type AutomationTone = 'ok' | 'warn' | 'error' | 'muted' | 'info'
+
+/**
+ * The state of every pipeline column for one order.
+ *
+ * The backend owns these labels (see backend/src/services/shiprocketAutomation.ts)
+ * so the admin list, the admin detail and the customer tracking page always
+ * agree on what an order's state is.
+ */
+export interface OrderAutomation {
+  fulfilment: { label: string; tone: AutomationTone }
+  payment: { label: string; tone: AutomationTone }
+  shiprocket: {
+    label: string
+    tone: AutomationTone
+    attempt?: number
+    maxAttempts?: number
+    nextAttemptAt?: string | null
+    skipped?: boolean
+    reason?: string
+  }
+  invoice: {
+    label: string
+    tone: AutomationTone
+    invoiceNumber?: string | null
+    sentAt?: string | null
+    error?: string | null
+  }
+  /** True when the customer never proved ownership of the delivery phone. */
+  phoneUnverified: boolean
+  phoneUnverifiedLabel: string
+  /** True for orders that predate the automation and are never auto-processed. */
+  preAutomation: boolean
+}
 
 export interface OrderItem {
   id: string
@@ -86,6 +120,8 @@ export interface Order {
   shiprocketPushStatus?: string | null
   shiprocketPushError?: string | null
   shiprocketPushedAt?: string | null
+  /** Server-computed labels for every pipeline column. */
+  automation?: OrderAutomation
   orderTrackingHistory?: Array<{ id: string; activity?: string; location?: string; created_at?: string }>
   createdAt: string
   updatedAt: string

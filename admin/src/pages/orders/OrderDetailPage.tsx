@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Truck, FileText, User, ShoppingBag, Trash2 } from 'lucide-react'
-import { orderService } from '../../services/orderService'
+import { ArrowLeft, Truck, FileText, User, ShoppingBag, Trash2, Clock } from 'lucide-react'
+import { orderService, toneClass } from '../../services/orderService'
 import { Order, OrderStatus } from '../../types'
 import { formatCurrency, formatDateTime } from '@meruveda/shared'
 import { StatusBadge } from '../../components/ui/StatusBadge'
@@ -27,6 +27,7 @@ export const OrderDetailPage: React.FC = () => {
   const [isCancellingOrder, setIsCancellingOrder] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
   const [isPushingShiprocket, setIsPushingShiprocket] = useState(false)
+  const [isResendingInvoice, setIsResendingInvoice] = useState(false)
   // Last push failure, kept visible so a failed auto-push is diagnosable and
   // retryable instead of failing silently (backend logs carry the details).
   const [shiprocketError, setShiprocketError] = useState<string | null>(null)
@@ -45,6 +46,26 @@ export const OrderDetailPage: React.FC = () => {
       toast.error(message);
     } finally {
       setIsPushingShiprocket(false);
+    }
+  };
+
+  /**
+   * Resend a FAILED invoice.
+   *
+   * The invoice document itself is never re-rendered — the same PDF that was
+   * generated is re-delivered, so the GST series stays sound.
+   */
+  const handleResendInvoice = async () => {
+    if (!order) return;
+    setIsResendingInvoice(true);
+    try {
+      await orderService.resendInvoice(order.id);
+      toast.success('Invoice queued for delivery');
+      fetchOrderDetail();
+    } catch (err: any) {
+      toast.error(err.response?.data?.error?.message || err.message || 'Failed to resend the invoice');
+    } finally {
+      setIsResendingInvoice(false);
     }
   };
 
@@ -389,7 +410,14 @@ export const OrderDetailPage: React.FC = () => {
             <div className="space-y-4">
               <div className="flex justify-between items-center">
                 <span className="text-slate-500 text-sm">Current Status</span>
-                <StatusBadge status={order.status} />
+                <span
+                  title="Fulfilment state"
+                  className={`inline-flex items-center px-2.5 py-0.5 rounded-full border text-xs font-semibold ${
+                    toneClass(order.automation?.fulfilment?.tone)
+                  }`}
+                >
+                  {order.automation?.fulfilment?.label || order.status}
+                </span>
               </div>
 
               <div className="space-y-2">
@@ -400,14 +428,61 @@ export const OrderDetailPage: React.FC = () => {
                   className="input w-full py-2 pr-8 text-sm font-semibold rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 capitalize"
                 >
                   <option value="pending">Pending</option>
-                  <option value="confirmed">Confirmed</option>
                   <option value="processing">Processing</option>
                   <option value="shipped">Shipped</option>
                   <option value="delivered">Delivered</option>
                   <option value="cancelled">Cancelled</option>
+                  <option value="returned">Returned</option>
                 </select>
               </div>
             </div>
+          </div>
+
+          {/* Order timeline: every step of the pipeline in the order it
+              happened. Failures are red, so a broken order is obvious. */}
+          <div className="card p-6 space-y-4">
+            <h3 className="section-title flex items-center gap-1.5 font-bold">
+              <Clock className="h-5 w-5 text-slate-400" /> Order Timeline
+            </h3>
+            {order.orderTrackingHistory && order.orderTrackingHistory.length > 0 ? (
+              <ol className="space-y-3">
+                {order.orderTrackingHistory.map((event: any, index: number) => {
+                  const activity = String(event.activity || event.tracking_status || '');
+                  const isFailure = /fail|error|skip|cancel/i.test(activity);
+                  return (
+                    <li key={event.id || index} className="flex gap-3">
+                      <div className="flex flex-col items-center">
+                        <span
+                          className={`mt-1 h-2.5 w-2.5 rounded-full shrink-0 ${
+                            isFailure ? 'bg-red-500' : 'bg-emerald-500'
+                          }`}
+                        />
+                        {index < (order.orderTrackingHistory?.length || 0) - 1 && (
+                          <span className="w-px flex-1 bg-slate-200 dark:bg-slate-700 my-1" />
+                        )}
+                      </div>
+                      <div className="pb-1 min-w-0">
+                        <p
+                          className={`text-sm font-semibold ${
+                            isFailure ? 'text-red-600 dark:text-red-400' : 'text-slate-800 dark:text-slate-200'
+                          }`}
+                        >
+                          {activity}
+                        </p>
+                        <p className="text-[11px] text-slate-400">
+                          {formatDateTime(event.created_at)}
+                          {event.location ? ` · ${event.location}` : ''}
+                        </p>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ol>
+            ) : (
+              <p className="text-xs text-slate-400">
+                No timeline events recorded for this order yet.
+              </p>
+            )}
           </div>
 
           {/* Invoice card — READ ONLY.
@@ -428,13 +503,16 @@ export const OrderDetailPage: React.FC = () => {
             </h3>
             <div className="space-y-3 text-sm">
               {(() => {
+                // The backend owns the label; the admin only colours it.
+                const automation = order.automation?.invoice
                 const status = order.invoiceStatus || 'pending'
                 const styles: Record<string, string> = {
                   sent: 'bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-400 dark:border-green-900/50',
                   failed: 'bg-red-50 text-red-700 border-red-200 dark:bg-red-950/30 dark:text-red-400 dark:border-red-900/50',
                   pending: 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-400 dark:border-amber-900/50',
                 }
-                const label = status === 'sent' ? 'Sent' : status === 'failed' ? 'Failed' : 'Pending'
+                const label = automation?.label
+                  || (status === 'sent' ? 'Sent' : status === 'failed' ? 'Failed' : 'Pending')
                 const whatsapp = order.invoiceWhatsappStatus
                 const whatsappStyles: Record<string, string> = {
                   sent: 'text-green-600',
@@ -448,6 +526,7 @@ export const OrderDetailPage: React.FC = () => {
                   failed: 'Failed',
                   pending: 'Pending',
                   not_configured: 'Not configured',
+                  awaiting_template: 'Awaiting template approval',
                 }
 
                 return (
@@ -456,7 +535,7 @@ export const OrderDetailPage: React.FC = () => {
                       <span className="text-slate-500">Status</span>
                       <span
                         className={`inline-flex items-center px-2 py-0.5 rounded-lg border text-[11px] font-semibold ${
-                          styles[status] || styles.pending
+                          automation ? toneClass(automation.tone) : (styles[status] || styles.pending)
                         }`}
                       >
                         {label}
@@ -524,8 +603,10 @@ export const OrderDetailPage: React.FC = () => {
 
                     {/* Same stored file the customer and WhatsApp received. A link, not a
                         button: fetching it is a read, and the invoice is never
-                        re-rendered because a link was followed. */}
-                    {status === 'sent' && order.invoiceUrl && (
+                        re-rendered because a link was followed. It is available as
+                        soon as the invoice exists — the customer can download it
+                        even while the WhatsApp template is still pending. */}
+                    {(order.invoiceNumber || order.invoiceUrl) && (
                       <div className="text-xs pt-1">
                         <span className="text-slate-500">PDF: </span>
                         <button
@@ -533,10 +614,27 @@ export const OrderDetailPage: React.FC = () => {
                           onClick={() => handleViewInvoice(order.id)}
                           className="text-deep-purple hover:underline font-semibold"
                         >
-                          View invoice
+                          Download invoice
                         </button>
-                        <span className="font-mono text-slate-500 break-all"> {order.invoiceUrl}</span>
+                        {order.invoiceUrl && (
+                          <span className="font-mono text-slate-500 break-all"> {order.invoiceUrl}</span>
+                        )}
                       </div>
+                    )}
+
+                    {/* Resend is offered ONLY when the invoice actually failed.
+                        A successful invoice is never re-sent (one tax document
+                        per order), and a pending one needs no nudge — the sweep
+                        sends it the moment the template is approved. */}
+                    {status === 'failed' && (
+                      <button
+                        type="button"
+                        onClick={handleResendInvoice}
+                        disabled={isResendingInvoice}
+                        className="btn-secondary text-xs py-2 justify-center w-full"
+                      >
+                        {isResendingInvoice ? 'Sending…' : 'Resend invoice'}
+                      </button>
                     )}
                   </>
                 )
@@ -574,6 +672,17 @@ export const OrderDetailPage: React.FC = () => {
               <div className="flex justify-between items-center text-xs">
                 <span className="text-slate-500">Push status</span>
                 {(() => {
+                  const auto = order.automation?.shiprocket
+                  if (auto?.label) {
+                    return (
+                      <span
+                        title={auto.nextAttemptAt ? `Next automatic retry: ${auto.nextAttemptAt}` : auto.reason}
+                        className={`inline-flex items-center px-2 py-0.5 rounded-lg border text-[11px] font-semibold ${toneClass(auto.tone)}`}
+                      >
+                        {auto.label}
+                      </span>
+                    )
+                  }
                   const failed = !!(order.shiprocketPushError || order.shiprocketPushStatus === 'failed')
                   return (
                     <span
@@ -583,28 +692,33 @@ export const OrderDetailPage: React.FC = () => {
                           : 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-400 dark:border-amber-900/50'
                       }`}
                     >
-                      {failed ? 'Failed' : order.shiprocketPushStatus === 'in_progress' ? 'In progress' : 'Pending'}
+                      {failed ? 'Failed' : order.shiprocketPushStatus === 'in_progress' ? 'In progress' : 'Queued'}
                     </span>
                   )
                 })()}
               </div>
-              <p className="text-xs text-slate-500">This order has not been pushed to Shiprocket yet.</p>
+              <p className="text-xs text-slate-500">
+                {order.automation?.shiprocket?.tone === 'muted'
+                  ? 'This order is not pushed to Shiprocket automatically.'
+                  : 'This order has not been pushed to Shiprocket yet.'}
+              </p>
               {(shiprocketError || order.shiprocketPushError) && (
                 <p className="text-xs text-red-600 bg-red-50 dark:bg-red-950/20 border border-red-100 dark:border-red-900 rounded-lg p-3">
                   Shiprocket error: {shiprocketError || order.shiprocketPushError}
                 </p>
               )}
-              <button
-                disabled={isPushingShiprocket || order.shiprocketPushStatus === 'in_progress'}
-                className="btn-primary text-xs py-2 justify-center w-full"
-                onClick={handlePushToShiprocket}
-              >
-                {isPushingShiprocket
-                  ? 'Pushing...'
-                  : order.shiprocketPushStatus === 'failed' || order.shiprocketPushError
-                    ? 'Retry push to Shiprocket'
-                    : 'Push to Shiprocket'}
-              </button>
+              {/* The push is automatic. A manual trigger is only offered when the
+                  automatic push actually failed, and it is deliberately small —
+                  the normal path never shows it. */}
+              {(order.automation?.shiprocket?.tone === 'error' || order.shiprocketPushError) && (
+                <button
+                  disabled={isPushingShiprocket || order.shiprocketPushStatus === 'in_progress'}
+                  className="btn-secondary text-xs py-1.5 px-3 justify-center w-fit"
+                  onClick={handlePushToShiprocket}
+                >
+                  {isPushingShiprocket ? 'Pushing…' : 'Retry now'}
+                </button>
+              )}
             </div>
           )}
 

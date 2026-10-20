@@ -1,24 +1,32 @@
 import React, { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { ShoppingCart, Search, Eye, Filter, RefreshCw, ChevronLeft, ChevronRight, Download, Truck } from 'lucide-react'
-import { orderService, deriveShiprocketPushStatus, type ShiprocketPushBadge } from '../../services/orderService'
+import { ShoppingCart, Search, Eye, Filter, RefreshCw, ChevronLeft, ChevronRight, Download, Truck, AlertTriangle } from 'lucide-react'
+import { orderService, toneClass } from '../../services/orderService'
 import { shiprocketService } from '../../services/shiprocketService'
 import { Order, OrderStatus } from '../../types'
 import { formatCurrency, formatDateTime } from '@meruveda/shared'
 import { StatusBadge } from '../../components/ui/StatusBadge'
 import toast from 'react-hot-toast'
 
-const INVOICE_BADGE: Record<'sent' | 'failed' | 'pending', { label: string; className: string }> = {
-  sent: { label: 'Sent', className: 'bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-400 dark:border-green-900/50' },
-  failed: { label: 'Failed', className: 'bg-red-50 text-red-700 border-red-200 dark:bg-red-950/30 dark:text-red-400 dark:border-red-900/50' },
-  pending: { label: 'Pending', className: 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-400 dark:border-amber-900/50' },
-}
-
-const PUSH_BADGE: Record<ShiprocketPushBadge, { label: string; className: string }> = {
-  pushed: { label: 'Pushed', className: 'bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-400 dark:border-green-900/50' },
-  pushing: { label: 'Pushing', className: 'bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-400 dark:border-blue-900/50' },
-  failed: { label: 'Failed', className: 'bg-red-50 text-red-700 border-red-200 dark:bg-red-950/30 dark:text-red-400 dark:border-red-900/50' },
-  pending: { label: 'Not pushed', className: 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-400 dark:border-amber-900/50' },
+/**
+ * The state labels come from the backend (the `automation` block), so the
+ * admin list and the order detail can never disagree. Only the colour is
+ * decided here.
+ */
+const StateBadge: React.FC<{ label?: string; tone?: string; title?: string }> = ({
+  label,
+  tone,
+  title,
+}) => {
+  if (!label) return null
+  return (
+    <span
+      title={title}
+      className={`inline-flex items-center px-2 py-0.5 rounded-lg border text-[11px] font-semibold ${toneClass(tone)}`}
+    >
+      {label}
+    </span>
+  )
 }
 
 export const OrdersPage: React.FC = () => {
@@ -60,16 +68,23 @@ export const OrdersPage: React.FC = () => {
     fetchOrders()
   }, [search, status, paymentMethod, page, limit])
 
-  // Items are non-returnable (see Shipping Policy): no returned/refunded
-  // management — historical rows with those statuses still render elsewhere.
+  // The fulfilment states the orders table actually uses. "Pending" appears
+  // here and nowhere else in the admin: every other column says exactly what
+  // is happening.
   const orderStatuses: OrderStatus[] = [
     'pending',
-    'confirmed',
-    'packed',
+    'processing',
     'shipped',
     'delivered',
     'cancelled',
+    'returned',
   ]
+
+  // Orders whose last Shiprocket push failed. The bulk retry button only
+  // appears when there is actually something to retry.
+  const failedPushCount = orders.filter(
+    (o) => o.automation?.shiprocket?.tone === 'error',
+  ).length;
 
   /** Bulk retry every order whose last Shiprocket push explicitly failed. */
   const handleRetryFailedPushes = async () => {
@@ -148,16 +163,20 @@ export const OrdersPage: React.FC = () => {
           <p className="text-sm text-slate-500">View order timelines, update fulfillment status, and generate invoices.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={handleRetryFailedPushes}
-            disabled={isLoading || isRetryingPushes}
-            className="btn-secondary inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-xl disabled:opacity-50"
-            title="Retry every order whose last Shiprocket push failed"
-          >
-            <Truck className={`h-4 w-4 ${isRetryingPushes ? 'animate-pulse' : ''}`} />
-            {isRetryingPushes ? 'Retrying…' : 'Retry failed pushes'}
-          </button>
+          {failedPushCount > 0 && (
+            <button
+              type="button"
+              onClick={handleRetryFailedPushes}
+              disabled={isLoading || isRetryingPushes}
+              className="btn-secondary inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-xl disabled:opacity-50"
+              title="Retry every order whose last Shiprocket push failed"
+            >
+              <Truck className={`h-4 w-4 ${isRetryingPushes ? 'animate-pulse' : ''}`} />
+              {isRetryingPushes
+                ? 'Retrying…'
+                : `Retry ${failedPushCount} failed`}
+            </button>
+          )}
           <button
             type="button"
             onClick={handleExport}
@@ -263,43 +282,46 @@ export const OrdersPage: React.FC = () => {
                     </td>
                     <td className="p-4 font-semibold">{formatCurrency(o.total)}</td>
                     <td className="p-4">
-                      <div className="flex flex-col">
-                        <span className="text-xs uppercase font-semibold text-slate-700 dark:text-slate-300">
-                          {o.paymentMethod}
-                        </span>
-                        <span
-                          className={`text-[10px] font-bold ${
-                            o.paymentStatus === 'paid' ? 'text-green-600' : 'text-amber-500'
-                          }`}
-                        >
-                          {o.paymentStatus}
-                        </span>
+                      <div className="flex flex-col gap-1">
+                        <StateBadge
+                          label={o.automation?.payment?.label}
+                          tone={o.automation?.payment?.tone}
+                          title="Payment state"
+                        />
+                        {o.automation?.phoneUnverified && (
+                          <span
+                            title="The customer never confirmed this phone number with an OTP"
+                            className="inline-flex w-fit items-center gap-1 px-2 py-0.5 rounded-lg border text-[10px] font-semibold bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-400 dark:border-amber-900/50"
+                          >
+                            <AlertTriangle className="h-3 w-3" /> Phone unverified
+                          </span>
+                        )}
                       </div>
                     </td>
                     <td className="p-4">
-                      <StatusBadge status={o.status} />
+                      <StateBadge
+                        label={o.automation?.fulfilment?.label}
+                        tone={o.automation?.fulfilment?.tone}
+                        title="Fulfilment state"
+                      />
                     </td>
                     <td className="p-4">
-                      <span
-                        title={o.invoiceError || (o.invoiceSentAt ? `Sent ${formatDateTime(o.invoiceSentAt)}` : 'Invoice is issued automatically once the order is billable')}
-                        className={`inline-flex items-center px-2 py-0.5 rounded-lg border text-[11px] font-semibold ${INVOICE_BADGE[o.invoiceStatus || 'pending'].className}`}
-                      >
-                        {INVOICE_BADGE[o.invoiceStatus || 'pending'].label}
-                      </span>
+                      <StateBadge
+                        label={o.automation?.invoice?.label}
+                        tone={o.automation?.invoice?.tone}
+                        title={o.automation?.invoice?.error || 'Invoice state'}
+                      />
                     </td>
                     <td className="p-4">
-                      {(() => {
-                        const push = deriveShiprocketPushStatus(o)
-                        return (
-                          <span
-                            title={o.shiprocketPushError || (o.shiprocketPushedAt ? `Pushed ${formatDateTime(o.shiprocketPushedAt)}` : '')}
-                            className={`inline-flex items-center px-2 py-0.5 rounded-lg border text-[11px] font-semibold ${PUSH_BADGE[push].className}`}
-                          >
-                            {PUSH_BADGE[push].label}
-                            {push === 'pushed' && o.awbCode ? ` · ${o.awbCode}` : ''}
-                          </span>
-                        )
-                      })()}
+                      <StateBadge
+                        label={o.automation?.shiprocket?.label}
+                        tone={o.automation?.shiprocket?.tone}
+                        title={
+                          o.automation?.shiprocket?.nextAttemptAt
+                            ? `Next automatic retry: ${o.automation.shiprocket.nextAttemptAt}`
+                            : o.automation?.shiprocket?.reason || 'Shiprocket state'
+                        }
+                      />
                     </td>
                     <td className="p-4 text-right">
                       <Link
