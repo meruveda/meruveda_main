@@ -24,6 +24,7 @@ import {
 } from '@meruveda/shared';
 import * as ordersRepo from '../database/repos/orders';
 import { hasColumn } from './schemaGuard';
+import { recordTimelineEvent } from './shiprocketAutomation';
 import { config, storefrontUrl } from '../config/env';
 import {
   INVOICE_FONT_FILES,
@@ -1057,6 +1058,8 @@ export async function markInvoiceSent(
     });
   }
   await mirrorInvoiceColumns(orderId, { sentAt: at });
+  // The delivery is a milestone of its own on the order timeline.
+  await recordTimelineEvent(orderId, 'Invoice sent on WhatsApp', { sent_at: at });
 }
 
 /**

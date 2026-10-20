@@ -228,15 +228,21 @@ export function deriveInvoiceStatus(state: {
 async function recordInvoiceGenerated(orderId: string, invoiceNumber: string): Promise<void> {
   try {
     const patch: Record<string, any> = {};
+    const alreadyGenerated = await ordersRepo.getOrderRow(orderId);
+    const firstTime = !alreadyGenerated?.invoice_generated_at;
     if (await hasColumn('orders', 'invoice_generated_at')) {
-      patch.invoice_generated_at = new Date().toISOString();
+      patch.invoice_generated_at = alreadyGenerated?.invoice_generated_at || new Date().toISOString();
     }
     if (await hasColumn('orders', 'invoice_number')) {
       patch.invoice_number = invoiceNumber;
     }
     if (Object.keys(patch).length === 0) return;
     await ordersRepo.updateOrderById(orderId, patch);
-    await recordTimelineEvent(orderId, 'Invoice generated', { invoice_number: invoiceNumber });
+    // The timeline event belongs to the moment the invoice was MADE, not to
+    // every later attempt to deliver it.
+    if (firstTime) {
+      await recordTimelineEvent(orderId, 'Invoice generated', { invoice_number: invoiceNumber });
+    }
   } catch (err: any) {
     console.error('[invoice] could not stamp the generated invoice:', err?.message || err);
   }
