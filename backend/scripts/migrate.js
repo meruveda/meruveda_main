@@ -30,6 +30,7 @@ const MIGRATIONS_TABLE = 'public._migrations';
 
 const argv = process.argv.slice(2);
 const dryRun = argv.includes('--dry-run');
+const rebaseline = argv.includes('--rebaseline');
 const onlyArg = argv.find((a) => a.startsWith('--only='));
 const only = onlyArg ? onlyArg.split('=')[1] : null;
 
@@ -151,8 +152,24 @@ async function main() {
       if (recorded === undefined) {
         pending.push(migration);
       } else if (recorded !== migration.checksum) {
+        if (rebaseline) {
+          // The file was edited AFTER it was applied. That is only safe when
+          // the DDL itself is unchanged (a comment or a doc line), so the
+          // operator has to confirm that with --rebaseline and the runner
+          // records the new checksum. The DDL is NOT re-run: the database
+          // already has it.
+          console.log(
+            `  re-baselining ${migration.name} (the DDL is already applied; only the recorded checksum changes)`,
+          );
+          await client.query(
+            `UPDATE ${MIGRATIONS_TABLE} SET checksum = $1 WHERE name = $2`,
+            [migration.checksum, migration.name],
+          );
+          continue;
+        }
         console.error(`DRIFT: ${migration.name} was applied with a different checksum.`);
-        console.error('Never edit an applied migration — add a new file instead.');
+        console.error('Never edit an applied migration - add a new file instead.');
+        console.error('If only a comment changed, confirm it with --rebaseline.');
         process.exit(2);
       }
     }
