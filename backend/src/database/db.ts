@@ -86,6 +86,70 @@ registerGlobalTypeParsers();
 let httpClient: ReturnType<typeof neon> | null = null;
 let pool: Pool | null = null;
 
+// Neon's free compute suspends on idle: the first statement can take seconds.
+// 10s connect / 15s statement keeps us inside Vercel's 30s maxDuration.
+const CONNECT_TIMEOUT_MS = 10_000;
+const STATEMENT_TIMEOUT_MS = 15_000;
+const IDLE_TIMEOUT_MS = 30_000;
+/** Idempotent READS only — writes are never blind-retried. */
+const READ_RETRY_MAX_ATTEMPTS = 2;
+const READ_RETRY_BACKOFF_MS = [250, 750];
+
+const TRANSIENT_PG_CODES = new Set([
+  '08000', '08001', '08003', '08004', '08005', '08006', // connection exceptions
+  '53300', '53400', '53200', // too many connections / resource limits
+  '57P01', '57P02', '57P03', // admin shutdown / crash recovery
+]);
+const TRANSIENT_NODE_CODES = new Set([
+  'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE',
+  'ENOTFOUND', 'EAI_AGAIN', 'ABORT_ERR', 'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT',
+]);
+const TRANSIENT_MESSAGE_RE =
+  /fetch failed|socket hang up|connection terminated|connection refused|network error|socket timeout|terminated due to|too many connections|server closed/i;
+
+/** Transient = safe to retry an idempotent read. Never used for writes. */
+export function isTransientError(err: any): boolean {
+  if (!err) return false;
+  if (typeof err.code === 'string') {
+    if (TRANSIENT_PG_CODES.has(err.code)) return true;
+    if (TRANSIENT_NODE_CODES.has(err.code)) return true;
+  }
+  if (err.name === 'AbortError' || err.name === 'TimeoutError') return true;
+  return TRANSIENT_MESSAGE_RE.test(String(err.message || ''));
+}
+
+/**
+ * Idempotent statements only: SELECT / SHOW / EXPLAIN / VALUES, plus a
+ * read-only CTE (`WITH ... SELECT`). A CTE that writes is NOT read-only.
+ */
+export function isReadOnlySql(text: string): boolean {
+  const sql = String(text || '')
+    .replace(/^\s*(?:--[^\n]*\n\s*)+/, '')
+    .trim();
+  if (/^(select|show|explain|values)\b/i.test(sql)) return true;
+  if (/^with\b/i.test(sql)) return !/\b(insert|update|delete|merge)\b/i.test(sql);
+  return false;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  // If we win the race, the underlying fetch still settles later — swallow it
+  // so Node does not report an unhandled rejection.
+  promise.catch(() => undefined);
+  let timer: NodeJS.Timeout;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(Object.assign(new Error(`${label} timed out after ${ms}ms`), { code: 'ETIMEDOUT' })),
+      ms,
+    );
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer)) as Promise<T>;
+}
+
 export function databaseUrl(): string {
   // Vercel/Neon dashboards routinely copy a trailing newline or spaces into
   // the value; neon() rejects that with a message that embeds the whole URL.
@@ -124,7 +188,20 @@ function getPool(): Pool {
         { code: 'DB_NOT_CONFIGURED' },
       );
     }
-    pool = new Pool({ connectionString: url, types: typeParsers as any, max: 5 });
+    pool = new Pool({
+      connectionString: url,
+      types: typeParsers as any,
+      max: 5,
+      connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
+      query_timeout: STATEMENT_TIMEOUT_MS,
+      statement_timeout: STATEMENT_TIMEOUT_MS,
+      idleTimeoutMillis: IDLE_TIMEOUT_MS,
+      allowExitOnIdle: true,
+    });
+    // An idle client can die (Neon suspend). Without a listener this throws.
+    pool.on('error', (err: any) => {
+      console.error('[db] idle client error:', err?.code || 'unknown');
+    });
   }
   return pool;
 }
@@ -149,8 +226,27 @@ export function __setDbDriverForTests(driver: DriverOverride | null): void {
 
 export const query: QueryFn = async <T = any>(text: string, params: any[] = []): Promise<T[]> => {
   if (override) return override.query<T>(text, params);
-  const rows = await http().query(text, params);
-  return rows as unknown as T[];
+
+  const readOnly = isReadOnlySql(text);
+  const attempts = readOnly ? READ_RETRY_MAX_ATTEMPTS : 1;
+  let lastErr: any;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      const rows = await withTimeout(
+        http().query(text, params),
+        STATEMENT_TIMEOUT_MS,
+        'neon-http query',
+      );
+      return rows as unknown as T[];
+    } catch (err: any) {
+      lastErr = err;
+      // Only an idempotent read on a transient error ever retries; a write
+      // throws on the first failure so we never duplicate a side effect.
+      if (!readOnly || !isTransientError(err) || attempt === attempts - 1) throw err;
+      await sleep(READ_RETRY_BACKOFF_MS[attempt] ?? 750);
+    }
+  }
+  throw lastErr;
 };
 
 export async function one<T = any>(text: string, params: any[] = []): Promise<T> {
