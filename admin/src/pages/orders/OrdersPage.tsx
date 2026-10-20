@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { ShoppingCart, Search, Eye, Filter, RefreshCw, ChevronLeft, ChevronRight, Download } from 'lucide-react'
-import { orderService, deriveShiprocketPushStatus } from '../../services/orderService'
+import { ShoppingCart, Search, Eye, Filter, RefreshCw, ChevronLeft, ChevronRight, Download, Truck } from 'lucide-react'
+import { orderService, deriveShiprocketPushStatus, type ShiprocketPushBadge } from '../../services/orderService'
+import { shiprocketService } from '../../services/shiprocketService'
 import { Order, OrderStatus } from '../../types'
 import { formatCurrency, formatDateTime } from '@meruveda/shared'
 import { StatusBadge } from '../../components/ui/StatusBadge'
@@ -13,16 +14,18 @@ const INVOICE_BADGE: Record<'sent' | 'failed' | 'pending', { label: string; clas
   pending: { label: 'Pending', className: 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-400 dark:border-amber-900/50' },
 }
 
-const PUSH_BADGE: Record<'pushed' | 'failed' | 'pending', { label: string; className: string }> = {
+const PUSH_BADGE: Record<ShiprocketPushBadge, { label: string; className: string }> = {
   pushed: { label: 'Pushed', className: 'bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-400 dark:border-green-900/50' },
+  pushing: { label: 'Pushing', className: 'bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-400 dark:border-blue-900/50' },
   failed: { label: 'Failed', className: 'bg-red-50 text-red-700 border-red-200 dark:bg-red-950/30 dark:text-red-400 dark:border-red-900/50' },
-  pending: { label: 'Pending', className: 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-400 dark:border-amber-900/50' },
+  pending: { label: 'Not pushed', className: 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-400 dark:border-amber-900/50' },
 }
 
 export const OrdersPage: React.FC = () => {
   const [orders, setOrders] = useState<Order[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [isExporting, setIsExporting] = useState(false)
+  const [isRetryingPushes, setIsRetryingPushes] = useState(false)
   const [page, setPage] = useState(1)
   const [limit, setLimit] = useState(25)
 
@@ -67,6 +70,31 @@ export const OrdersPage: React.FC = () => {
     'delivered',
     'cancelled',
   ]
+
+  /** Bulk retry every order whose last Shiprocket push explicitly failed. */
+  const handleRetryFailedPushes = async () => {
+    if (isRetryingPushes) return
+    setIsRetryingPushes(true)
+    try {
+      const res = await shiprocketService.retryFailedPushes(50)
+      const results = res?.data?.data ?? res?.data ?? []
+      const rows = Array.isArray(results) ? results : []
+      const ok = rows.filter((r: any) => r.ok).length
+      const failed = rows.length - ok
+      if (rows.length === 0) {
+        toast.success('No failed pushes to retry')
+      } else if (failed === 0) {
+        toast.success(`Pushed ${ok} order${ok === 1 ? '' : 's'} to Shiprocket`)
+      } else {
+        toast.error(`${ok} pushed, ${failed} failed — open an order for the reason`)
+      }
+      fetchOrders()
+    } catch (err: any) {
+      toast.error(err.response?.data?.error?.message || err.message || 'Failed to retry pushes')
+    } finally {
+      setIsRetryingPushes(false)
+    }
+  }
 
   /** Export all filtered orders (page-walked) as a real .xlsx workbook. */
   const handleExport = async () => {
@@ -119,15 +147,27 @@ export const OrdersPage: React.FC = () => {
           <h1 className="page-title">Orders Management</h1>
           <p className="text-sm text-slate-500">View order timelines, update fulfillment status, and generate invoices.</p>
         </div>
-        <button
-          type="button"
-          onClick={handleExport}
-          disabled={isLoading || isExporting}
-          className="btn-secondary inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-xl disabled:opacity-50"
-        >
-          {isExporting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-          {isExporting ? 'Preparing…' : 'Export Excel'}
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={handleRetryFailedPushes}
+            disabled={isLoading || isRetryingPushes}
+            className="btn-secondary inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-xl disabled:opacity-50"
+            title="Retry every order whose last Shiprocket push failed"
+          >
+            <Truck className={`h-4 w-4 ${isRetryingPushes ? 'animate-pulse' : ''}`} />
+            {isRetryingPushes ? 'Retrying…' : 'Retry failed pushes'}
+          </button>
+          <button
+            type="button"
+            onClick={handleExport}
+            disabled={isLoading || isExporting}
+            className="btn-secondary inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-xl disabled:opacity-50"
+          >
+            {isExporting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+            {isExporting ? 'Preparing…' : 'Export Excel'}
+          </button>
+        </div>
       </div>
 
       {/* Filters bar */}
@@ -256,6 +296,7 @@ export const OrdersPage: React.FC = () => {
                             className={`inline-flex items-center px-2 py-0.5 rounded-lg border text-[11px] font-semibold ${PUSH_BADGE[push].className}`}
                           >
                             {PUSH_BADGE[push].label}
+                            {push === 'pushed' && o.awbCode ? ` · ${o.awbCode}` : ''}
                           </span>
                         )
                       })()}

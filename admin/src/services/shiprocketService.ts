@@ -32,7 +32,9 @@ class ShiprocketService {
   }
 
   async retryFailedPushes(limit = 20) {
-    const res = await axiosInstance.post('/orders/retry-shiprocket-failed', null, { params: { limit } });
+    const res = await axiosInstance.post('/orders/retry-shiprocket-failed', null, {
+      params: { limit, failedOnly: true },
+    });
     return res.data;
   }
 }

@@ -119,9 +119,12 @@ const mapOrder = (o: any): Order => ({
  * view has nothing to derive. The detail page calls getInvoiceStatus() instead.
  */
 
+export type ShiprocketPushBadge = 'pushed' | 'pushing' | 'failed' | 'pending'
+
 /** Mirrors the backend push claim so the badge degrades gracefully. */
-export const deriveShiprocketPushStatus = (o: any): 'pushed' | 'failed' | 'pending' => {
+export const deriveShiprocketPushStatus = (o: any): ShiprocketPushBadge => {
   if (o?.shiprocket_order_id || o?.shiprocketPushStatus === 'pushed') return 'pushed'
+  if (o?.shiprocketPushStatus === 'in_progress') return 'pushing'
   if (o?.shiprocket_push_error || o?.shiprocketPushStatus === 'failed') return 'failed'
   return 'pending'
 }
