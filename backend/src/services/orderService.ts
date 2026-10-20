@@ -234,21 +234,17 @@ export const orderService = {
     // ============================================
     // Shiprocket Integration
     // ============================================
-    // Auto-push: COD orders push immediately on placement. Prepaid (PayU)
-    // orders push from the PayU success callback after payment is confirmed.
-    // SHIPROCKET_TEST_MODE=true preserves the old behaviour (push on create
-    // for testing) without gating production pushes.
-    // SHIPROCKET_AUTO_PUSH=true moves the COD push into postOrderConfirmed()
-    // so there is exactly one, awaited push point for every source.
-    const isCODPlacement =
-      order.payment_method === 'Cash On Delivery' || String(order.payment_method).toUpperCase() === 'COD';
+    // Auto-push lives in postOrderConfirmed() (called by the controller for
+    // every order) so there is exactly one awaited push point per source.
+    // This inline legacy branch now exists ONLY for local test mode when the
+    // kill switch is off; it must never run in production.
     if (config.shiprocketTestMode) {
       // Temporarily mark order as processing for testing (PAID)
       // We avoid 'PAID (TEST)' since it violates the DB CHECK constraint for status.
       order.status = 'processing';
       await ordersRepo.updateOrderById(order.id, { status: 'processing' });
     }
-    if (!config.shiprocketAutoPush && (config.shiprocketTestMode || isCODPlacement)) {
+    if (config.shiprocketTestMode && !config.shiprocketAutoPush) {
       try {
         await pushOrderToShiprocket(order.id);
         const refreshed = await ordersRepo.getShiprocketIds(order.id);
@@ -554,7 +550,7 @@ async function markPushSucceeded(orderId: string): Promise<void> {
  *      AND (shiprocket_push_status IS NULL OR shiprocket_push_status <> 'in_progress')
  *
  * A stuck 'in_progress' row (serverless killed mid-request) is reclaimable
- * after 15 minutes so an order can never be locked forever.
+ * after 10 minutes so an order can never be locked forever.
  *
  * When delta 010 has not been applied the status columns do not exist; the
  * claim then degrades to `shiprocket_order_id IS NULL`, which is still atomic
@@ -585,7 +581,7 @@ async function claimShiprocketPush(orderId: string): Promise<'claimed' | 'busy'>
     if (row?.shiprocket_order_id) return 'busy';
 
     const startedAt = row?.shiprocket_push_started_at;
-    const staleCutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    const staleCutoff = new Date(Date.now() - 10 * 60 * 1000).toISOString();
     if (row?.shiprocket_push_status === 'in_progress' && startedAt && startedAt < staleCutoff) {
       const retried = await ordersRepo.claimStaleShiprocketPush(orderId, claimPatch, staleCutoff);
       if (retried) return 'claimed';
@@ -646,19 +642,57 @@ async function executeShiprocketPush(order: any) {
     };
   });
 
+  const defaultWeight = config.shiprocketDefaultWeightKg;
+  const defaultLength = config.shiprocketDefaultLengthCm;
+  const defaultBreadth = config.shiprocketDefaultBreadthCm;
+  const defaultHeight = config.shiprocketDefaultHeightCm;
+
   let totalWeight = 0;
-  let maxLength = 10;
-  let maxBreadth = 10;
-  let maxHeight = 10;
+  let maxLength = 0;
+  let maxBreadth = 0;
+  let maxHeight = 0;
+  let usedDefaultWeight = false;
+  let usedDefaultDimensions = false;
+
   products.forEach((p: any) => {
     const itemQty = items.find((i: any) => i.product_id === p.id)?.quantity || 1;
-    totalWeight += (Number(p.weight) || 0.5) * itemQty;
-    maxLength = Math.max(maxLength, Number(p.length) || 10);
-    maxBreadth = Math.max(maxBreadth, Number(p.breadth) || 10);
-    maxHeight += (Number(p.height) || 0) * itemQty;
+
+    const productWeight = Number(p.weight);
+    if (productWeight > 0) {
+      totalWeight += productWeight * itemQty;
+    } else {
+      usedDefaultWeight = true;
+      totalWeight += defaultWeight * itemQty;
+    }
+
+    const length = Number(p.length);
+    const breadth = Number(p.breadth);
+    const height = Number(p.height);
+    if (length > 0) maxLength = Math.max(maxLength, length);
+    else usedDefaultDimensions = true;
+    if (breadth > 0) maxBreadth = Math.max(maxBreadth, breadth);
+    else usedDefaultDimensions = true;
+    if (height > 0) maxHeight += height * itemQty;
+    else usedDefaultDimensions = true;
   });
-  maxHeight = Math.max(10, maxHeight);
+
+  if (totalWeight <= 0) {
+    usedDefaultWeight = true;
+    totalWeight = defaultWeight;
+  }
+  maxLength = Math.max(defaultLength, maxLength);
+  maxBreadth = Math.max(defaultBreadth, maxBreadth);
+  maxHeight = Math.max(defaultHeight, maxHeight);
   totalWeight = Math.max(0.1, Number(totalWeight.toFixed(2)));
+
+  if (usedDefaultWeight || usedDefaultDimensions) {
+    console.warn(
+      `[Shiprocket] order ${order.order_number} is missing product ${usedDefaultWeight ? 'weight' : ''}` +
+        `${usedDefaultWeight && usedDefaultDimensions ? ' and ' : ''}${usedDefaultDimensions ? 'dimensions' : ''}; ` +
+        `using defaults weight=${defaultWeight}kg dims=${defaultLength}x${defaultBreadth}x${defaultHeight}cm ` +
+        `(SHIPROCKET_DEFAULT_* env overrides)`
+    );
+  }
 
   const billing = order.billing_address || order.shipping_address;
   const shipping = order.shipping_address;
@@ -686,9 +720,17 @@ async function executeShiprocketPush(order: any) {
       `Cannot push to Shiprocket: shipping ${missingAddress.join(', ')} missing for order ${order.order_number}.`
     );
   }
-  if (!/^[1-9]\d{9}$/.test(normalizePhone10(shipping.phone))) {
+  const shippingPhone10 = normalizePhone10(shipping.phone);
+  if (!/^[6-9]\d{9}$/.test(shippingPhone10)) {
+    // Shiprocket only accepts Indian mobile numbers. A non-Indian delivery
+    // contact must never block the order — it is recorded as a failed push so
+    // the admin can follow up, while the order/payment flow stays untouched.
+    const rawDigits = String(shipping.phone || '').replace(/\D/g, '');
+    const looksNonIndian = rawDigits.length > 10;
     throw new Error(
-      `Cannot push to Shiprocket: shipping phone "${shipping.phone || '(empty)'}" is not a valid 10-digit Indian mobile number for order ${order.order_number}.`
+      looksNonIndian
+        ? `Non-Indian phone number: shipping phone "${shipping.phone}" is not a 10-digit Indian mobile (order ${order.order_number}).`
+        : `Cannot push to Shiprocket: shipping phone "${shipping.phone || '(empty)'}" is not a valid 10-digit Indian mobile number for order ${order.order_number}.`
     );
   }
   if (!/^\d{6}$/.test(String(shipping.zipCode || '').trim())) {
@@ -710,7 +752,9 @@ async function executeShiprocketPush(order: any) {
     billing_state: billing.state || shipping.state || '',
     billing_country: 'India',
     billing_email: order.user_email || 'customer@meruveda.com',
-    billing_phone: normalizePhone10(billing.phone || shipping.phone),
+    // shipping_is_billing=true, so Shiprocket needs one valid Indian number.
+    // Billing may be a foreign cardholder phone; the delivery phone wins.
+    billing_phone: shippingPhone10,
     shipping_is_billing: true,
     shipping_customer_name: (shipping.fullName || 'Customer').slice(0, 50),
     shipping_last_name: '',
@@ -760,8 +804,13 @@ async function executeShiprocketPush(order: any) {
   throw new Error(`Shiprocket create returned no order_id: ${JSON.stringify(srResponse).slice(0, 500)}`);
 }
 
-export async function retryFailedShiprocketPushes(limit = 20) {
-  const pending = await ordersRepo.retryPushCandidates(limit);
+export interface RetryFailedPushOptions {
+  failedOnly?: boolean;
+  sinceHours?: number;
+}
+
+async function runRetryCandidates(limit: number, opts: RetryFailedPushOptions) {
+  const pending = await ordersRepo.retryPushCandidates(limit, opts);
   // Only push orders eligible for fulfilment: paid orders (any method) plus
   // COD orders (paid on delivery). Unpaid `pending` / `pending_payment`
   // checkouts are skipped so retries never ship orders prematurely.
@@ -782,6 +831,22 @@ export async function retryFailedShiprocketPushes(limit = 20) {
     }
   }
   return results;
+}
+
+export async function retryFailedShiprocketPushes(
+  limit = 20,
+  opts: RetryFailedPushOptions = {}
+) {
+  return runRetryCandidates(limit, opts);
+}
+
+/**
+ * Bounded opportunistic sweep: after every fresh push, retry at most a couple
+ * of recent failures. This keeps a transient Shiprocket outage self-healing
+ * without turning checkout background work into an unbounded loop.
+ */
+export async function retryRecentFailedShiprocketPushes(limit = 2, sinceHours = 24) {
+  return runRetryCandidates(limit, { failedOnly: true, sinceHours });
 }
 
 export async function handleTransactionCancellation(orderId: string, orderStatus: string) {

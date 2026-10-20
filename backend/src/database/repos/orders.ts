@@ -389,15 +389,43 @@ export async function listAllForUser(userId: string): Promise<any[]> {
   );
 }
 
-export async function retryPushCandidates(limit: number): Promise<any[]> {
+export interface RetryPushOptions {
+  /** Only rows whose last push explicitly failed. */
+  failedOnly?: boolean;
+  /** Only rows created within the last N hours (opportunistic retry sweep). */
+  sinceHours?: number;
+}
+
+export async function retryPushCandidates(
+  limit: number,
+  opts: RetryPushOptions = {},
+): Promise<any[]> {
+  const clauses = [
+    'shiprocket_order_id IS NULL',
+    "status IN ('processing', 'confirmed', 'pending')",
+    // A non-Indian delivery phone can never satisfy Shiprocket; retrying it
+    // every day would just burn API calls. The admin can still push manually.
+    "(shiprocket_push_error IS NULL OR shiprocket_push_error NOT LIKE 'Non-Indian phone number%')",
+  ];
+  const params: any[] = [];
+
+  if (opts.failedOnly) {
+    clauses.push("shiprocket_push_status = 'failed'");
+  }
+  if (opts.sinceHours && opts.sinceHours > 0) {
+    params.push(Math.floor(opts.sinceHours));
+    clauses.push(`created_at >= NOW() - ($${params.length}::int * INTERVAL '1 hour')`);
+  }
+
+  params.push(limit);
+
   return query(
     `SELECT id, order_number, status, payment_status, payment_method, created_at
        FROM orders
-      WHERE shiprocket_order_id IS NULL
-        AND status IN ('processing', 'confirmed', 'pending')
+      WHERE ${clauses.join(' AND ')}
       ORDER BY created_at ASC
-      LIMIT $1`,
-    [limit],
+      LIMIT $${params.length}`,
+    params,
   );
 }
 

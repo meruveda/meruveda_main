@@ -152,15 +152,33 @@ export const config = {
   trustProxyHops: Number(process.env.TRUST_PROXY_HOPS ?? 1),
 
   // ---- Post-order automation flags ----
-  // SHIPROCKET_AUTO_PUSH=true -> postOrderConfirmed() becomes the single push
-  //                            point for both COD placement and PayU success.
-  //                            (default false — Shiprocket behaviour is
-  //                             unchanged from before this work)
+  // SHIPROCKET_AUTO_PUSH is ON by default: postOrderConfirmed() becomes the
+  // single push point for both COD placement and PayU success. Set it to the
+  // literal string "false" to pause automatic pushes during an incident; the
+  // admin retry button and daily cron still work while it is off.
   // INVOICE_AUTO_SEND is now ON by default — the flag only exists so an operator
   // can pause invoice delivery during an incident. Set it to the literal string
   // "false" to disable; anything else (including unset) means enabled.
   invoiceAutoSend: process.env.INVOICE_AUTO_SEND !== 'false',
-  shiprocketAutoPush: process.env.SHIPROCKET_AUTO_PUSH === 'true',
+  shiprocketAutoPush: process.env.SHIPROCKET_AUTO_PUSH !== 'false',
+  // Fallbacks used when an order item has no weight/dimension in the products
+  // table. Shiprocket rejects 0 kg / 0 cm, so these must stay positive.
+  shiprocketDefaultWeightKg:
+    Number(process.env.SHIPROCKET_DEFAULT_WEIGHT_KG) > 0
+      ? Number(process.env.SHIPROCKET_DEFAULT_WEIGHT_KG)
+      : 0.5,
+  shiprocketDefaultLengthCm:
+    Number(process.env.SHIPROCKET_DEFAULT_LENGTH_CM) > 0
+      ? Number(process.env.SHIPROCKET_DEFAULT_LENGTH_CM)
+      : 10,
+  shiprocketDefaultBreadthCm:
+    Number(process.env.SHIPROCKET_DEFAULT_BREADTH_CM) > 0
+      ? Number(process.env.SHIPROCKET_DEFAULT_BREADTH_CM)
+      : 10,
+  shiprocketDefaultHeightCm:
+    Number(process.env.SHIPROCKET_DEFAULT_HEIGHT_CM) > 0
+      ? Number(process.env.SHIPROCKET_DEFAULT_HEIGHT_CM)
+      : 10,
   // Server-side pepper for OTP digests (src/utils/otpHash.ts). Must never be
   // sent to a client or stored in the database. Changing it invalidates every
   // outstanding OTP, which is acceptable because they live 5 minutes.

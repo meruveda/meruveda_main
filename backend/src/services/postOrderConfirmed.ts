@@ -4,7 +4,7 @@ import { hasColumn } from './schemaGuard';
 import { orderNotifyService } from './orderNotifyService';
 import { invoiceDispatchService } from './invoiceDispatchService';
 import { recordInvoiceError } from './invoiceService';
-import { pushOrderToShiprocket } from './orderService';
+import { pushOrderToShiprocket, retryRecentFailedShiprocketPushes } from './orderService';
 
 export type PostOrderSource = 'payu_success' | 'cod_placement' | 'order_placement';
 
@@ -163,21 +163,12 @@ export function postOrderConfirmed(
 
     const shiprocketJob = (async () => {
       try {
-        // Two independent triggers decide whether this order is pushed — this
-        // block is deliberately UNCHANGED from the pre-invoice implementation
-        // so Shiprocket behaviour is not altered by this work.
-        //
-        //   legacyTrigger — the PRE-EXISTING behaviour. A PayU success callback
-        //     and testMode both push unconditionally, column or no column.
-        //   autoTriggerOnly — the NEW path where SHIPROCKET_AUTO_PUSH alone is
-        //     asking for a push (i.e. not a PayU callback, not testMode).
-        const legacyTrigger = source !== 'order_placement' || config.shiprocketTestMode;
-        const autoTriggerOnly = config.shiprocketAutoPush && !legacyTrigger;
+        // SHIPROCKET_AUTO_PUSH (default ON) is the single kill switch for
+        // automatic pushes from every source. SHIPROCKET_TEST_MODE is an
+        // explicit local/test override and intentionally ignores it.
+        const autoPushEnabled = config.shiprocketTestMode || config.shiprocketAutoPush;
 
-        if (legacyTrigger) {
-          await pushOrderToShiprocket(orderId);
-          result.shiprocket = { ok: true };
-        } else if (autoTriggerOnly) {
+        if (autoPushEnabled) {
           if (!(await hasColumn('orders', 'shiprocket_push_status'))) {
             // Delta 010 not applied: the atomic in_progress claim cannot
             // serialise the outbound Shiprocket create call, so two parallel
@@ -189,8 +180,21 @@ export function postOrderConfirmed(
               reason: 'auto-push skipped: needs delta 010 (orders.shiprocket_push_status)',
             };
           } else {
-            await pushOrderToShiprocket(orderId);
+            const pushed = await pushOrderToShiprocket(orderId);
             result.shiprocket = { ok: true };
+            // Self-healing: after a real push, retry at most two recent
+            // failures. Skipped pushes (already pushed / in flight) do not
+            // trigger the sweep, so this cannot recurse.
+            if (!(pushed as any)?.skipped) {
+              try {
+                await retryRecentFailedShiprocketPushes(2, 24);
+              } catch (retryErr: any) {
+                console.error(
+                  `[PostOrder] opportunistic shiprocket retry failed for ${orderId}:`,
+                  retryErr?.message || retryErr
+                );
+              }
+            }
           }
         } else {
           result.shiprocket = { ok: true, skipped: true, reason: 'SHIPROCKET_AUTO_PUSH is off' };

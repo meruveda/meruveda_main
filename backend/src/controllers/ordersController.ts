@@ -525,7 +525,8 @@ export const retryShiprocketPushes = async (req: Request, res: Response, next: N
       return res.status(401).json({ error: { message: 'Unauthorized' } });
     }
     const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
-    const results = await retryFailedShiprocketPushes(limit);
+    const failedOnly = ['1', 'true', 'yes'].includes(String(req.query.failedOnly || req.query.failed || '').toLowerCase());
+    const results = await retryFailedShiprocketPushes(limit, { failedOnly });
     res.json({ data: results });
   } catch (error) {
     next(error);
