@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import * as ordersRepo from '../database/repos/orders';
 import * as productsRepo from '../database/repos/products';
 import * as transactionsRepo from '../database/repos/transactions';
+import * as couponsRepo from '../database/repos/coupons';
+import { __setDbDriverForTests } from '../database/db';
 import { addressService } from './addressService';
 import { config } from '../config/env';
 import { orderService } from './orderService';
@@ -32,10 +34,35 @@ function installSupabaseFake(
   const updated: { table: string; rows: Row[] }[] = [];
   let stock = opts.stock ?? 10;
 
+  // createOrder runs its writes inside withTransaction(); keep the driver on an
+  // in-memory override so the suite never touches a real database. On error the
+  // recorded writes are dropped, mirroring a real ROLLBACK.
+  __setDbDriverForTests({
+    query: async () => [],
+    transaction: async (fn: any) => {
+      const insertedSnapshot = inserted.slice();
+      const updatedSnapshot = updated.slice();
+      try {
+        return await fn(async () => []);
+      } catch (err) {
+        inserted.length = 0;
+        inserted.push(...insertedSnapshot);
+        updated.length = 0;
+        updated.push(...updatedSnapshot);
+        throw err;
+      }
+    },
+  });
+  t.after(() => __setDbDriverForTests(null));
+
   t.mock.method(productsRepo, 'getProductsByIds', async () => opts.products ?? []);
+  // Mirrors the conditional UPDATE in repos/products.decrementStock: it only
+  // "matches" while enough stock is left, otherwise it is a no-op.
   t.mock.method(productsRepo, 'decrementStock', async (_productId: string, quantity: number) => {
-    stock = Math.max(0, stock - quantity);
+    if (quantity > 0 && stock < quantity) return false;
+    stock = stock - quantity;
     updated.push({ table: 'products', rows: [{ stock }] });
+    return true;
   });
   t.mock.method(ordersRepo, 'insertOrder', async (data: Row) => {
     const row = { id: 'order-1', user_id: 'user-1', ...data };
@@ -191,4 +218,75 @@ test('the order is stamped with the authenticated user id', async (t) => {
   assert.equal(order.user_id, 'user-42');
   // Sanity: shipping GST only applies when explicitly enabled.
   assert.equal(config.shippingIsTaxable, false);
+});
+test('an order without enough stock fails with 409 and writes nothing', async (t) => {
+  const fake = installSupabaseFake(t, {
+    products: [{ id: 'p1', name: 'Ashwagandha' }],
+    stock: 0,
+  });
+
+  await assert.rejects(
+    () => orderService.createOrder(basePayload() as any, 'user-1'),
+    (err: any) => {
+      assert.equal(err.status, 409);
+      assert.equal(err.code, 'INSUFFICIENT_STOCK');
+      assert.match(err.message, /Ashwagandha/);
+      return true;
+    }
+  );
+
+  assert.equal(fake.inserted.find((i) => i.table === 'orders'), undefined, 'order row rolled back');
+  assert.equal(fake.inserted.find((i) => i.table === 'order_items'), undefined, 'items rolled back');
+  assert.equal(fake.inserted.find((i) => i.table === 'transactions'), undefined, 'no tx log');
+  assert.equal(fake.updated.find((u) => u.table === 'products'), undefined, 'stock untouched');
+});
+
+test('stock is decremented only while the conditional UPDATE matches', async (t) => {
+  const fake = installSupabaseFake(t, {
+    products: [{ id: 'p1', name: 'Ashwagandha' }],
+    stock: 1,
+  });
+
+  await orderService.createOrder(basePayload() as any, 'user-1');
+  const stockUpdate = fake.updated.find((u) => u.table === 'products');
+  assert.equal(stockUpdate!.rows[0].stock, 0, 'exactly one unit available, one taken');
+
+  // A second order for the same product must now be refused, not clamped to 0.
+  await assert.rejects(() => orderService.createOrder(basePayload() as any, 'user-1'), (err: any) => {
+    assert.equal(err.code, 'INSUFFICIENT_STOCK');
+    return true;
+  });
+});
+
+test('an unusable coupon aborts the whole order', async (t) => {
+  const fake = installSupabaseFake(t, { products: [{ id: 'p1', name: 'Ashwagandha' }] });
+  t.mock.method(couponsRepo, 'incrementUsageAtomic', async () => null);
+
+  await assert.rejects(
+    () => orderService.createOrder(basePayload({ couponCode: 'EXPIRED10' } as any), 'user-1'),
+    (err: any) => {
+      assert.equal(err.status, 400);
+      assert.equal(err.code, 'COUPON_UNAVAILABLE');
+      return true;
+    }
+  );
+
+  assert.equal(fake.inserted.find((i) => i.table === 'orders'), undefined, 'rolled back');
+});
+
+test('a claimed coupon increments used_count once, inside the order transaction', async (t) => {
+  const fake = installSupabaseFake(t, { products: [{ id: 'p1', name: 'Ashwagandha' }] });
+  const calls: string[] = [];
+  t.mock.method(couponsRepo, 'incrementUsageAtomic', async (code: string) => {
+    calls.push(code);
+    return { id: 'coupon-1', code };
+  });
+
+  const order = await orderService.createOrder(basePayload({ couponCode: 'WELCOME10' } as any), 'user-1');
+
+  assert.deepEqual(calls, ['WELCOME10']);
+  assert.ok(fake.inserted.find((i) => i.table === 'orders'), 'order still created');
+  const orderRow = fake.inserted.find((i) => i.table === 'orders')!.rows[0];
+  assert.equal(orderRow.coupon_code, undefined, 'coupon column is not part of the order row');
+  assert.ok(order.id);
 });

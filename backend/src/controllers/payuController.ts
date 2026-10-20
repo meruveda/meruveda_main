@@ -195,13 +195,21 @@ export const handlePayUCallback = async (req: Request, res: Response, next: Next
       }
 
       // Mark as paid / processing. The PayU reference is recorded in the notes
-      // marker, which is the only place it is stored â€” the invoice reads it back
+      // marker, which is the only place it is stored — the invoice reads it back
       // from there rather than depending on a dedicated column.
-      await ordersRepo.updateOrderById(order.id, {
-        status: 'processing',
-        payment_status: 'paid',
-        notes: `${order.notes || ''} [PayU mihpayid: ${mihpayid}]`.trim(),
-      });
+      //
+      // The WHERE clause makes this the idempotency point: exactly one callback
+      // wins, every later duplicate stops here and never re-runs side effects
+      // (transaction log, Shiprocket push).
+      const paidNow = await ordersRepo.markOrderPaidIfUnpaid(
+        order.id,
+        `${order.notes || ''} [PayU mihpayid: ${mihpayid}]`.trim(),
+      );
+
+      if (!paidNow) {
+        console.log(`[PayU] duplicate success callback for ${orderNumber}; skipping side effects`);
+        return res.redirect(`${storefrontBaseUrl(req)}/checkout/success/${order.id}`);
+      }
 
       await upsertTransaction('success', 'captured');
 

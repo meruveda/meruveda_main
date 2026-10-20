@@ -1,7 +1,9 @@
 import * as ordersRepo from '../database/repos/orders';
 import * as productsRepo from '../database/repos/products';
 import * as transactionsRepo from '../database/repos/transactions';
+import * as couponsRepo from '../database/repos/coupons';
 import * as trackingRepo from '../database/repos/tracking';
+import { withTransaction } from '../database/db';
 import { addressService } from './addressService';
 import { shiprocketOrderService } from './shiprocket/order.service';
 import { shiprocketTrackingService } from './shiprocket/tracking.service';
@@ -177,59 +179,96 @@ export const orderService = {
       );
     }
 
-    const order = await ordersRepo.insertOrder(orderData);
+    // A coupon carried by the checkout payload is claimed here, atomically,
+    // inside the same transaction as the order rows.
+    const couponCode = String(orderData.coupon_code ?? orderData.couponCode ?? '').trim();
+    delete orderData.coupon_code;
+    delete orderData.couponCode;
 
-    // Insert order items
-    if (items && items.length > 0) {
+    // One transaction for every money-touching write: order row, line items,
+    // conditional stock decrement (no oversell), coupon usage, COD tx log.
+    // If anything fails the whole order rolls back — no half-created orders.
+    const order = await withTransaction(async (q) => {
+      const orderRow = await ordersRepo.insertOrder(orderData, q);
 
-      const orderItems = items.map((item: any) => {
-        const dbProduct = dbProducts.find((p: any) => p.id === item.product_id);
-        const productName = item.name || item.product_name || dbProduct?.name || "Unknown Product";
-        
-        let sku = item.sku || dbProduct?.sku || "";
-        if (!sku || sku === "") {
-          sku = item.product_id ? `SKU-${item.product_id.substring(0, 8).toUpperCase()}` : "";
+      if (items && items.length > 0) {
+        const orderItems = items.map((item: any) => {
+          const dbProduct = dbProducts.find((p: any) => p.id === item.product_id);
+          const productName = item.name || item.product_name || dbProduct?.name || "Unknown Product";
+
+          let sku = item.sku || dbProduct?.sku || "";
+          if (!sku || sku === "") {
+            sku = item.product_id ? `SKU-${item.product_id.substring(0, 8).toUpperCase()}` : "";
+          }
+
+          const imageUrl = item.image || item.image_url || (dbProduct?.images && dbProduct.images.length > 0 ? (typeof dbProduct.images[0] === 'string' ? dbProduct.images[0] : dbProduct.images[0]?.url) : null);
+
+          return {
+            order_id: orderRow.id,
+            product_id: item.product_id,
+            quantity: item.quantity,
+            price: item.price,
+            total: item.quantity * item.price,
+            product_name: productName,
+            sku: sku,
+            image_url: imageUrl
+          };
+        });
+
+        await ordersRepo.insertOrderItems(orderItems, q);
+
+        // Conditional decrement: the UPDATE only matches while enough stock is
+        // left, so a concurrent order can never take the same units twice.
+        for (const item of items) {
+          const wanted = Math.trunc(Number(item.quantity) || 0);
+          if (wanted < 1) {
+            throw Object.assign(
+              new Error('Every item needs a quantity of at least 1.'),
+              { status: 400, code: 'INVALID_QUANTITY' },
+            );
+          }
+          const ok = await productsRepo.decrementStock(item.product_id, wanted, q);
+          if (!ok) {
+            const dbProduct = dbProducts.find((p: any) => p.id === item.product_id);
+            const name = dbProduct?.name || item.name || item.product_name || 'An item in your cart';
+            throw Object.assign(
+              new Error(`Only a few left — "${name}" does not have ${wanted} unit(s) in stock right now.`),
+              { status: 409, code: 'INSUFFICIENT_STOCK' },
+            );
+          }
         }
-
-        const imageUrl = item.image || item.image_url || (dbProduct?.images && dbProduct.images.length > 0 ? (typeof dbProduct.images[0] === 'string' ? dbProduct.images[0] : dbProduct.images[0]?.url) : null);
-
-        return {
-          order_id: order.id,
-          product_id: item.product_id,
-          quantity: item.quantity,
-          price: item.price,
-          total: item.quantity * item.price,
-          product_name: productName,
-          sku: sku,
-          image_url: imageUrl
-        };
-      });
-
-      await ordersRepo.insertOrderItems(orderItems);
-
-      // Reduce stock (Production feature)
-      for (const item of items) {
-        await productsRepo.decrementStock(item.product_id, Number(item.quantity) || 0);
       }
-    }
 
-    // Log transaction (only for Cash On Delivery on placement. PayU writes its own logs on callback).
-    if (order.payment_method === 'Cash On Delivery' || String(order.payment_method).toUpperCase() === 'COD') {
-      const txData = {
-        user_id: order.user_id,
-        order_id: order.id,
-        amount: order.total,
-        currency: 'INR',
-        status: 'pending',
-        payment_method: order.payment_method,
-        gateway_transaction_id: null,
-        metadata: {
-          detailed_status: 'pending',
-          updated_at: new Date().toISOString()
+      if (couponCode) {
+        const applied = await couponsRepo.incrementUsageAtomic(couponCode, q);
+        if (!applied) {
+          throw Object.assign(
+            new Error('This coupon can no longer be used.'),
+            { status: 400, code: 'COUPON_UNAVAILABLE' },
+          );
         }
-      };
-      await transactionsRepo.insertTransaction(txData);
-    }
+      }
+
+      // Log transaction (only for Cash On Delivery on placement. PayU writes its own logs on callback).
+      if (isCOD) {
+        const txData = {
+          user_id: orderRow.user_id,
+          order_id: orderRow.id,
+          amount: orderRow.total,
+          currency: 'INR',
+          status: 'pending',
+          payment_method: orderRow.payment_method,
+          gateway_transaction_id: null,
+          metadata: {
+            detailed_status: 'pending',
+            updated_at: new Date().toISOString()
+          }
+        };
+        await transactionsRepo.insertTransaction(txData, q);
+      }
+
+      return orderRow;
+    });
 
     // ============================================
     // Shiprocket Integration

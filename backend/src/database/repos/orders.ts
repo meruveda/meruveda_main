@@ -239,6 +239,30 @@ export async function updateOrderById(
   return updateById('orders', id, patch, q);
 }
 
+/**
+ * Idempotent payment confirmation for gateway callbacks: only the FIRST call
+ * flips the order to paid. PayU can POST the browser callback several times
+ * (retry / double-submit), and a duplicate must not re-run side effects such
+ * as the Shiprocket push. Returns true only for the caller that won.
+ */
+export async function markOrderPaidIfUnpaid(
+  id: string,
+  notes: string,
+  q: QueryFn = query,
+): Promise<boolean> {
+  const rows = await q(
+    `UPDATE orders
+        SET status = 'processing',
+            payment_status = 'paid',
+            notes = $2
+      WHERE id = $1
+        AND COALESCE(payment_status, '') <> 'paid'
+      RETURNING id`,
+    [id, notes],
+  );
+  return rows.length > 0;
+}
+
 export async function insertOrderItems(items: Array<Record<string, any>>, q: QueryFn = query): Promise<any[]> {
   return insertRows('order_items', items, q);
 }

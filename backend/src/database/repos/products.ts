@@ -134,14 +134,22 @@ export async function deleteProduct(id: string): Promise<void> {
   await query('DELETE FROM products WHERE id = $1', [id]);
 }
 
-/** Stock movement inside an order transaction. */
-export async function decrementStock(productId: string, quantity: number, q: QueryFn = query): Promise<void> {
-  await q(
+/**
+ * Stock movement inside an order transaction — conditional so two concurrent
+ * orders can never oversell the same row. Returns false when there is not
+ * enough stock (NULL stock means unlimited and always succeeds).
+ */
+export async function decrementStock(productId: string, quantity: number, q: QueryFn = query): Promise<boolean> {
+  const rows = await q(
     `UPDATE products
-        SET stock = GREATEST(0, COALESCE(stock, 0) - $1)
-      WHERE id = $2`,
+        SET stock = stock - $1
+      WHERE id = $2
+        AND $1 > 0
+        AND (stock IS NULL OR stock >= $1)
+      RETURNING stock`,
     [quantity, productId],
   );
+  return rows.length > 0;
 }
 
 export async function getStock(productId: string, q: QueryFn = query): Promise<number> {
