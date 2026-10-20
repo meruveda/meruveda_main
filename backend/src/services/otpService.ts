@@ -5,7 +5,8 @@ import * as otpsRepo from '../database/repos/otps';
 import * as usersRepo from '../database/repos/users';
 import { config } from '../config/env';
 import { hasColumn, hasTable } from './schemaGuard';
-import { normalizePhone, sendAuthenticationTemplate, sendOnce, logMessage, isWhatsappConfigured, WHATSAPP_TEMPLATES } from './whatsappService';
+import { normalizePhone, sendAuthenticationTemplate, sendAuthenticationTemplateDetailed, sendOnce, logMessage, isWhatsappConfigured, WHATSAPP_TEMPLATES } from './whatsappService';
+import { customerMessageForKind, statusForKind } from './metaErrors';
 import { canonicalPhone, phoneVariants, placeholderEmailFor } from '../utils/phone';
 import { hashOtpCode, verifyOtpCode } from '../utils/otpHash';
 
@@ -94,24 +95,27 @@ export const otpService = {
     });
 
     // AUTHENTICATION-category template: the code is delivered as the body
-    // parameter AND as the copy-code button parameter at index 0. Template
-    // name and language come from env only (WHATSAPP_OTP_TEMPLATE_NAME /
-    // WHATSAPP_TEMPLATE_LANG).
+    // parameter AND as the copy-code button parameter at index 0. The template
+    // name and language are resolved from Meta at runtime, so an approval that
+    // lands after deploy activates this path with no redeploy.
     //
     // There is deliberately no plaintext fallback: Meta rejects a free-form
     // message outside the 24h service window anyway, and a second delivery
     // path is a second way for the code to leak.
-    const delivered = await sendAuthenticationTemplate(phone, code);
+    const send = await sendAuthenticationTemplateDetailed(phone, code);
+    const delivered = send.delivered;
 
     // Record every attempt — sent or failed — without ever writing the code.
     await logMessage({
       recipient: phone,
-      templateName: config.whatsappOtpTemplateName || WHATSAPP_TEMPLATES.OTP,
+      templateName: send.templateName || config.whatsappOtpTemplateName || WHATSAPP_TEMPLATES.OTP,
       messageType: 'authentication_template',
       purpose: 'otp_send',
       referenceId: String(inserted.id),
       status: delivered ? 'sent' : 'failed',
-      error: delivered ? undefined : 'Meta rejected the authentication template message',
+      error: delivered
+        ? undefined
+        : `Meta rejected the authentication template message (kind=${send.errorKind || 'unknown'}, code=${send.errorCode ?? 'n/a'})`,
       payload: { channel: 'whatsapp', expiresAt },
     });
 
@@ -126,17 +130,15 @@ export const otpService = {
       // leaving it would make the resend cooldown block a retry that could
       // actually succeed.
       await otpsRepo.deleteOtp(inserted.id).catch(() => undefined);
+      const kind = send.errorKind || 'service';
       console.error(
-        '[OTP] WhatsApp delivery failed — the code was NOT sent. Check WHATSAPP_API_TOKEN, ' +
-          'WHATSAPP_PHONE_NUMBER_ID and that the Meta template is approved. ' +
-          'otpService.sendOtp is now returning 503 to the client.'
+        `[OTP] WhatsApp delivery failed (kind=${kind}, metaCode=${send.errorCode ?? 'n/a'}) — the code was NOT sent. ` +
+          'Check WHATSAPP_API_TOKEN, WHATSAPP_PHONE_NUMBER_ID and that the Meta template is approved.'
       );
-      throw Object.assign(
-        new Error(
-          'We could not send the verification code on WhatsApp. Please check the number and try again.'
-        ),
-        { status: 503 }
-      );
+      throw Object.assign(new Error(customerMessageForKind(kind)), {
+        status: statusForKind(kind),
+        code: 'OTP_DELIVERY_FAILED',
+      });
     }
 
     return {

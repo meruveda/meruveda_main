@@ -6,7 +6,13 @@ const DEFAULT_COLUMNS =
 
 function selectList(columns?: string): string {
   if (!columns) return DEFAULT_COLUMNS;
-  return columns
+  const trimmed = columns.trim();
+  // '*' means "every column". Without this branch the identifier filter below
+  // dropped it, producing `SELECT  FROM users` — valid SQL that Postgres
+  // answers with a row that has NO columns, so the caller got `{}` (truthy!)
+  // instead of the user row. That silently broke every repeat OTP login.
+  if (trimmed === '*') return '*';
+  return trimmed
     .split(',')
     .map((c) => c.trim())
     .filter((c) => /^[a-z_][a-z0-9_]*$/.test(c))
@@ -50,6 +56,10 @@ export async function insertUser(
 ): Promise<any> {
   const row = await insertRow('users', data, q);
   if (!columns) return row;
+  // '*' means "every column", not a column literally named '*'. Splitting it
+  // used to produce { '*': undefined }, which silently produced a user object
+  // with no id — and therefore a JWT without a subject.
+  if (columns.trim() === '*') return row;
   const picked: Record<string, any> = {};
   for (const key of columns.split(',').map((c) => c.trim())) picked[key] = row[key];
   return picked;

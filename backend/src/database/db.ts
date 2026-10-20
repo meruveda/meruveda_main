@@ -136,10 +136,29 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+function withTimeout<T>(promise: Promise<T> | PromiseLike<T>, ms: number, label: string): Promise<T> {
+  /**
+   * The Neon driver returns a `NeonQueryPromise`, NOT a native promise. Its
+   * `then`, `catch` and `finally` accessors EACH execute the statement again:
+   *
+   *   then(e, t) { return this.execute(this.queryData, this.opts).then(e, t) }
+   *   catch(e)  { return this.execute(this.queryData, this.opts).catch(e) }
+   *
+   * Touching it twice therefore runs the SQL twice. The previous
+   * implementation called `.catch()` (to swallow a late rejection) and then
+   * handed the same object to `Promise.race`, which called `.then()` — so
+   * EVERY statement executed twice: inserts created duplicate rows, and
+   * `UPDATE ... RETURNING` raced against a second copy of itself (the atomic
+   * claims in the order pipeline failed ~40% of the time).
+   *
+   * `Promise.resolve(thenable)` assimilates it exactly once and yields a real
+   * native promise, so the statement runs a single time and every later
+   * `.catch()` / `Promise.race` is safe.
+   */
+  const settled = Promise.resolve(promise as PromiseLike<T>);
   // If we win the race, the underlying fetch still settles later — swallow it
   // so Node does not report an unhandled rejection.
-  promise.catch(() => undefined);
+  settled.catch(() => undefined);
   let timer: NodeJS.Timeout;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(
@@ -147,7 +166,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
       ms,
     );
   });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer)) as Promise<T>;
+  return Promise.race([settled, timeout]).finally(() => clearTimeout(timer)) as Promise<T>;
 }
 
 export function databaseUrl(): string {

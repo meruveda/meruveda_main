@@ -30,10 +30,26 @@ test('the code is ALSO sent as the copy-code button parameter at index 0', () =>
   const payload = buildAuthenticationTemplatePayload({ to: PHONE, code: CODE });
   const button = payload.template.components.find((c: any) => c.type === 'button');
   assert.ok(button, 'a button component is required for the one-tap autofill');
-  assert.equal(button.sub_type, 'copy_code');
+  // Meta renders the copy-code button in two shapes, and the payload has to
+  // match the approved template: a dedicated OTP button uses 'copy_code', a
+  // URL button whose link carries the code uses 'url'. The resolver reads the
+  // shape off the live template, so 'url' is the default.
+  assert.equal(button.sub_type, 'url');
   // Meta takes the index as a STRING on the wire.
   assert.equal(button.index, '0');
   assert.deepEqual(button.parameters, [{ type: 'text', text: CODE }]);
+});
+
+test('the button sub_type follows the approved template when it is known', () => {
+  // A template with a dedicated OTP button still needs 'copy_code'.
+  const copyCode = buildAuthenticationTemplatePayload({
+    to: PHONE,
+    code: CODE,
+    buttonSubType: 'copy_code',
+  });
+  assert.equal(copyCode.template.components[1].sub_type, 'copy_code');
+  // ...and the code is still the button parameter in both shapes.
+  assert.deepEqual(copyCode.template.components[1].parameters, [{ type: 'text', text: CODE }]);
 });
 
 test('the same code appears in both components — never two different values', () => {

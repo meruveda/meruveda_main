@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { login, register, getMe, forgotPassword, resetPassword, getPreferences, updatePreferences, getCustomerPreferences } from '../controllers/authController';
-import { sendOtp, verifyOtp, resendOtp, quickLogin } from '../controllers/otpController';
+import { sendOtp, verifyOtp, resendOtp, quickLogin, otpStatus } from '../controllers/otpController';
 import { updateCheckoutProfile } from '../controllers/otpController';
 import { requireAuth } from '../middleware/auth';
 import {
@@ -67,6 +67,12 @@ router.post(
   verifyOtp as any
 );
 router.put('/profile', requireAuth as any, updateCheckoutProfile as any);
+
+// Reports whether phone verification is currently required. The storefront
+// calls this before checkout so it can fall back to "order without
+// verification" while no AUTHENTICATION template is approved — the store must
+// never be blocked by a pending Meta review.
+router.get('/otp/status', otpStatus as any);
 
 router.get('/me', requireAuth as any, getMe as any);
 // Account self-deletion is disabled (non-returnable store policy keeps order

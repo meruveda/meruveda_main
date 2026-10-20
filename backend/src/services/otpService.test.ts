@@ -233,7 +233,10 @@ test('a rejected WhatsApp send throws 503 instead of reporting success', async (
       () => otpService.sendOtp(PHONE),
       (err: any) => {
         assert.equal(err.status, 503);
-        assert.match(err.message, /could not send the verification code/i);
+        // The failure is reported as a typed, customer-safe reason. The Meta
+        // error code stays in the server log; the client never sees it.
+        assert.match(err.message, /WhatsApp is temporarily unavailable/i);
+        assert.doesNotMatch(err.message, /token|template name|graph\.facebook/i);
         return true;
       }
     );

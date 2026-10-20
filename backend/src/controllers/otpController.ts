@@ -5,6 +5,7 @@ import { generateToken } from '../utils/jwt';
 import { otpService } from '../services/otpService';
 import { normalizePhone, isWhatsappConfigured } from '../services/whatsappService';
 import { canonicalPhone, isPlaceholderEmail, isValidEmail, isValidPhone10 } from '../utils/phone';
+import { otpAvailability } from '../services/whatsappTemplateResolver';
 import { config } from '../config/env';
 import { hasColumn } from '../services/schemaGuard';
 
@@ -54,6 +55,49 @@ const handleSend = async (req: Request, res: Response, next: NextFunction) => {
 
 export const sendOtp = handleSend;
 export const resendOtp = handleSend;
+
+/**
+ * Reports whether phone verification is currently required, and why.
+ *
+ * The storefront calls this before checkout so it can decide between
+ * "verify the number" and "let the order through, flagged unverified". The
+ * answer changes on its own the moment Meta approves the template, so the
+ * storefront never needs a redeploy to pick it up.
+ */
+export const otpStatus = async (_req: Request, res: Response) => {
+  try {
+    const availability = await otpAvailability();
+    res.json({
+      data: {
+        mode: availability.mode,
+        required: availability.required,
+        templateAvailable: availability.templateAvailable,
+        templateName: availability.templateName || null,
+        templateLanguage: availability.templateLanguage || null,
+        // The reason is diagnostic only — it explains an internal state, so it
+        // is safe to expose (it never contains a credential).
+        reason: availability.reason || null,
+        otpEnabled: config.otpEnabled,
+        whatsappConfigured: isWhatsappConfigured(),
+      },
+    });
+  } catch (error: any) {
+    // Never fail the storefront's ability to place an order.
+    console.error('[OTP] status probe failed:', error?.message || error);
+    res.json({
+      data: {
+        mode: 'auto',
+        required: false,
+        templateAvailable: false,
+        templateName: null,
+        templateLanguage: null,
+        reason: 'Status probe failed.',
+        otpEnabled: config.otpEnabled,
+        whatsappConfigured: isWhatsappConfigured(),
+      },
+    });
+  }
+};
 
 export const verifyOtp = async (req: Request, res: Response, next: NextFunction) => {
   try {

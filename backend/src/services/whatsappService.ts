@@ -1,5 +1,7 @@
 import { config, invoiceWhatsapp } from '../config/env';
 import * as whatsappLogRepo from '../database/repos/whatsappLog';
+import { getOtpTemplate, getInvoiceTemplate } from './whatsappTemplateResolver';
+import { classifyMetaError, type MetaErrorKind } from './metaErrors';
 
 /**
  * WhatsApp Cloud API (Meta) client.
@@ -84,7 +86,14 @@ async function graphPost(path: string, body: unknown): Promise<any> {
   const json = await res.json().catch(() => ({}));
   if (!res.ok) {
     const message = json?.error?.message || `WhatsApp API HTTP ${res.status}`;
-    throw new Error(message);
+    // The numeric code and subcode are attached so the error can be classified
+    // (invalid number / rate limit / template problem / auth / service) and
+    // logged precisely. They are never returned to the client.
+    const err: any = new Error(message);
+    err.status = res.status;
+    err.code = json?.error?.code;
+    err.errorSubcode = json?.error?.error_subcode;
+    throw err;
   }
   return json;
 }
@@ -241,11 +250,19 @@ export function buildAuthenticationTemplatePayload(options: {
   code: string;
   templateName?: string;
   language?: string;
+  /**
+   * The copy-code button's sub_type on the wire. Meta accepts either
+   * 'copy_code' (an OTP button) or 'url' (a URL button whose link carries the
+   * code). It must match the approved template's button, otherwise Meta
+   * rejects the message with error 132012.
+   */
+  buttonSubType?: 'url' | 'copy_code';
 }): Record<string, any> {
   const phone = normalizePhone(options.to);
   const code = String(options.code ?? '');
   const name = String(options.templateName || config.whatsappOtpTemplateName || '').trim();
   const language = String(options.language || config.whatsappTemplateLang || 'en').trim();
+  const subType = options.buttonSubType || 'url';
 
   return {
     messaging_product: 'whatsapp',
@@ -262,7 +279,7 @@ export function buildAuthenticationTemplatePayload(options: {
         },
         {
           type: 'button',
-          sub_type: 'copy_code',
+          sub_type: subType,
           // Index is a STRING on the wire, per Meta's template payload spec.
           index: '0',
           parameters: [{ type: 'text', text: code }],
@@ -278,31 +295,184 @@ export function buildAuthenticationTemplatePayload(options: {
  * Returns true only when Meta accepted the message, so a rejected template is
  * surfaced to the caller instead of being reported to the customer as sent.
  */
-export async function sendAuthenticationTemplate(to: string, code: string): Promise<boolean> {
-  const phone = normalizePhone(to);
-  if (!phone || !isWhatsappConfigured()) return false;
+/**
+ * The outcome of an authentication-template send.
+ *
+ * `delivered` is true only when Meta accepted the message. On failure the
+ * classified Meta error is attached so the caller can map it to a precise
+ * customer message while the server log keeps the numeric code.
+ */
+export interface AuthenticationSendResult {
+  delivered: boolean;
+  errorKind?: MetaErrorKind;
+  errorCode?: number;
+  errorMessage?: string;
+  /** The template that was used. */
+  templateName?: string;
+  templateLanguage?: string;
+}
 
-  const payload = buildAuthenticationTemplatePayload({ to, code });
+/**
+ * Deliver the OTP on an AUTHENTICATION-category template.
+ *
+ * Returns true only when Meta accepted the message, so a rejected template is
+ * surfaced to the caller instead of being reported to the customer as sent.
+ */
+export async function sendAuthenticationTemplate(to: string, code: string): Promise<boolean> {
+  const result = await sendAuthenticationTemplateDetailed(to, code);
+  return result.delivered;
+}
+
+/**
+ * Deliver the OTP and report exactly why it failed.
+ *
+ * The Meta error code is logged here (server side only) and the caller turns
+ * the classified kind into a customer-facing message. The code itself is never
+ * sent to the client.
+ */
+export async function sendAuthenticationTemplateDetailed(
+  to: string,
+  code: string,
+): Promise<AuthenticationSendResult> {
+  const phone = normalizePhone(to);
+  if (!phone || !isWhatsappConfigured()) {
+    return { delivered: false, errorKind: 'auth', errorMessage: 'WhatsApp is not configured.' };
+  }
+
+  // The template is resolved at runtime so an approval that lands after deploy
+  // activates the OTP path without a redeploy or an env flip. When Meta cannot
+  // be reached we fall back to the configured name so the send is still
+  // attempted with what the operator last set.
+  const resolved = await resolveOtpTemplateForSend();
+  const payload = buildAuthenticationTemplatePayload({
+    to,
+    code,
+    templateName: resolved.name,
+    language: resolved.language,
+    buttonSubType: resolved.buttonSubType,
+  });
 
   // Dry run reports success without calling Meta, and never prints the code.
   if (config.whatsappDryRun) {
     console.log(
       `[WhatsApp] DRY RUN — would send authentication template "${payload.template.name}" ` +
-        `(lang ${payload.template.language.code}) to ${phone}. Code not logged.`
+        `(lang ${payload.template.language.code}, button ${resolved.buttonSubType}) to ${phone}. Code not logged.`
     );
-    return true;
+    return {
+      delivered: true,
+      templateName: resolved.name,
+      templateLanguage: resolved.language,
+    };
   }
 
   try {
     await graphPost(`${graphBase()}/messages`, payload);
-    return true;
+    return {
+      delivered: true,
+      templateName: resolved.name,
+      templateLanguage: resolved.language,
+    };
   } catch (err: any) {
+    const classified = classifyMetaError(err);
     console.error(
-      `[WhatsApp] Authentication template "${payload.template.name}" send failed for ${phone}:`,
-      err?.message || err
+      `[WhatsApp] Authentication template "${payload.template.name}" (lang ${payload.template.language.code}) ` +
+        `send failed for ${phone}: kind=${classified.kind} code=${classified.code ?? 'n/a'} ` +
+        `status=${classified.status ?? 'n/a'} message=${classified.message ?? 'no message'}`,
     );
-    return false;
+
+    // A language mismatch is the most common rejection when the configured
+    // language does not match the approved one. Retry once with the approved
+    // language before giving up.
+    const fallback = await resolveApprovedLanguageFallback(resolved.language);
+    if (fallback && fallback !== resolved.language) {
+      console.warn(
+        `[WhatsApp] Retrying authentication template "${resolved.name}" with approved language "${fallback}".`,
+      );
+      const retryPayload = buildAuthenticationTemplatePayload({
+        to,
+        code,
+        templateName: resolved.name,
+        language: fallback,
+        buttonSubType: resolved.buttonSubType,
+      });
+      try {
+        await graphPost(`${graphBase()}/messages`, retryPayload);
+        return {
+          delivered: true,
+          templateName: resolved.name,
+          templateLanguage: fallback,
+        };
+      } catch (retryErr: any) {
+        const retryClassified = classifyMetaError(retryErr);
+        console.error(
+          `[WhatsApp] Authentication template retry with language "${fallback}" also failed for ${phone}: ` +
+            `kind=${retryClassified.kind} code=${retryClassified.code ?? 'n/a'}`,
+        );
+        return {
+          delivered: false,
+          errorKind: retryClassified.kind,
+          errorCode: retryClassified.code,
+          errorMessage: retryClassified.message,
+          templateName: resolved.name,
+          templateLanguage: fallback,
+        };
+      }
+    }
+    return {
+      delivered: false,
+      errorKind: classified.kind,
+      errorCode: classified.code,
+      errorMessage: classified.message,
+      templateName: resolved.name,
+      templateLanguage: resolved.language,
+    };
   }
+}
+
+/**
+ * The template + language to use for an OTP send.
+ *
+ * Prefers the runtime-resolved (APPROVED) template. Falls back to the
+ * configured name and language when Meta is unreachable.
+ */
+async function resolveOtpTemplateForSend(): Promise<{
+  name: string;
+  language: string;
+  buttonSubType: 'url' | 'copy_code';
+}> {
+  const fallbackName = (config.whatsappOtpTemplateName || WHATSAPP_TEMPLATES.OTP).trim();
+  const fallbackLang = (config.whatsappTemplateLang || 'en').trim();
+  try {
+    const { template } = await getOtpTemplate();
+    if (template) {
+      return {
+        name: template.name,
+        language: template.language,
+        buttonSubType: template.otpButtonSubType,
+      };
+    }
+  } catch (err: any) {
+    console.error('[WhatsApp] Template resolution failed, using configured values:', err?.message || err);
+  }
+  return { name: fallbackName, language: fallbackLang, buttonSubType: 'url' };
+}
+
+/**
+ * The language Meta reports as approved for the OTP template, when it differs
+ * from the one we just tried. null when there is nothing better to try.
+ */
+async function resolveApprovedLanguageFallback(tried: string): Promise<string | null> {
+  try {
+    const { all } = await getOtpTemplate();
+    const approved = all.find(
+      (t) => String(t.status).toUpperCase() === 'APPROVED' &&
+        String(t.category || '').toUpperCase() === 'AUTHENTICATION',
+    );
+    if (approved?.language && approved.language !== tried) return approved.language;
+  } catch {
+    // Best effort only.
+  }
+  return null;
 }
 
 /** Upload a file to WhatsApp and return its Meta media id. */
@@ -621,8 +791,16 @@ export function buildInvoiceTemplatePayload(options: {
   total: string;
   signedUrl: string | null;
   filename: string;
+  templateName?: string;
+  templateLanguage?: string;
+  /**
+   * How the PDF is delivered. 'document' attaches it through a DOCUMENT
+   * header; 'link' puts the signed URL in the body. When not given, the
+   * configured WHATSAPP_INVOICE_MODE decides.
+   */
+  mode?: 'document' | 'link';
 }): Record<string, any> {
-  const mode = invoiceWhatsapp.mode === 'link' ? 'link' : 'document';
+  const mode = options.mode || (invoiceWhatsapp.mode === 'link' ? 'link' : 'document');
   const bodyText = [
     options.customerName,
     options.orderNumber,
@@ -659,8 +837,8 @@ export function buildInvoiceTemplatePayload(options: {
     to: normalizePhone(options.to),
     type: 'template',
     template: {
-      name: invoiceWhatsapp.templateName,
-      language: { code: invoiceWhatsapp.templateLang },
+      name: String(options.templateName || invoiceWhatsapp.templateName).trim(),
+      language: { code: String(options.templateLanguage || invoiceWhatsapp.templateLang).trim() },
       components,
     },
   };
@@ -698,14 +876,23 @@ export async function sendInvoiceTemplate(options: {
       return false;
     }
 
-    const payload = buildInvoiceTemplatePayload(options);
+    // Resolve the approved invoice template at runtime so the send activates
+    // as soon as Meta approves it, with no redeploy and no env flip. Falls
+    // back to the configured name when Meta is unreachable.
+    const resolved = await resolveInvoiceTemplateForSend();
+    const payload = buildInvoiceTemplatePayload({
+      ...options,
+      templateName: resolved.name,
+      templateLanguage: resolved.language,
+      mode: resolved.mode,
+    });
 
     // Dry run logs the shape only. A signed URL is a bearer token for that
     // invoice, so it is never printed.
     if (invoiceWhatsapp.dryRun) {
       console.log(
         `[WhatsApp] DRY RUN — would send invoice ${options.invoiceNumber} via template ` +
-          `"${invoiceWhatsapp.templateName}" (lang ${invoiceWhatsapp.templateLang}, mode ${invoiceWhatsapp.mode}). ` +
+          `"${payload.template.name}" (lang ${payload.template.language.code}, mode ${invoiceWhatsapp.mode}). ` +
           `URL not logged.`
       );
       return true;
@@ -745,6 +932,40 @@ export async function sendInvoiceTemplate(options: {
     console.error('[WhatsApp] invoice send threw:', err?.message || err);
     return false;
   }
+}
+
+/**
+ * The invoice template + language to use for a send.
+ *
+ * Prefers the runtime-resolved (APPROVED) template. Falls back to the
+ * configured name and language when Meta is unreachable.
+ */
+async function resolveInvoiceTemplateForSend(): Promise<{
+  name: string;
+  language: string;
+  mode: 'document' | 'link';
+}> {
+  const fallbackName = (config.whatsappInvoiceTemplateName || invoiceWhatsapp.templateName || '').trim();
+  const fallbackLang = (invoiceWhatsapp.templateLang || 'en').trim();
+  const fallbackMode: 'document' | 'link' =
+    invoiceWhatsapp.mode === 'link' ? 'link' : 'document';
+  try {
+    const { template } = await getInvoiceTemplate();
+    if (template) {
+      // The delivery mode follows the template's own capabilities: a template
+      // with a DOCUMENT header can carry the PDF as an attachment, one without
+      // it must deliver the PDF as a link in the body.
+      const mode: 'document' | 'link' = template.hasDocumentHeader
+        ? 'document'
+        : template.bodyVarCount >= 5
+          ? 'link'
+          : fallbackMode;
+      return { name: template.name, language: template.language, mode };
+    }
+  } catch (err: any) {
+    console.error('[WhatsApp] Invoice template resolution failed, using configured values:', err?.message || err);
+  }
+  return { name: fallbackName, language: fallbackLang, mode: fallbackMode };
 }
 
 /**
