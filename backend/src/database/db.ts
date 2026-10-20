@@ -87,12 +87,14 @@ let httpClient: ReturnType<typeof neon> | null = null;
 let pool: Pool | null = null;
 
 export function databaseUrl(): string {
-  return process.env.DATABASE_URL || '';
+  // Vercel/Neon dashboards routinely copy a trailing newline or spaces into
+  // the value; neon() rejects that with a message that embeds the whole URL.
+  return (process.env.DATABASE_URL || '').trim();
 }
 
 /** Direct (non-pooled) URL — migrations/DDL only. */
 export function directDatabaseUrl(): string {
-  return process.env.DATABASE_URL_UNPOOLED || '';
+  return (process.env.DATABASE_URL_UNPOOLED || '').trim();
 }
 
 export function isDbConfigured(): boolean {

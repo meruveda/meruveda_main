@@ -48,8 +48,8 @@ export const config = {
   // DATABASE_URL is pooled (runtime). DATABASE_URL_UNPOOLED is used by
   // migrations/DDL only. Both are read lazily by database/db.ts; leaving them
   // unset is fine in development so tsc/tests run offline.
-  databaseUrl: process.env.DATABASE_URL || '',
-  databaseUrlUnpooled: process.env.DATABASE_URL_UNPOOLED || '',
+  databaseUrl: (process.env.DATABASE_URL || '').trim(),
+  databaseUrlUnpooled: (process.env.DATABASE_URL_UNPOOLED || '').trim(),
   // ---- Cloudflare R2 ----
   // The buckets must already exist (created in Phase B). Names/domains are
   // env-driven; nothing in the code hardcodes a public host.

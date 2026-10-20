@@ -45,6 +45,15 @@ app.get('/', (req, res) => {
   });
 });
 
+// Postgres/Neon errors can embed the full connection string (credentials
+// included). Never return or log that: redact it first.
+const CONNECTION_URL_PATTERN = /postgres(?:ql)?:\/\/[^\s"')]+/gi;
+function redactSecrets(value: unknown): string {
+  return String(value ?? '')
+    .replace(CONNECTION_URL_PATTERN, 'postgresql://[redacted]')
+    .replace(/(connection string:\s*).*/gi, '$1[redacted]');
+}
+
 // Health Check
 app.get('/api/health', async (req, res) => {
   try {
@@ -55,10 +64,11 @@ app.get('/api/health', async (req, res) => {
       timestamp: new Date().toISOString()
     });
   } catch (err: any) {
+    console.error('[health] database check failed:', redactSecrets(err?.message || err));
     res.status(500).json({
       status: 'error',
       database: 'disconnected',
-      error: err.message || err,
+      error: 'Database unavailable',
       timestamp: new Date().toISOString()
     });
   }
@@ -120,12 +130,12 @@ app.use('/api/images', imageRoutes);
 
 // Global Error Handler
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
-  console.error(err?.stack || err);
+  console.error(redactSecrets(err?.stack || err?.message || err));
   const status = err.status || 500;
   res.status(status).json({
     error: {
-      message: err.message || 'Internal Server Error',
-      ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
+      message: redactSecrets(err.message || 'Internal Server Error'),
+      ...(process.env.NODE_ENV === 'development' && { stack: redactSecrets(err.stack) })
     }
   });
 });
