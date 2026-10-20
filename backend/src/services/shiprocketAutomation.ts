@@ -336,6 +336,61 @@ function isWhatsappConfiguredForText(): boolean {
 }
 
 /* ------------------------------------------------------------------ */
+/* Decorating an order for the admin UI                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Attach every admin-facing state to an order.
+ *
+ * The admin panel renders these labels instead of the raw database values, so
+ * "Pending" only ever appears where it is the real fulfilment state, and
+ * every other column says exactly what is happening.
+ */
+export function decorateOrderForAdmin(order: any, opts: { whatsappTemplateReady?: boolean } = {}): any {
+  if (!order) return order;
+  const fulfilment = fulfillmentState(order);
+  const payment = paymentState(order);
+  const shiprocket = shiprocketState(order);
+  const invoice = invoiceState(order, opts);
+  const phone = phoneVerifiedBadge(order);
+
+  return {
+    ...order,
+    automation: {
+      fulfilment: { label: fulfilment.label, tone: fulfilment.tone },
+      payment: { label: payment.label, tone: payment.tone },
+      shiprocket: {
+        label: shiprocket.label,
+        tone: shiprocket.tone,
+        attempt: shiprocket.attempt,
+        maxAttempts: shiprocket.maxAttempts,
+        nextAttemptAt: shiprocket.nextAttemptAt,
+        skipped: shiprocket.skipped,
+        reason: shiprocket.reason,
+      },
+      invoice: {
+        label: invoice.label,
+        tone: invoice.tone,
+        invoiceNumber: invoice.invoiceNumber,
+        sentAt: invoice.sentAt,
+        error: invoice.error,
+      },
+      phoneUnverified: phone.show,
+      phoneUnverifiedLabel: phone.label,
+      preAutomation: isPreAutomationOrder(order),
+    },
+  };
+}
+
+/** Decorate a list of orders. */
+export function decorateOrdersForAdmin(
+  orders: any[],
+  opts: { whatsappTemplateReady?: boolean } = {},
+): any[] {
+  return (orders || []).map((o) => decorateOrderForAdmin(o, opts));
+}
+
+/* ------------------------------------------------------------------ */
 /* Tracking poll                                                       */
 /* ------------------------------------------------------------------ */
 

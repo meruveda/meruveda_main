@@ -9,9 +9,12 @@ import { shiprocketOrderService } from './shiprocket/order.service';
 import {
   MAX_PUSH_ATTEMPTS,
   alertAdminOfTerminalFailure,
+  decorateOrderForAdmin,
+  decorateOrdersForAdmin,
   nextAttemptAt,
   recordTimelineEvent,
 } from './shiprocketAutomation';
+import { getInvoiceTemplate } from './whatsappTemplateResolver';
 import { shiprocketTrackingService } from './shiprocket/tracking.service';
 import { shiprocketWebhookService } from './shiprocket/webhook.service';
 import { orderNotifyService } from './orderNotifyService';
@@ -80,8 +83,13 @@ export const orderService = {
       includeItems: includeItems === 'true',
     });
 
+    // Attach the human-readable state to every row, so the admin list never
+    // has to guess what "pending" refers to.
+    const { template } = await getInvoiceTemplate();
+    const decorated = decorateOrdersForAdmin(data, { whatsappTemplateReady: Boolean(template) });
+
     return {
-      data,
+      data: decorated,
       total: count,
       page: pageNum,
       limit: limitNum,
@@ -98,7 +106,8 @@ export const orderService = {
       throw err;
     }
 
-    return data;
+    const { template } = await getInvoiceTemplate();
+    return decorateOrderForAdmin(data, { whatsappTemplateReady: Boolean(template) });
   },
 
   async createOrder(payload: any, userId?: string) {
@@ -335,6 +344,14 @@ export const orderService = {
     // exists and deliberately non-fatal: captureFromOrder never throws, so a
     // missing address book can never fail an order that was already accepted.
     await addressService.captureFromOrder(userId, order.shipping_address);
+
+    // The order timeline starts here. Everything after this (invoice, push,
+    // AWB, delivery, failures) is appended as it happens.
+    await recordTimelineEvent(order.id, 'Order placed', {
+      order_number: order.order_number,
+      total: order.total,
+      payment_method: order.payment_method,
+    });
 
     return order;
   },
@@ -975,6 +992,10 @@ async function executeShiprocketPush(order: any) {
       return { skipped: true, shiprocket_order_id: (await ordersRepo.getShiprocketIds(order.id))?.shiprocket_order_id };
     }
     await markPushSucceeded(order.id);
+    await recordTimelineEvent(order.id, 'Pushed to Shiprocket', {
+      shiprocket_order_id: String((srResponse as any).order_id),
+      shipment_id: String((srResponse as any).shipment_id || ''),
+    });
     return srResponse;
   }
   throw new Error(`Shiprocket create returned no order_id: ${JSON.stringify(srResponse).slice(0, 500)}`);

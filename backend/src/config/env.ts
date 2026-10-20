@@ -289,7 +289,12 @@ export const invoiceWhatsapp = {
   dryRun: process.env.WHATSAPP_DRY_RUN === 'true',
   // How far back the delivery sweep looks for invoices that were issued but
   // never handed to WhatsApp (because the slot was empty at the time).
-  backfillDays: Math.max(0, Number(process.env.WHATSAPP_BACKFILL_DAYS) || 2),
+  //
+  // The default is deliberately wide: when Meta finally approves the invoice
+  // template, EVERY invoice that was generated in the meantime must go out,
+  // not just the last couple of days. The sweep sends at most 20 per run, so
+  // a large backlog drains over a few runs instead of never.
+  backfillDays: Math.max(0, Number(process.env.WHATSAPP_BACKFILL_DAYS) || 365),
 };
 
 // Public storefront URL printed on the tax invoice. Built-in default is the

@@ -209,6 +209,15 @@ export async function updateByShipmentId(
   return rows.length;
 }
 
+/** The order id for a Shiprocket shipment id, for timeline events. */
+export async function getOrderIdByShipmentId(shipmentId: string): Promise<string | null> {
+  const rows = await query(
+    'SELECT id FROM orders WHERE shipment_id = $1 LIMIT 1',
+    [shipmentId],
+  );
+  return rows[0]?.id ?? null;
+}
+
 export async function findShipmentInfo(shipmentId: string): Promise<any | null> {
   const rows = await query(
     `SELECT shiprocket_order_id, user_id FROM orders

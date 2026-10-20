@@ -23,6 +23,7 @@ import {
   splitGst,
 } from '@meruveda/shared';
 import * as ordersRepo from '../database/repos/orders';
+import { hasColumn } from './schemaGuard';
 import { config, storefrontUrl } from '../config/env';
 import {
   INVOICE_FONT_FILES,
@@ -1041,6 +1042,37 @@ export async function markInvoiceSent(
       lastAttemptAt: at,
     });
   }
+  await mirrorInvoiceColumns(orderId, { sentAt: at });
+}
+
+/**
+ * Mirror the invoice state onto the orders row.
+ *
+ * The authoritative state lives in the R2 state.json, but the admin order
+ * list, the admin filters and the health check all read the orders table —
+ * so the columns are kept in step. Every write is best-effort: a failure
+ * here must never break the invoice flow.
+ */
+async function mirrorInvoiceColumns(
+  orderId: string,
+  patch: { sentAt?: string | null; error?: string | null; generatedAt?: string | null },
+): Promise<void> {
+  try {
+    const data: Record<string, any> = {};
+    if (patch.sentAt !== undefined && (await hasColumn('orders', 'invoice_sent_at'))) {
+      data.invoice_sent_at = patch.sentAt;
+    }
+    if (patch.error !== undefined && (await hasColumn('orders', 'invoice_error'))) {
+      data.invoice_error = patch.error;
+    }
+    if (patch.generatedAt !== undefined && (await hasColumn('orders', 'invoice_generated_at'))) {
+      data.invoice_generated_at = patch.generatedAt;
+    }
+    if (Object.keys(data).length === 0) return;
+    await ordersRepo.updateOrderById(orderId, data);
+  } catch (err: any) {
+    console.error('[invoice] could not mirror the invoice state onto the order:', err?.message || err);
+  }
 }
 
 /**
@@ -1053,6 +1085,7 @@ export async function markInvoiceSent(
 export async function releaseInvoiceClaim(orderId: string, reason: string): Promise<void> {
   await patchChannel(orderId, 'whatsapp', { lastError: String(reason).slice(0, 500) });
   await patchChannel(orderId, 'email', { lastError: String(reason).slice(0, 500) });
+  await mirrorInvoiceColumns(orderId, { error: String(reason).slice(0, 500) });
 }
 
 /** Persist the last failure reason so the admin card and the sweep can see it. */
@@ -1060,6 +1093,7 @@ export async function recordInvoiceError(orderId: string, reason: string): Promi
   const message = String(reason).slice(0, 500);
   await patchChannel(orderId, 'whatsapp', { lastError: message });
   await patchChannel(orderId, 'email', { lastError: message });
+  await mirrorInvoiceColumns(orderId, { error: message });
 }
 
 export const invoiceService = {

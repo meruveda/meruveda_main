@@ -15,6 +15,7 @@ import {
 } from './invoiceService';
 import { getInvoiceEmailTemplate, isEmailConfigured, sendEmailWithAttachments } from './emailService';
 import { normalizePhone, sendInvoiceTemplate, logMessage } from './whatsappService';
+import { getInvoiceTemplate } from './whatsappTemplateResolver';
 import {
   createInvoiceSignedUrl,
   deleteInvoiceClaim,
@@ -27,6 +28,9 @@ import {
   type ChannelState,
 } from './invoiceStore';
 import { formatInvoiceAmount } from '@meruveda/shared';
+import * as ordersRepo from '../database/repos/orders';
+import { hasColumn } from './schemaGuard';
+import { recordTimelineEvent } from './shiprocketAutomation';
 
 const money = (v: unknown) => `₹${formatInvoiceAmount(Number(v) || 0)}`;
 
@@ -136,7 +140,7 @@ async function logInvoiceAttempt(entry: {
 /* Status derivation for the admin Orders UI                          */
 /* ------------------------------------------------------------------ */
 
-export type InvoiceStatus = 'pending' | 'sent' | 'failed';
+export type InvoiceStatus = 'pending' | 'sent' | 'failed' | 'awaiting_template';
 
 /**
  * Public snapshot for the admin Orders UI, derived from `state.json`.
@@ -190,6 +194,19 @@ export function deriveInvoiceStatus(state: {
     };
   }
 
+  // Waiting for Meta to approve the template: not a failure, and the attempt
+  // budget is untouched.
+  if (whatsappStatus === 'awaiting_template') {
+    return {
+      status: 'awaiting_template',
+      sentAt: null,
+      error: null,
+      attempts,
+      whatsappStatus,
+      emailStatus,
+    };
+  }
+
   const failed = whatsappStatus === 'failed' || emailStatus === 'failed';
   return {
     status: failed && attempts > 0 ? 'failed' : 'pending',
@@ -199,6 +216,30 @@ export function deriveInvoiceStatus(state: {
     whatsappStatus,
     emailStatus,
   };
+}
+
+/**
+ * Record that the invoice for an order has been generated.
+ *
+ * The invoice number is written by the database function; this only stamps
+ * the generation time so the admin can tell "Generated" from "Not generated",
+ * and so the backlog sweep can find invoices that were made but never sent.
+ */
+async function recordInvoiceGenerated(orderId: string, invoiceNumber: string): Promise<void> {
+  try {
+    const patch: Record<string, any> = {};
+    if (await hasColumn('orders', 'invoice_generated_at')) {
+      patch.invoice_generated_at = new Date().toISOString();
+    }
+    if (await hasColumn('orders', 'invoice_number')) {
+      patch.invoice_number = invoiceNumber;
+    }
+    if (Object.keys(patch).length === 0) return;
+    await ordersRepo.updateOrderById(orderId, patch);
+    await recordTimelineEvent(orderId, 'Invoice generated', { invoice_number: invoiceNumber });
+  } catch (err: any) {
+    console.error('[invoice] could not stamp the generated invoice:', err?.message || err);
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -295,6 +336,10 @@ export async function sendInvoiceDispatch(orderId: string): Promise<InvoiceDispa
 
   const filename = `Invoice-${invoiceNumber.replace(/[^A-Za-z0-9]+/g, '_')}.pdf`;
 
+  // The invoice now exists: stamp the order so the admin can see "Generated"
+  // even before the WhatsApp channel has done anything.
+  await recordInvoiceGenerated(orderId, invoiceNumber);
+
   /* ---- 3. store once (concurrent with delivery) ---- */
   const storagePromise = uploadInvoicePdf(orderId, invoiceNumber, pdf)
     .then(async (path) => {
@@ -386,6 +431,27 @@ export async function sendInvoiceDispatch(orderId: string): Promise<InvoiceDispa
     // Idempotency: one order sends one invoice. The sent flag + timestamp in
     // state.json is the record; a second trigger reads it and does nothing.
     if (existing?.channels?.whatsapp?.status === 'sent') return 'skipped';
+
+    // Is there an approved invoice template at all?
+    //
+    // Meta reviews templates asynchronously, so this is a normal, expected
+    // state - not a failure. The invoice is still generated and the customer
+    // can still download it; the backlog sweep sends it the moment the
+    // template is approved. Attempting a send here would burn an attempt and
+    // record a scary error for something that is simply waiting.
+    const { template: invoiceTemplate, reason: templateReason } = await getInvoiceTemplate();
+    if (!invoiceTemplate) {
+      await patchChannel(orderId, 'whatsapp', {
+        status: 'awaiting_template',
+        lastError: null,
+        lastAttemptAt: null,
+      });
+      console.log(
+        `[Invoice] order ${order.order_number}: invoice ${invoiceNumber} is waiting for an approved ` +
+          `WhatsApp template (${templateReason || 'no approved UTILITY template'}).`,
+      );
+      return 'skipped';
+    }
 
     const signedUrl = await signedUrlPromise;
     const mode = invoiceWhatsapp.mode === 'link' ? 'link' : 'document';
@@ -549,6 +615,21 @@ export async function retryPendingInvoices(limit = 25): Promise<InvoiceRetryRow[
 
     if (channel?.status === 'sent') {
       results.push({ orderId, orderNumber, ok: true, skipped: true, error: 'already sent' });
+      continue;
+    }
+
+    // Waiting for Meta to approve the template. This is not a failure and it
+    // must not consume an attempt — the whole point is that the invoice is
+    // still waiting for its turn, and it goes out the moment the template is
+    // approved.
+    if (channel?.status === 'awaiting_template') {
+      results.push({
+        orderId,
+        orderNumber,
+        ok: true,
+        skipped: true,
+        error: 'awaiting an approved WhatsApp template',
+      });
       continue;
     }
 

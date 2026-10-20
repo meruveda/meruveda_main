@@ -10,6 +10,7 @@ import {
 import * as ordersRepo from '../database/repos/orders';
 import * as trackingRepo from '../database/repos/tracking';
 import { handleTransactionCancellation } from '../services/orderService';
+import { recordTimelineEvent } from '../services/shiprocketAutomation';
 import { timingSafeEqualStr } from '../utils/timingSafe';
 
 export const shiprocketController = {
@@ -64,6 +65,15 @@ export const shiprocketController = {
             tracking_status: 'AWB ASSIGNED',
             last_tracking_update: new Date().toISOString()
           });
+          // The AWB is a milestone the admin and the customer both want to
+          // see on the order timeline.
+          const orderId = await ordersRepo.getOrderIdByShipmentId(String(shipmentId));
+          if (orderId) {
+            await recordTimelineEvent(orderId, 'AWB assigned', {
+              awb_code: awbCode,
+              courier_name: courierName || 'Shiprocket Courier',
+            });
+          }
         } catch (error) {
           console.error('Error updating order AWB in DB:', error);
         }

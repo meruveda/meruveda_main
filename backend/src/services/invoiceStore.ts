@@ -76,7 +76,13 @@ export const invoicePdfPath = (orderId: string, invoiceNumber: string) =>
 export type ChannelName = 'whatsapp' | 'email';
 
 export interface ChannelState {
-  status: 'pending' | 'sent' | 'failed' | 'not_configured';
+  /**
+   * 'awaiting_template' means the message was NOT attempted because Meta has
+   * not approved the template yet. It is neither a success nor a failure: the
+   * invoice exists and is downloadable, and the moment the template is
+   * approved the backlog sweep sends it.
+   */
+  status: 'pending' | 'sent' | 'failed' | 'not_configured' | 'awaiting_template';
   attempts: number;
   lastError?: string | null;
   sentAt?: string | null;
