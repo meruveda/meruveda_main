@@ -113,6 +113,13 @@ export const orderService = {
   async createOrder(payload: any, userId?: string) {
     const orderData = { ...payload };
     orderData.user_id = userId;
+    // Whether the delivery phone was proven, recorded on the order so the
+    // admin sees a "Phone unverified" badge for a guest checkout.
+    if (orderData.phone_verified !== undefined && (await hasColumn('orders', 'phone_verified'))) {
+      orderData.phone_verified = orderData.phone_verified === true;
+    } else {
+      delete orderData.phone_verified;
+    }
     orderData.order_number = `MV-${Math.floor(100000 + Math.random() * 900000)}`;
     orderData.status = 'pending';
 

@@ -51,7 +51,12 @@ export const getOrderById = async (req: Request, res: Response, next: NextFuncti
 
 export const createOrder = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const data = await orderService.createOrder(req.body, req.user?.id);
+    // Whether the phone was proven is recorded ON the order, so the admin can
+    // see at a glance that this order came in without a verified number (a
+    // guest checkout) and should be followed up.
+    const body = { ...req.body };
+    body.phone_verified = req.user?.phone_verified === true;
+    const data = await orderService.createOrder(body, req.user?.id);
 
     // Every order is invoiced the moment it is created â€” COD and prepaid alike,
     // paid or not. A tax invoice documents the sale, and the sale happens when
