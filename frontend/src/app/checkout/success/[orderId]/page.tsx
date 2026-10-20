@@ -67,6 +67,27 @@ export default function CheckoutSuccessPage({ params }: { params: Promise<{ orde
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [cartCleared, setCartCleared] = useState(false);
+  const [isDownloadingInvoice, setIsDownloadingInvoice] = useState(false);
+
+  /**
+   * Download the invoice for this order.
+   *
+   * It is the same PDF that goes out on WhatsApp - never a second rendering.
+   * This is the fallback that keeps the invoice reachable while the WhatsApp
+   * template is still awaiting Meta's approval.
+   */
+  const handleDownloadInvoice = async () => {
+    if (!order) return;
+    setIsDownloadingInvoice(true);
+    try {
+      const { downloadInvoicePdf } = await import("@/services/invoiceDownload");
+      await downloadInvoicePdf(order.id, order.order_number);
+    } catch (err: any) {
+      setError(err?.message || "Could not download the invoice. Please try again.");
+    } finally {
+      setIsDownloadingInvoice(false);
+    }
+  };
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -320,6 +341,21 @@ export default function CheckoutSuccessPage({ params }: { params: Promise<{ orde
 
         {/* Action Buttons */}
         <div className="flex flex-col sm:flex-row gap-4 justify-center">
+          {/* The invoice is also sent on WhatsApp, but the customer must never
+              have to wait for that: the very same PDF is downloadable here. */}
+          <button
+            type="button"
+            onClick={handleDownloadInvoice}
+            disabled={isDownloadingInvoice}
+            className="bg-white border border-gray-200 text-deep-purple hover:bg-ivory px-8 py-4 rounded-xl font-bold transition-all text-sm flex items-center justify-center gap-2 shadow-sm disabled:opacity-60"
+          >
+            {isDownloadingInvoice ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : (
+              <Download size={16} />
+            )}
+            {isDownloadingInvoice ? "Preparing..." : "Download Invoice"}
+          </button>
           <Link
             href="/account/orders"
             className="bg-deep-purple text-white hover:bg-deep-purple/90 px-8 py-4 rounded-xl font-bold transition-all text-sm flex items-center justify-center gap-2 shadow-sm"

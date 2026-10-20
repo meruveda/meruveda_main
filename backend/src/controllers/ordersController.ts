@@ -125,6 +125,11 @@ export const trackOrder = async (req: Request, res: Response, next: NextFunction
     // response is never delayed by it.
     keepAlive(refreshOrderState(order.id));
 
+    // Whether an invoice exists for this order, so the tracking page can show
+    // a download button. The invoice is delivered over WhatsApp when the
+    // template is approved; until then the customer can still download it
+    // here.
+    const invoiceState = await readInvoiceState(order.id);
     res.json({
       data: {
         order_number: order.order_number,
@@ -138,6 +143,8 @@ export const trackOrder = async (req: Request, res: Response, next: NextFunction
         tracking_status: order.tracking_status,
         estimated_delivery: order.estimated_delivery,
         last_tracking_update: order.last_tracking_update,
+        invoice_number: invoiceState?.invoiceNumber || order.invoice_number || null,
+        invoice_available: Boolean(invoiceState?.pdfPath || order.invoice_number),
         shipping_address: {
           city: order.shipping_address?.city,
           state: order.shipping_address?.state,
@@ -270,6 +277,58 @@ export const downloadInvoice = async (req: Request, res: Response, next: NextFun
       return res.status(403).json({ error: { message: 'Forbidden' } });
     }
 
+    return sendInvoicePdf(res, orderRow, id as string);
+  } catch (error: any) {
+    next(error);
+  }
+};
+
+/**
+ * PUBLIC invoice download for a guest.
+ *
+ * The customer proves ownership the same way they prove it on the tracking
+ * page: the order number AND the mobile number used at checkout. This is the
+ * fallback that makes the invoice reachable even while the WhatsApp template
+ * is still awaiting Meta's approval.
+ */
+export const downloadInvoiceForGuest = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const orderRef = String(req.query.order || req.query.orderNumber || '').trim();
+    const phone = normalizePhone(String(req.query.phone || req.query.mobile || ''));
+    if (!orderRef || !phone) {
+      return res.status(400).json({ error: { message: 'Order number and mobile number are required.' } });
+    }
+    const safeRef = orderRef.replace(/[^A-Za-z0-9_-]/g, '');
+    if (!safeRef) {
+      return res.status(400).json({ error: { message: 'Order number and mobile number are required.' } });
+    }
+
+    const order: any = await ordersRepo.findForTracking(safeRef, UUID_PATTERN.test(safeRef));
+    if (!order) {
+      return res.status(404).json({ error: { message: 'No order found for these details.' } });
+    }
+    const orderPhone = normalizePhone(order.delivery_phone || order.shipping_address?.phone || '');
+    if (!orderPhone || orderPhone !== phone) {
+      // Same message as "not found" so the endpoint cannot be used to
+      // enumerate orders.
+      return res.status(404).json({ error: { message: 'No order found for these details.' } });
+    }
+
+    return sendInvoicePdf(res, order, order.id);
+  } catch (error: any) {
+    next(error);
+  }
+};
+
+/**
+ * Write the invoice PDF to the response.
+ *
+ * The stored file is served byte-for-byte when it exists (an issued tax
+ * document is never re-rendered); otherwise the current template is rendered
+ * on the fly. Either way it is the same document the customer received.
+ */
+async function sendInvoicePdf(res: Response, orderRow: any, id: string) {
+  try {
     const send = (bytes: Buffer, invoiceNumber?: string | null) => {
       // The filename carries the invoice number the customer can quote, falling
       // back to the order number before one has been allocated.
@@ -277,7 +336,7 @@ export const downloadInvoice = async (req: Request, res: Response, next: NextFun
       res.set({
         'Content-Type': 'application/pdf',
         'Content-Disposition': `attachment; filename="Invoice-${label}.pdf"`,
-        // Invoices contain PII â€” never let a shared proxy cache them.
+        // Invoices contain PII - never let a shared proxy cache them.
         'Cache-Control': 'private, no-store, max-age=0',
         'X-Content-Type-Options': 'nosniff',
         'Content-Length': String(bytes.length),
@@ -330,12 +389,14 @@ export const downloadInvoice = async (req: Request, res: Response, next: NextFun
 
     return send(pdf, order.invoice_number);
   } catch (error: any) {
-    if (error.status === 404) {
-      return res.status(404).json({ error: { message: error.message } });
+    console.error(`[invoice] download failed for order ${id}:`, error?.message || error);
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: { message: 'Could not download invoice. Please try again.' },
+      });
     }
-    next(error);
   }
-};
+}
 
 /**
  * Store the invoice after the customer has already been served.

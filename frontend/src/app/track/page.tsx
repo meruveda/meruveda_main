@@ -2,7 +2,7 @@
 
 import { FormEvent, useState } from "react";
 import Link from "next/link";
-import { Package, Search, Loader2, ExternalLink, MapPin } from "lucide-react";
+import { Package, Search, Loader2, ExternalLink, MapPin, Download } from "lucide-react";
 import axiosInstance from "@/api/axiosInstance";
 import { CountryPhoneField } from "@/components/CountryPhoneField";
 import { DEFAULT_COUNTRY, fullPhoneDigits, type Country } from "@/constants/countries";
@@ -27,6 +27,10 @@ interface TrackingResult {
   last_tracking_update?: string | null;
   shipping_address?: { city?: string; state?: string; zipCode?: string };
   tracking_history?: TrackingLog[];
+  /** The GST invoice number, once it has been issued. */
+  invoice_number?: string | null;
+  /** True when an invoice exists and can be downloaded. */
+  invoice_available?: boolean;
 }
 
 const STATUS_STEPS = [
@@ -73,6 +77,7 @@ export default function TrackOrderPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<TrackingResult | null>(null);
+  const [isDownloadingInvoice, setIsDownloadingInvoice] = useState(false);
   const [liveAwb, setLiveAwb] = useState(false);
 
   const handleSubmit = async (e: FormEvent) => {
@@ -131,6 +136,55 @@ export default function TrackOrderPage() {
   const history = (result?.tracking_history || [])
     .slice()
     .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+  /**
+   * Download the invoice for the tracked order.
+   *
+   * The guest endpoint is verified by the order number and the mobile number
+   * the customer just entered, and serves the same PDF that goes out on
+   * WhatsApp.
+   */
+  const handleDownloadInvoice = async () => {
+    if (!result) return;
+    setIsDownloadingInvoice(true);
+    try {
+      const res = await axiosInstance.get("/orders/track/invoice", {
+        params: { order: orderRef.trim(), phone: fullPhoneDigits(phone, phoneCountry) },
+        responseType: "blob",
+      });
+      const blob = res.data as Blob;
+      if (blob.type && blob.type.includes("application/json")) {
+        let message = "Could not download the invoice. Please try again.";
+        try {
+          const parsed = JSON.parse(await blob.text());
+          if (parsed?.error?.message) message = String(parsed.error.message);
+        } catch {
+          /* keep the default message */
+        }
+        setError(message);
+        return;
+      }
+      const url = URL.createObjectURL(blob);
+      try {
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = `Invoice-${(result.order_number || "order").replace(/[^A-Za-z0-9._-]+/g, "_")}.pdf`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+      } finally {
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+    } catch (err: any) {
+      setError(
+        err.response?.data?.error?.message ||
+          err.message ||
+          "Could not download the invoice. Please try again.",
+      );
+    } finally {
+      setIsDownloadingInvoice(false);
+    }
+  };
 
   return (
     <div className="container mx-auto px-6 py-12 md:py-16 max-w-4xl">
@@ -327,6 +381,26 @@ export default function TrackOrderPage() {
                 View detailed courier tracking
                 <ExternalLink size={15} />
               </a>
+            )}
+
+            {/* The invoice is sent on WhatsApp as well, but the customer must
+                never have to wait for that: the same PDF is downloadable here,
+                verified by the order number and the mobile number they just
+                entered. */}
+            {result.invoice_available && (
+              <button
+                type="button"
+                onClick={handleDownloadInvoice}
+                disabled={isDownloadingInvoice}
+                className="mt-5 mr-4 inline-flex items-center gap-2 text-sm font-semibold text-gold hover:text-gold-light transition-colors disabled:opacity-60"
+              >
+                {isDownloadingInvoice ? (
+                  <Loader2 size={15} className="animate-spin" />
+                ) : (
+                  <Download size={15} />
+                )}
+                {isDownloadingInvoice ? "Preparing..." : "Download invoice"}
+              </button>
             )}
 
             {history.length > 0 && (

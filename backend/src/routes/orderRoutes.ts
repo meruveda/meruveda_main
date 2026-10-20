@@ -1,7 +1,7 @@
 import { Router } from 'express';
-import { getOrders, getOrderById, createOrder, updateOrderStatus, getMyOrders, updateOrder, deleteOrder, trackOrder, trackByAwb, invoiceStatus, resendInvoice, downloadInvoice, pushToShiprocket, retryShiprocketPushes } from '../controllers/ordersController';
+import { getOrders, getOrderById, createOrder, updateOrderStatus, getMyOrders, updateOrder, deleteOrder, trackOrder, trackByAwb, invoiceStatus, resendInvoice, downloadInvoice, downloadInvoiceForGuest, pushToShiprocket, retryShiprocketPushes } from '../controllers/ordersController';
 import { requireAuth, requireAdmin } from '../middleware/auth';
-import { orderCreateLimiter, trackAwbLimiter } from '../middleware/rateLimit';
+import { orderCreateLimiter, trackAwbLimiter, trackInvoiceLimiter } from '../middleware/rateLimit';
 
 const router = Router();
 
@@ -10,6 +10,11 @@ router.get('/track', trackOrder as any);
 
 // PUBLIC — live tracking by AWB entered manually (Shiprocket live API).
 router.get('/track-awb', trackAwbLimiter, trackByAwb as any);
+
+// PUBLIC — guest invoice download, verified by order number + mobile number.
+// The fallback that keeps the invoice reachable while the WhatsApp template is
+// still awaiting Meta's approval.
+router.get('/track/invoice', trackInvoiceLimiter, downloadInvoiceForGuest as any);
 
 // Retry for failed Shiprocket pushes. Mounted BEFORE requireAuth so Vercel
 // Cron (Authorization: Bearer CRON_SECRET, no user JWT) can reach it; the

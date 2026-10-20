@@ -274,3 +274,16 @@ export const trackAwbLimiter = createRateLimiter({
   max: 30,
   prefix: 'track-awb',
 });
+
+/**
+ * Guest invoice download.
+ *
+ * The endpoint needs the order number AND the matching mobile number, so it
+ * is not a free document fetcher - but a guessable order reference should
+ * still not be able to hammer the PDF renderer.
+ */
+export const trackInvoiceLimiter = createRateLimiter({
+  windowMs: 60_000,
+  max: 10,
+  prefix: 'track-invoice',
+});

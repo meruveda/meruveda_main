@@ -3,40 +3,18 @@ require('dotenv').config({ path: require('path').resolve(__dirname, '../../.env'
 import { many } from '../../src/database/db';
 
 async function main() {
-  const products = await many(
-    `SELECT id, name, slug, sku, category_id, images, status
-       FROM products ORDER BY name`,
+  const cols = await many(
+    `SELECT table_name, column_name, is_nullable, column_default
+       FROM information_schema.columns
+      WHERE table_schema='public' AND table_name='media'
+      ORDER BY ordinal_position`,
   );
-  const banners = await many(
-    `SELECT id, heading, subheading, image_url, display_order, is_active
-       FROM banners ORDER BY display_order NULLS LAST, id`,
+  console.log(JSON.stringify(cols, null, 2));
+  const cons = await many(
+    `SELECT conname, pg_get_constraintdef(oid) AS def
+       FROM pg_constraint WHERE conrelid = 'public.media'::regclass`,
   );
-  const categories = await many(
-    `SELECT id, name, slug, image, banner FROM categories ORDER BY name`,
-  );
-  const blogs = await many(
-    `SELECT id, title, slug, featured_image, status FROM blogs ORDER BY title`,
-  );
-  const media = await many(`SELECT * FROM media ORDER BY filename`);
-  const orderItems = await many(
-    `SELECT id, order_id, product_id, product_name, image_url FROM order_items ORDER BY id`,
-  );
-  const settings = await many(`SELECT key, value FROM settings ORDER BY key`);
-
-  console.log('=== PRODUCTS ===');
-  console.log(JSON.stringify(products, null, 2));
-  console.log('=== BANNERS ===');
-  console.log(JSON.stringify(banners, null, 2));
-  console.log('=== CATEGORIES ===');
-  console.log(JSON.stringify(categories, null, 2));
-  console.log('=== BLOGS ===');
-  console.log(JSON.stringify(blogs, null, 2));
-  console.log('=== MEDIA ===');
-  console.log(JSON.stringify(media, null, 2));
-  console.log('=== ORDER_ITEMS ===');
-  console.log(JSON.stringify(orderItems, null, 2));
-  console.log('=== SETTINGS ===');
-  console.log(JSON.stringify(settings, null, 2));
+  console.log(JSON.stringify(cons, null, 2));
 }
 
 main()
