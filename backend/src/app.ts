@@ -74,6 +74,24 @@ app.get('/api/health', async (req, res) => {
   }
 });
 
+// Deep health: schema drift vs expected-schema.json, both R2 buckets, env
+// names (names only), Shiprocket token, WhatsApp Graph token, and the
+// Shiprocket/invoice queues. Authenticated (CRON_SECRET bearer or admin JWT)
+// so it is not a public oracle for internal state. Read-only: no writes, no
+// messages, one Shiprocket login at most.
+import { authorize } from './routes/jobRoutes';
+import { runDeepHealth } from './services/healthDeep';
+
+app.get('/api/health/deep', authorize, async (_req, res) => {
+  try {
+    const report = await runDeepHealth();
+    res.status(report.status === 'error' ? 503 : 200).json(report);
+  } catch (err: any) {
+    console.error('[health/deep] probe failed:', redactSecrets(err?.message || err));
+    res.status(503).json({ status: 'error', error: 'Deep health probe failed' });
+  }
+});
+
 import authRoutes from './routes/authRoutes';
 import healthRoutes from './routes/healthRoutes';
 import productRoutes from './routes/productRoutes';

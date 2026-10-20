@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { getOrders, getOrderById, createOrder, updateOrderStatus, getMyOrders, updateOrder, deleteOrder, trackOrder, trackByAwb, invoiceStatus, resendInvoice, downloadInvoice, pushToShiprocket, retryShiprocketPushes } from '../controllers/ordersController';
 import { requireAuth, requireAdmin } from '../middleware/auth';
-import { orderCreateLimiter } from '../middleware/rateLimit';
+import { orderCreateLimiter, trackAwbLimiter } from '../middleware/rateLimit';
 
 const router = Router();
 
@@ -9,7 +9,7 @@ const router = Router();
 router.get('/track', trackOrder as any);
 
 // PUBLIC — live tracking by AWB entered manually (Shiprocket live API).
-router.get('/track-awb', trackByAwb as any);
+router.get('/track-awb', trackAwbLimiter, trackByAwb as any);
 
 // Retry for failed Shiprocket pushes. Mounted BEFORE requireAuth so Vercel
 // Cron (Authorization: Bearer CRON_SECRET, no user JWT) can reach it; the

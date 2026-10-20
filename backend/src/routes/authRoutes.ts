@@ -13,6 +13,9 @@ import {
   otpSendPerIpLimiter,
   otpVerifyPerPhoneLimiter,
   otpVerifyPerIpLimiter,
+  otpCooldownPerPhoneLimiter,
+  otpHourlyPerPhoneLimiter,
+  otpGlobalDailyLimiter,
   passwordResetLimiter,
 } from '../middleware/rateLimit';
 
@@ -34,8 +37,28 @@ router.post('/quick-login', quickLoginLimiter, quickLogin as any);
 // Three buckets each: composite (ip+phone), phone alone and IP alone. The
 // composite bucket alone leaves both an IP-rotation flood against one number
 // and a one-host spray across many numbers completely unthrottled.
-router.post('/otp/send', otpSendLimiter, otpSendPerPhoneLimiter, otpSendPerIpLimiter, sendOtp as any);
-router.post('/otp/resend', otpSendLimiter, otpSendPerPhoneLimiter, otpSendPerIpLimiter, resendOtp as any);
+// On top of those: a hard 30s cooldown per number, a 5/hour per-number cap
+// and one deployment-wide daily send ceiling (OTP_DAILY_SEND_CAP).
+router.post(
+  '/otp/send',
+  otpCooldownPerPhoneLimiter,
+  otpHourlyPerPhoneLimiter,
+  otpGlobalDailyLimiter,
+  otpSendLimiter,
+  otpSendPerPhoneLimiter,
+  otpSendPerIpLimiter,
+  sendOtp as any,
+);
+router.post(
+  '/otp/resend',
+  otpCooldownPerPhoneLimiter,
+  otpHourlyPerPhoneLimiter,
+  otpGlobalDailyLimiter,
+  otpSendLimiter,
+  otpSendPerPhoneLimiter,
+  otpSendPerIpLimiter,
+  resendOtp as any,
+);
 router.post(
   '/otp/verify',
   otpVerifyLimiter,

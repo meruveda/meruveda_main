@@ -125,11 +125,14 @@ export function createRateLimiter(opts: {
    * 'phone' keys on the phone number alone, so rotating source IPs cannot
    *   bypass the limit — this is what stops one victim's number being flooded.
    * 'ip' keys on the IP alone, so one host cannot brute-force many numbers.
+   * 'global' keys on a single fixed bucket for the whole deployment — used for
+   *   cross-account caps (e.g. a daily OTP send ceiling) where the intent is
+   *   "nobody, from anywhere, may exceed N per window".
    *
    * The OTP routes mount all three in series, giving a genuine per-phone AND
    * per-IP limit rather than one combined bucket.
    */
-  keyMode?: 'composite' | 'phone' | 'ip';
+  keyMode?: 'composite' | 'phone' | 'ip' | 'global';
 }) {
   const store = opts.store || defaultStore;
   const mode = opts.keyMode || 'composite';
@@ -150,7 +153,9 @@ export function createRateLimiter(opts: {
           ? `rl:${opts.prefix}:phone:${phone}`
           : mode === 'ip'
             ? `rl:${opts.prefix}:ip:${ip}`
-            : `rl:${opts.prefix}:${ip}:${phone}`;
+            : mode === 'global'
+              ? `rl:${opts.prefix}:global`
+              : `rl:${opts.prefix}:${ip}:${phone}`;
 
       const { count, resetInMs } = await store.incr(key, opts.windowMs);
 
@@ -226,4 +231,46 @@ export const adminResetPasswordLimiter = createRateLimiter({
   max: 10,
   prefix: 'admin-pw-reset',
   secondaryKey: (req) => String(req.user?.id || 'anon-admin'),
+});
+
+// ---------------------------------------------------------------------------
+// OTP abuse caps layered on top of the per-phone/per-IP buckets above.
+// ---------------------------------------------------------------------------
+// Hard 30s cooldown per number: a resend burst only wastes WhatsApp quota and
+// trains users to hammer the button.
+export const otpCooldownPerPhoneLimiter = createRateLimiter({
+  windowMs: 30_000,
+  max: 1,
+  prefix: 'otp-cooldown',
+  keyMode: 'phone',
+});
+// Per-number hourly ceiling (5/hour): the existing 10-minute bucket allows
+// 5 sends in a tight burst, this one bounds the hour.
+export const otpHourlyPerPhoneLimiter = createRateLimiter({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  prefix: 'otp-hourly',
+  keyMode: 'phone',
+});
+// Deployment-wide daily ceiling across ALL numbers: one compromised config or
+// a misbehaving client cannot drain the WhatsApp/OTP budget overnight.
+export const otpGlobalDailyLimiter = createRateLimiter({
+  windowMs: 24 * 60 * 60 * 1000,
+  max: Number(process.env.OTP_DAILY_SEND_CAP || '500') || 500,
+  prefix: 'otp-daily',
+  keyMode: 'global',
+});
+
+// Public coupon validation: the endpoint echoes per-code errors, so it is a
+// cheap oracle for brute-forcing active codes.
+export const couponValidateLimiter = createRateLimiter({
+  windowMs: 60_000,
+  max: 20,
+  prefix: 'coupon-validate',
+});
+// Public AWB tracking proxies Shiprocket (authenticated, rate-limited upstream).
+export const trackAwbLimiter = createRateLimiter({
+  windowMs: 60_000,
+  max: 30,
+  prefix: 'track-awb',
 });

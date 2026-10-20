@@ -7,6 +7,45 @@ if (process.env.NODE_ENV !== 'production') {
   dotenv.config({ path: path.resolve(__dirname, envFile) });
 }
 
+// Values pasted from a dashboard or a .env editor routinely pick up leading or
+// trailing whitespace. One stray space in a URL or secret breaks the client in
+// a way that is nearly invisible at runtime (a broken DB connection that only
+// surfaced as a leaked connection string, for example). Normalise the critical
+// keys once, here, before anything reads them.
+const TRIM_ON_BOOT = [
+  'DATABASE_URL',
+  'DATABASE_URL_APP',
+  'DATABASE_URL_UNPOOLED',
+  'R2_ACCOUNT_ID',
+  'R2_ACCESS_KEY_ID',
+  'R2_SECRET_ACCESS_KEY',
+  'R2_PUBLIC_BASE_URL',
+  'R2_BUCKET_MEDIA',
+  'R2_BUCKET_INVOICES',
+  'JWT_SECRET',
+  'CRON_SECRET',
+  'PAYU_MERCHANT_KEY',
+  'PAYU_SALT',
+  'SHIPROCKET_EMAIL',
+  'SHIPROCKET_PASSWORD',
+  'WHATSAPP_API_TOKEN',
+  'WHATSAPP_APP_SECRET',
+  'UPSTASH_REDIS_REST_URL',
+  'UPSTASH_REDIS_REST_TOKEN',
+  'FRONTEND_URL',
+  'ALLOWED_ORIGINS',
+  'OTP_HASH_PEPPER',
+  'OTP_HASH_SECRET',
+] as const;
+const whitespaceHits: string[] = [];
+for (const key of TRIM_ON_BOOT) {
+  const value = process.env[key];
+  if (typeof value === 'string' && value !== value.trim()) {
+    whitespaceHits.push(key);
+    process.env[key] = value.trim();
+  }
+}
+
 // Fail fast: JWT_SECRET must be explicitly set. A weak/guessable fallback
 // would allow anyone to forge auth tokens, so we refuse to start without it.
 if (!process.env.JWT_SECRET) {
@@ -302,11 +341,62 @@ if (nodeEnv === 'production') {
   }
 
   // Database. The API cannot serve a single request without Postgres.
-  if (!process.env.DATABASE_URL) {
+  if (!process.env.DATABASE_URL && !process.env.DATABASE_URL_APP) {
     fatal.push('DATABASE_URL — every read/write goes through Neon Postgres');
   }
   if (!process.env.DATABASE_URL_UNPOOLED) {
     warn.push('DATABASE_URL_UNPOOLED — migrations/DDL cannot run against the pooled endpoint');
+  }
+
+  // ---- Format checks ---------------------------------------------------
+  // A variable can be present and still be unusable. Every check below
+  // burned real debugging time once, so they fail (or warn) at boot instead.
+  const runtimeDbUrl = process.env.DATABASE_URL_APP || process.env.DATABASE_URL || '';
+  if (runtimeDbUrl && !runtimeDbUrl.includes('-pooler.')) {
+    fatal.push(
+      'DATABASE_URL / DATABASE_URL_APP must be the POOLED Neon endpoint (host contains "-pooler.") — the runtime connection string',
+    );
+  }
+  if (
+    process.env.DATABASE_URL_UNPOOLED &&
+    process.env.DATABASE_URL_UNPOOLED.includes('-pooler.')
+  ) {
+    warn.push(
+      'DATABASE_URL_UNPOOLED points at the pooled host — migrations/DDL may fail or behave oddly',
+    );
+  }
+  if (process.env.R2_ACCOUNT_ID && !/^[0-9a-f]{32}$/i.test(process.env.R2_ACCOUNT_ID)) {
+    fatal.push('R2_ACCOUNT_ID must be the 32-character hex account id (not a URL, not a key)');
+  }
+  if (process.env.R2_ACCESS_KEY_ID && /\s/.test(process.env.R2_ACCESS_KEY_ID)) {
+    fatal.push('R2_ACCESS_KEY_ID contains whitespace inside the value');
+  }
+  if (process.env.R2_SECRET_ACCESS_KEY && /\s/.test(process.env.R2_SECRET_ACCESS_KEY)) {
+    fatal.push('R2_SECRET_ACCESS_KEY contains whitespace inside the value');
+  }
+  // Copy-paste placeholders: the key exists but holds an obvious fake value.
+  const PLACEHOLDER_KEYS = [
+    'JWT_SECRET',
+    'PAYU_MERCHANT_KEY',
+    'PAYU_SALT',
+    'R2_ACCESS_KEY_ID',
+    'R2_SECRET_ACCESS_KEY',
+    'CRON_SECRET',
+    'OTP_HASH_PEPPER',
+    'OTP_HASH_SECRET',
+  ];
+  const placeholderHits = PLACEHOLDER_KEYS.filter((k) =>
+    /^(changeme|change-me|dummy|example|placeholder|your[-_].+|<.+>|\{\{.+\}\}|test123|xxx+|fixme)$/i.test(
+      process.env[k] || '',
+    ),
+  );
+  if (placeholderHits.length) {
+    fatal.push(`placeholder values found in: ${placeholderHits.join(', ')}`);
+  }
+  if (whitespaceHits.length) {
+    warn.push(
+      `whitespace auto-trimmed at boot from: ${whitespaceHits.join(', ')} — fix the stored value (this is how a connection string once broke in production)`,
+    );
   }
 
   // Object storage (media + invoice PDFs). Both buckets must exist already.
@@ -321,6 +411,14 @@ if (nodeEnv === 'production') {
   }
   if (!process.env.R2_PUBLIC_BASE_URL) {
     warn.push('R2_PUBLIC_BASE_URL — public media URLs cannot be built, so product images will not render');
+  } else if (!/^https:\/\/[^\s]+$/.test(process.env.R2_PUBLIC_BASE_URL)) {
+    fatal.push('R2_PUBLIC_BASE_URL must be an https URL (it must not be a bucket name or account id)');
+  }
+  if (process.env.R2_BUCKET_MEDIA && /^https?:\/\//i.test(process.env.R2_BUCKET_MEDIA)) {
+    fatal.push('R2_BUCKET_MEDIA must be a bucket name, not a URL');
+  }
+  if (process.env.R2_BUCKET_INVOICES && /^https?:\/\//i.test(process.env.R2_BUCKET_INVOICES)) {
+    fatal.push('R2_BUCKET_INVOICES must be a bucket name, not a URL');
   }
 
   // Payment gateway. PAYU_MERCHANT_KEY/PAYU_SALT are already fatal above.

@@ -21,3 +21,16 @@ if (!existsSync(src)) {
 mkdirSync(join(root, 'dist'), { recursive: true });
 cpSync(src, dest, { recursive: true });
 console.log(`[copy-assets] copied ${src} -> ${dest}`);
+
+// expected-schema.json (canonical DB shape) is read at runtime by
+// GET /api/health/deep to detect schema drift. It lives outside src/, which
+// tsc never copies, so ship it in dist/database/neon/ explicitly.
+const schemaSrc = join(root, 'database', 'neon', 'expected-schema.json');
+if (existsSync(schemaSrc)) {
+  const schemaDestDir = join(root, 'dist', 'database', 'neon');
+  mkdirSync(schemaDestDir, { recursive: true });
+  cpSync(schemaSrc, join(schemaDestDir, 'expected-schema.json'));
+  console.log(`[copy-assets] copied ${schemaSrc} -> ${schemaDestDir}`);
+} else {
+  console.warn('[copy-assets] expected-schema.json not found — /api/health/deep schema check will warn');
+}
