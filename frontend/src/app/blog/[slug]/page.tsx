@@ -1,4 +1,4 @@
-export const dynamic = "force-dynamic";
+export const revalidate = 60; // ISR: catalog pages refresh within a minute
 import Link from "next/link";
 import Image from "next/image";
 import { ChevronRight, Calendar, Clock, ArrowLeft } from "lucide-react";
@@ -8,7 +8,7 @@ import { notFound } from "next/navigation";
 async function getPost(slug: string) {
   try {
     // Try fetching by slug first, then by ID as fallback
-    const res = await fetch(`${API_BASE_URL}/blogs/${slug}`, { cache: "no-store" });
+    const res = await fetch(`${API_BASE_URL}/blogs/${slug}`, { next: { revalidate: 60 } });
     if (!res.ok) return null;
     const json = await res.json();
     return json.data || json;

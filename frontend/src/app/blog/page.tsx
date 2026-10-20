@@ -1,4 +1,4 @@
-export const dynamic = "force-dynamic";
+export const revalidate = 60; // ISR: catalog pages refresh within a minute
 import Image from "next/image";
 import Link from "next/link";
 import { API_BASE_URL } from "@/utils/apiUrl";
@@ -6,7 +6,7 @@ import { API_BASE_URL } from "@/utils/apiUrl";
 async function getBlogPosts() {
   try {
     const res = await fetch(`${API_BASE_URL}/blogs?status=published`, {
-      cache: 'no-store'
+      next: { revalidate: 60 }
     });
     if (!res.ok) {
       throw new Error('Failed to fetch blog posts');

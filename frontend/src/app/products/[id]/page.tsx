@@ -2,12 +2,12 @@ import { notFound } from 'next/navigation';
 import ProductDetailClient from './ProductDetailClient';
 import { API_BASE_URL } from '@/utils/apiUrl';
 
-export const dynamic = "force-dynamic";
+export const revalidate = 60; // ISR: catalog pages refresh within a minute
 
 async function getProduct(id: string) {
   try {
     const res = await fetch(`${API_BASE_URL}/products/${id}`, {
-      cache: 'no-store'
+      next: { revalidate: 60 }
     });
     if (!res.ok) {
       if (res.status === 404) return null;

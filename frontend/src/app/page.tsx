@@ -1,4 +1,4 @@
-export const dynamic = "force-dynamic";
+export const revalidate = 60; // ISR: catalog pages refresh within a minute
 import Image from "next/image";
 import Link from "next/link";
 import { Search, Leaf, ShieldCheck, Heart, Wind, Sparkles, Droplet, Star, ArrowRight } from "lucide-react";
@@ -16,7 +16,7 @@ export const metadata = {
 async function getBanners() {
   try {
     const res = await fetch(`${API_BASE_URL}/banners`, {
-      cache: 'no-store'
+      next: { revalidate: 60 }
     });
     if (!res.ok) {
       throw new Error('Failed to fetch banners');
@@ -36,7 +36,7 @@ async function getBanners() {
 async function getFeaturedProducts() {
   try {
     const res = await fetch(`${API_BASE_URL}/products?isFeatured=true&limit=4`, {
-      cache: 'no-store'
+      next: { revalidate: 60 }
     });
     if (!res.ok) {
       throw new Error('Failed to fetch featured products');
@@ -107,7 +107,7 @@ function getHomepageReviews() {
 async function getBlogPosts() {
   try {
     const res = await fetch(`${API_BASE_URL}/blogs?status=published`, {
-      cache: 'no-store'
+      next: { revalidate: 60 }
     });
     if (!res.ok) {
       throw new Error('Failed to fetch blog posts');
