@@ -37,6 +37,7 @@ import {
   deleteInvoiceClaim,
   freshChannelState,
   patchChannel,
+  patchInvoiceState,
   readInvoiceState,
   writeInvoiceState,
 } from './invoiceStore';
@@ -969,6 +970,19 @@ export async function claimInvoiceNumber(order: {
   const issuedAt = new Date();
 
   const existing = await readInvoiceState(orderId);
+  // The order row is the authority on the invoice number; the state file is a
+  // copy. If they disagree (a number that was corrected, or a state file that
+  // predates a fix) the ROW wins, and the state file is brought back in line.
+  const rowNumber = String(order.invoice_number || '').trim();
+  if (rowNumber) {
+    if (existing?.invoiceNumber && existing.invoiceNumber !== rowNumber) {
+      await patchInvoiceState(orderId, { invoiceNumber: rowNumber });
+      console.log(
+        `[invoice] the stored invoice number ${existing.invoiceNumber} was corrected to ${rowNumber}`,
+      );
+    }
+    return rowNumber;
+  }
   if (existing?.invoiceNumber) return existing.invoiceNumber;
 
   const outcome = await claimInvoice(

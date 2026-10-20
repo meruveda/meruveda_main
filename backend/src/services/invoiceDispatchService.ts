@@ -498,6 +498,17 @@ export async function sendInvoiceDispatch(orderId: string): Promise<InvoiceDispa
     const adminPhone = normalizePhone(config.adminWhatsappNumber);
     if (!adminPhone || !whatsappInvoiceEnabled() || !invoiceWhatsapp.configured) return 'disabled';
 
+    // The store's own number IS the sending number when the admin number is
+    // the business line. Meta rejects a message from a number to itself
+    // (error 100), so that copy is skipped rather than attempted. The store
+    // owner still sees the invoice in the admin panel.
+    if (adminPhone === normalizePhone(config.whatsappPhoneNumberId)) {
+      console.log(
+        '[Invoice] the admin WhatsApp number is the sending number - the copy to the store owner is skipped.',
+      );
+      return 'skipped';
+    }
+
     const signedUrl = await signedUrlPromise;
     const mode = invoiceWhatsapp.mode === 'link' ? 'link' : 'document';
     const delivered = await withTimeout(
@@ -619,18 +630,21 @@ export async function retryPendingInvoices(limit = 25): Promise<InvoiceRetryRow[
     }
 
     // Waiting for Meta to approve the template. This is not a failure and it
-    // must not consume an attempt — the whole point is that the invoice is
-    // still waiting for its turn, and it goes out the moment the template is
-    // approved.
+    // must not consume an attempt - BUT only while the template really is
+    // still unapproved. The moment it is approved, the invoice has to go out,
+    // so the backlog is picked up.
     if (channel?.status === 'awaiting_template') {
-      results.push({
-        orderId,
-        orderNumber,
-        ok: true,
-        skipped: true,
-        error: 'awaiting an approved WhatsApp template',
-      });
-      continue;
+      const { template: invoiceTemplate } = await getInvoiceTemplate();
+      if (!invoiceTemplate) {
+        results.push({
+          orderId,
+          orderNumber,
+          ok: true,
+          skipped: true,
+          error: 'awaiting an approved WhatsApp template',
+        });
+        continue;
+      }
     }
 
     const attempts = Number(channel?.attempts || 0);
