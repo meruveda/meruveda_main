@@ -16,6 +16,11 @@ jobs:
     name: typecheck, lint, test
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Job-level so the step `if:` below can see it (a step cannot read its own
+    # env). Empty when the repository has no DATABASE_URL secret -> schema
+    # verification skips instead of failing forks/PRs.
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
     steps:
       - uses: actions/checkout@v4
@@ -53,3 +58,26 @@ jobs:
 
       - name: Test frontend
         run: npm test -w meruveda
+
+      # --- build (what Vercel actually runs) ---------------------------------
+      - name: Build backend (tsc + runtime assets)
+        run: npm run build -w backend
+
+      # next.config throws in a production build when no backend origin is
+      # configured; CI has no .env, so give it a harmless placeholder (the
+      # Vercel platform rewrite owns /api in the real deployment).
+      - name: Build frontend (Next.js)
+        run: npm run build -w meruveda
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:5000/api
+
+      - name: Build admin
+        run: npm run build -w meruveda-admin
+
+      # --- schema drift -------------------------------------------------------
+      # Read-only comparison of the live Neon schema against
+      # backend/database/neon/expected-schema.json. Skipped when the repository
+      # has no DATABASE_URL secret (forks, PRs from outside).
+      - name: Verify Neon schema
+        if: ${{ env.DATABASE_URL != '' }}
+        run: node backend/scripts/db-verify.js
