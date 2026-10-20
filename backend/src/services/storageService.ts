@@ -7,7 +7,7 @@ import { deleteObjects, mediaBucket, publicUrlFor, putObject, r2Configured } fro
 const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
 const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5 MB
 
-/** Old Supabase bucket names are now key prefixes inside the single media bucket. */
+/** The historic bucket names are now key prefixes inside the single media bucket. */
 export const MEDIA_FOLDERS = ['general-media', 'banners', 'journal'] as const;
 export type MediaFolder = (typeof MEDIA_FOLDERS)[number];
 

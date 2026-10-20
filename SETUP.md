@@ -24,15 +24,17 @@ are set.
 
 | Variable | Required | Where to get it |
 |---|---|---|
-| `SUPABASE_URL` | yes | Supabase → Project Settings → API |
-| `SUPABASE_SERVICE_KEY` *or* `SUPABASE_SERVICE_ROLE_KEY` | yes | Supabase → Project Settings → API → service_role |
-| `SUPABASE_DB_PASSWORD` *or* `SUPABASE_DB_URL` | for the migration | Supabase → Project Settings → Database |
+| `DATABASE_URL` *or* `DATABASE_URL_APP` | yes | Neon → the pooled connection string |
+| `DATABASE_URL_UNPOOLED` | for migrations | Neon → the direct (non-pooler) connection string |
+| `R2_ACCOUNT_ID` | yes | Cloudflare R2 → Account ID |
+| `R2_ACCESS_KEY_ID` *or* `R2_SECRET_ACCESS_KEY` | yes | Cloudflare R2 → API Tokens → Object Read & Write |
+| `R2_PUBLIC_BASE_URL` | yes | the bucket's `pub-xxx.r2.dev` host, or your own domain |
 | `JWT_SECRET` | yes | `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
 | `OTP_HASH_PEPPER` *or* `OTP_HASH_SECRET` | yes | same generator as above. **Do not reuse `JWT_SECRET`** |
 | `WHATSAPP_TOKEN` *or* `WHATSAPP_API_TOKEN` | yes | Meta Business Manager → WhatsApp → API Setup → Temporary access token |
 | `WHATSAPP_PHONE_NUMBER_ID` | yes | WhatsApp → Phone numbers → your number → **API Setup** → "Phone number ID" |
 | `WHATSAPP_BUSINESS_ACCOUNT_ID` | for `wa:verify` | WhatsApp → Settings → Account ID |
-| `WHATSAPP_OTP_TEMPLATE_NAME` | yes | Meta → Message Templates → the **exact** approved name. Must be an **AUTHENTICATION** template (e.g. `login_auth`) |
+| `WHATSAPP_OTP_TEMPLATE_NAME` | yes | Meta → Message Templates → the **exact** approved name. Must be an **AUTHENTICATION** template (e.g. `meruveda_otp`) |
 | `WHATSAPP_TEMPLATE_LANG` | yes | must match the template, usually `en` |
 | `OTP_ENABLED` | yes | `true` turns on the checkout OTP endpoints |
 | `WHATSAPP_DRY_RUN` | no | `false` in production — the server refuses to boot with it `true` |
@@ -41,7 +43,7 @@ are set.
 | `ADMIN_WHATSAPP_NUMBER` | no | gets a copy of every invoice |
 
 Either-spelling pairs (`WHATSAPP_TOKEN`/`WHATSAPP_API_TOKEN`,
-`OTP_HASH_PEPPER`/`OTP_HASH_SECRET`, `SUPABASE_SERVICE_KEY`/`SUPABASE_SERVICE_ROLE_KEY`)
+`OTP_HASH_PEPPER`/`OTP_HASH_SECRET`, `DATABASE_URL`/`DATABASE_URL_APP`)
 both work; the first non-empty value wins. `WHATSAPP_DRY_RUN=true` logs a send
 instead of dispatching it — it is for local work only and must never be `true`
 in production.
@@ -55,7 +57,7 @@ One command, five gates, first failure stops the run:
 2. **BACKUP** — the latest snapshot must report `RESTORABLE`, else it stops.
 3. **MIGRATE** — the schema is verified first; if it is already applied this is
    a clean skip. Otherwise the bundle SQL is re-scanned for
-   `DROP`/`TRUNCATE`/`DELETE`/`UPDATE` (delta `002` excluded), row counts for
+   `DROP`/`TRUNCATE`/`DELETE` (and an unguarded `UPDATE`), row counts for
    `users`, `orders`, `order_items`, `media`, `products` are recorded, the
    migration runs **once** in a single transaction with no retry, the schema is
    re-verified, and the row counts must be identical afterwards.
@@ -69,7 +71,7 @@ One command, five gates, first failure stops the run:
 ## 3. `npm run db:migrate:pending`
 
 Applies `backend/database/pending-migration.sql` over a direct Postgres
-connection. No Supabase dashboard needed. It refuses to run unless, in order:
+connection. No dashboard is needed. It refuses to run unless, in order:
 
 1. a connection env var is present (a missing one is named, not thrown)
 2. the SQL contains no `DROP` / `TRUNCATE` / `DELETE` / `UPDATE`
@@ -169,4 +171,4 @@ npm run db:restore         # dry run — prints the plan, writes nothing
 npm run db:restore -- --apply
 ```
 
-Never reset the Supabase project; that destroys what the snapshot depends on.
+Never drop the Neon branch; that is what the snapshot depends on.

@@ -3,7 +3,7 @@ import multer from 'multer';
 import { uploadMedia, getMedia, deleteMedia } from '../controllers/mediaController';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 
-// Use memory storage for buffer upload to Supabase
+// Use memory storage for the buffer upload to R2
 const storage = multer.memoryStorage();
 const upload = multer({ storage });
 const router = Router();

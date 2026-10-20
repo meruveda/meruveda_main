@@ -1,7 +1,6 @@
 # Canonical Neon migrations
 
-Ek hi source of truth for the live schema. Supabase-era `database/deltas/` and
-`sql/migrations/` are historical; anything new goes here.
+The one source of truth for the live schema. Anything new goes here.
 
 ## Rules
 

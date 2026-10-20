@@ -55,7 +55,7 @@ export const createCoupon = async (req: Request, res: Response, next: NextFuncti
     const couponData = { ...req.body };
     if (couponData.code) couponData.code = couponData.code.toUpperCase();
     
-    // Map camelCase to snake_case for Supabase
+    // Map camelCase to snake_case for the database
     if (couponData.expiresAt !== undefined) {
       couponData.expires_at = couponData.expiresAt;
       delete couponData.expiresAt;

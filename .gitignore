@@ -58,7 +58,7 @@ admin/vite.config.d.ts.map
 backend/.cache/
 backend/*.log
 
-# dev scratch scripts + accidental supabase CLI --help dumps
+# dev scratch scripts + accidental CLI --help dumps
 scratch*
 backend/schema.json
 backend/schema.ts

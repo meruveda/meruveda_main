@@ -10,7 +10,7 @@
 -- 010 (invoice + Shiprocket push bookkeeping), 011 (admin columns),
 -- 012 (invoice numbering), 013 (analytics events).
 --
--- No RLS, no Supabase roles, no storage policies: Neon has no `anon` /
+-- No RLS, no extra roles, no storage policies: Neon has no `anon` /
 -- `service_role` and the backend connects as the database owner.
 -- =============================================================================
 

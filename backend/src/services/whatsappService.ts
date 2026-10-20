@@ -777,7 +777,7 @@ export async function sendOnce(options: {
  *     Body variables: {{1}} name {{2}} order no {{3}} invoice no {{4}} amount.
  *
  *   'link' — no attachment; a signed, expiring Storage URL goes in the body as
- *     {{5}}. Never a bare order id: the URL is minted by Supabase with an
+ *     {{5}}. Never a bare order id: the URL is minted by storage with an
  *     expiry (INVOICE_SIGNED_URL_EXPIRY_SECONDS, default 7 days) so a guessable
  *     /orders/:id link can never be used to fetch someone else's invoice.
  *

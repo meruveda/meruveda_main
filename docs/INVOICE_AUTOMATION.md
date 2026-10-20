@@ -8,7 +8,7 @@ WhatsApp without any human step.
 
 > ## NO DATABASE CHANGES REQUIRED
 >
-> The invoice pipeline runs on `SUPABASE_URL` + `SUPABASE_SERVICE_KEY` only —
+> The invoice pipeline runs on the R2 credentials only -
 > existing tables via PostgREST plus the Storage API. There is **nothing to run**,
 > and there never will be. Every piece of invoice bookkeeping (the invoice
 > number, the issue timestamp, the delivery state and the channel attempt
@@ -115,7 +115,7 @@ invoice. The substantive changes, not the cosmetics:
   its own idea of the number.
 * `INVOICE_AUTO_SEND` defaults to **on**. The flag exists only to pause delivery
   during an incident, and is read per dispatch rather than cached at boot.
-* The PDF is written **once** to private Supabase Storage. It is never regenerated —
+* The PDF is written **once** to the private R2 bucket. It is never regenerated —
   an issued invoice is a legal document, and re-rendering after an amount change
   would silently produce a *different* document under the *same* number.
 

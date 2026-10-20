@@ -85,7 +85,7 @@ Then **redeploy** (env var changes only apply to new deployments).
 ## 5. Verify
 
 1. Place a COD test order.
-2. Check the invoice appears in Supabase storage under
+2. Check the invoice appears in the private R2 bucket under
    `invoices/<order_id>/state.json` — `channels.whatsapp.status` moves to `sent`.
 3. Confirm delivery in Meta Business Manager → WhatsApp → Message history.
 4. The store admin page shows WhatsApp: `Sent`, or `Failed (<Meta reason>)`.

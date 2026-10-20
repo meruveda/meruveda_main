@@ -7,7 +7,7 @@
  * and missing from information_schema is an error; objects present in the
  * database but not listed are reported as drift.
  *
- * Unlike the old Supabase probe this needs the database itself (it reads
+ * Unlike the old dashboard probe this needs the database itself (it reads
  * information_schema), so run it where backend/.env is available — locally,
  * in CI with a Neon branch, or against preview.
  *

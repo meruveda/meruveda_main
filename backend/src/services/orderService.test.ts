@@ -23,7 +23,7 @@ import { generateToken } from '../utils/jwt';
 // ---------------------------------------------------------------------------
 type Row = Record<string, any>;
 
-function installSupabaseFake(
+function installDbFake(
   t: any,
   opts: {
     products?: Row[];
@@ -91,7 +91,7 @@ const basePayload = (overrides: Row = {}) => ({
 });
 
 test('COD order: total = subtotal - discount + shipping (incl. COD handling)', async (t) => {
-  const fake = installSupabaseFake(t, { products: [{ id: 'p1', name: 'Ashwagandha', sku: 'ASH-1' }] });
+  const fake = installDbFake(t, { products: [{ id: 'p1', name: 'Ashwagandha', sku: 'ASH-1' }] });
 
   const order = await orderService.createOrder(basePayload() as any, 'user-1');
 
@@ -108,7 +108,7 @@ test('COD order: total = subtotal - discount + shipping (incl. COD handling)', a
 });
 
 test('COD order: a client-sent total/shipping cannot underpay the order', async (t) => {
-  installSupabaseFake(t, { products: [{ id: 'p1', name: 'Ashwagandha' }] });
+  installDbFake(t, { products: [{ id: 'p1', name: 'Ashwagandha' }] });
 
   const order = await orderService.createOrder(
     basePayload({ total: 1, shipping_fee: 0, shipping_cost: 0 } as any),
@@ -120,7 +120,7 @@ test('COD order: a client-sent total/shipping cannot underpay the order', async 
 });
 
 test('COD order under the free-shipping threshold above 1000 pays no shipping', async (t) => {
-  installSupabaseFake(t, { products: [{ id: 'p1', name: 'Ashwagandha' }] });
+  installDbFake(t, { products: [{ id: 'p1', name: 'Ashwagandha' }] });
 
   // 1200 subtotal -> shipping 0, COD handling 50.
   const order = await orderService.createOrder(
@@ -133,7 +133,7 @@ test('COD order under the free-shipping threshold above 1000 pays no shipping', 
 });
 
 test('Prepaid order carries no COD handling fee', async (t) => {
-  installSupabaseFake(t, { products: [{ id: 'p1', name: 'Ashwagandha' }] });
+  installDbFake(t, { products: [{ id: 'p1', name: 'Ashwagandha' }] });
 
   const order = await orderService.createOrder(
     basePayload({ payment_method: 'PayU', subtotal: 1200 } as any),
@@ -145,7 +145,7 @@ test('Prepaid order carries no COD handling fee', async (t) => {
 });
 
 test('GST is computed from the DB product rate, not from the payload', async (t) => {
-  installSupabaseFake(t, {
+  installDbFake(t, {
     products: [{ id: 'p1', name: 'Ashwagandha', seo_metadata: { gst_rate: 18 } }],
   });
 
@@ -159,7 +159,7 @@ test('GST is computed from the DB product rate, not from the payload', async (t)
 });
 
 test('a product missing from the DB falls back to the 5% default rate', async (t) => {
-  installSupabaseFake(t, { products: [] });
+  installDbFake(t, { products: [] });
 
   const order = await orderService.createOrder(
     basePayload({ subtotal: 1050, items: [{ product_id: 'missing', price: 1050, quantity: 1 }] } as any),
@@ -171,7 +171,7 @@ test('a product missing from the DB falls back to the 5% default rate', async (t
 });
 
 test('COD order writes a pending transaction and decrements stock', async (t) => {
-  const fake = installSupabaseFake(t, {
+  const fake = installDbFake(t, {
     products: [{ id: 'p1', name: 'Ashwagandha' }],
     stock: 10,
   });
@@ -192,7 +192,7 @@ test('COD order writes a pending transaction and decrements stock', async (t) =>
 });
 
 test('Prepaid order writes no transaction at placement (PayU logs on callback)', async (t) => {
-  const fake = installSupabaseFake(t, { products: [{ id: 'p1', name: 'Ashwagandha' }] });
+  const fake = installDbFake(t, { products: [{ id: 'p1', name: 'Ashwagandha' }] });
 
   await orderService.createOrder(basePayload({ payment_method: 'PayU', subtotal: 1200 } as any), 'user-1');
 
@@ -200,7 +200,7 @@ test('Prepaid order writes no transaction at placement (PayU logs on callback)',
 });
 
 test('billing_address falls back to shipping_address when omitted', async (t) => {
-  const fake = installSupabaseFake(t, { products: [{ id: 'p1', name: 'Ashwagandha' }] });
+  const fake = installDbFake(t, { products: [{ id: 'p1', name: 'Ashwagandha' }] });
 
   await orderService.createOrder(basePayload() as any, 'user-1');
 
@@ -209,7 +209,7 @@ test('billing_address falls back to shipping_address when omitted', async (t) =>
 });
 
 test('the order is stamped with the authenticated user id', async (t) => {
-  const fake = installSupabaseFake(t, { products: [{ id: 'p1', name: 'Ashwagandha' }] });
+  const fake = installDbFake(t, { products: [{ id: 'p1', name: 'Ashwagandha' }] });
 
   const token = generateToken({ id: 'user-42', role: 'customer', email: 'c@example.com' });
   assert.ok(token);
@@ -220,7 +220,7 @@ test('the order is stamped with the authenticated user id', async (t) => {
   assert.equal(config.shippingIsTaxable, false);
 });
 test('an order without enough stock fails with 409 and writes nothing', async (t) => {
-  const fake = installSupabaseFake(t, {
+  const fake = installDbFake(t, {
     products: [{ id: 'p1', name: 'Ashwagandha' }],
     stock: 0,
   });
@@ -242,7 +242,7 @@ test('an order without enough stock fails with 409 and writes nothing', async (t
 });
 
 test('stock is decremented only while the conditional UPDATE matches', async (t) => {
-  const fake = installSupabaseFake(t, {
+  const fake = installDbFake(t, {
     products: [{ id: 'p1', name: 'Ashwagandha' }],
     stock: 1,
   });
@@ -259,7 +259,7 @@ test('stock is decremented only while the conditional UPDATE matches', async (t)
 });
 
 test('an unusable coupon aborts the whole order', async (t) => {
-  const fake = installSupabaseFake(t, { products: [{ id: 'p1', name: 'Ashwagandha' }] });
+  const fake = installDbFake(t, { products: [{ id: 'p1', name: 'Ashwagandha' }] });
   t.mock.method(couponsRepo, 'incrementUsageAtomic', async () => null);
 
   await assert.rejects(
@@ -275,7 +275,7 @@ test('an unusable coupon aborts the whole order', async (t) => {
 });
 
 test('a claimed coupon increments used_count once, inside the order transaction', async (t) => {
-  const fake = installSupabaseFake(t, { products: [{ id: 'p1', name: 'Ashwagandha' }] });
+  const fake = installDbFake(t, { products: [{ id: 'p1', name: 'Ashwagandha' }] });
   const calls: string[] = [];
   t.mock.method(couponsRepo, 'incrementUsageAtomic', async (code: string) => {
     calls.push(code);

@@ -4,13 +4,16 @@ import { promises as dns } from 'dns';
 
 // Env must be set BEFORE imageRoutes is loaded: the allowlist is computed at
 // module import time and cached.
-process.env.SUPABASE_URL = 'https://unit-test-project.supabase.co';
+//
+// The only allowlisted storage host is the R2 public domain - there is no
+// legacy provider left. IMAGE_PROXY_EXTRA_HOSTS adds a second one.
+process.env.R2_PUBLIC_BASE_URL = 'https://pub-unit-test.r2.dev';
 process.env.IMAGE_PROXY_EXTRA_HOSTS = 'images.example.com';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { validateUpstreamUrl, fetchUpstreamImage } = require('./imageRoutes') as typeof import('./imageRoutes');
 
-const ALLOWED = 'https://unit-test-project.supabase.co/bucket/photo.png';
+const ALLOWED = 'https://pub-unit-test.r2.dev/products/photo.png';
 const PUBLIC_IP = '93.184.216.34';
 
 type Addresses = Array<{ address: string; family: number }>;
@@ -55,8 +58,16 @@ test('allowlisted host resolving to ::ffff:10.0.0.1 is rejected with 403', async
   });
 });
 
-test('wildcard removed: sibling *.supabase.co host is rejected with 400', async () => {
-  await assert.rejects(validateUpstreamUrl('https://other-project.supabase.co/bucket/photo.png'), (err: any) => {
+test('a host that is not the R2 domain is rejected with 400', async () => {
+  await assert.rejects(validateUpstreamUrl('https://not-the-r2-host.example/bucket/photo.png'), (err: any) => {
+    assert.equal(err.status, 400);
+    assert.match(err.message, /Unsupported image URL/);
+    return true;
+  });
+});
+
+test('a wildcard sibling of the R2 host is rejected with 400', async () => {
+  await assert.rejects(validateUpstreamUrl('https://evil.pub-unit-test.r2.dev/photo.png'), (err: any) => {
     assert.equal(err.status, 400);
     assert.match(err.message, /Unsupported image URL/);
     return true;
@@ -75,7 +86,7 @@ test('302 redirect to a non-allowlisted host is rejected', async (t) => {
 
 test('3+ redirects are rejected with 502', async (t) => {
   mockDns(t, [{ address: PUBLIC_IP, family: 4 }]);
-  const fetchMock = mockFetch(t, async () => resp(302, { location: 'https://unit-test-project.supabase.co/next.png' }));
+  const fetchMock = mockFetch(t, async () => resp(302, { location: 'https://pub-unit-test.r2.dev/next.png' }));
   await assert.rejects(fetchUpstreamImage(ALLOWED), (err: any) => {
     assert.equal(err.status, 502);
     assert.match(err.message, /Too many redirects/);

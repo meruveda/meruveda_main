@@ -4,7 +4,7 @@ import { hasColumn } from '../services/schemaGuard';
 import { verifyToken } from '../utils/jwt';
 
 const MIGRATION_HINT =
-  'Migration 006_missing_columns.sql not applied. Run it in the Supabase SQL editor (backend/database/deltas/), then retry.';
+  'The database is missing a column this feature needs. Run npm run db:migrate, then retry.';
 
 function requesterIsAdmin(req: Request): boolean {
   return req.user?.role === 'admin';

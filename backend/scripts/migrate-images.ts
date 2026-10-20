@@ -1,7 +1,7 @@
 /**
- * Move every image off Supabase and onto Cloudflare R2.
+ * Move every image onto Cloudflare R2.
  *
- * The Supabase project is suspended (every public object URL answers HTTP
+ * The old image host is gone (every public object URL answers HTTP
  * 402), so all 75 image references in the database are broken on the live
  * site. The bytes still exist in the local proxy cache
  * (backend/.cache/images), so the migration is:
@@ -356,7 +356,7 @@ async function main(): Promise<void> {
 
       // Historical order item thumbnails follow their product.
       const itemRows = await client.query(
-        `SELECT oi.id, oi.image_url, oi.product_id FROM order_items oi WHERE oi.image_url LIKE '%supabase.co%'`,
+        `SELECT oi.id, oi.image_url, oi.product_id FROM order_items oi WHERE oi.image_url LIKE '%r2.dev%'`,
       );
       for (const item of itemRows.rows) {
         const productSlot = slots.find((s) => s.table === 'products' && s.id === item.product_id);

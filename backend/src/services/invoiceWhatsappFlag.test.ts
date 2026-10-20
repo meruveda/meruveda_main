@@ -178,7 +178,7 @@ const PAYLOAD_INPUT = {
   orderNumber: 'MV-748371',
   invoiceNumber: 'MV/26-27/000123',
   total: '₹1,098.00',
-  signedUrl: 'https://project.supabase.co/storage/v1/object/sign/invoice/x.pdf?token=abc',
+  signedUrl: 'https://pub-example.r2.dev/invoice/x.pdf?token=abc',
   filename: 'Invoice-MV_26_27_000123.pdf',
 };
 

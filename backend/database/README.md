@@ -5,7 +5,7 @@ All SQL is **additive-only and idempotent** (every statement is
 Re-running any file is safe. Nothing drops, truncates, or deletes.
 
 **Never run migrations against production from a script** — paste into the
-Supabase SQL editor (or `psql` with the service-role connection) and run once,
+run once against Neon:
 by hand, in the order below.
 
 ## Run order
@@ -24,7 +24,6 @@ by hand, in the order below.
 | 10 | `deltas/010_auto_invoice_shiprocket.sql` | invoice_sent_at/invoice_error, shiprocket_push_* |
 | 11 | `deltas/011_admin_columns.sql` | blogs/categories/support_tickets admin columns |
 | 12 | `sql/migrations/2026-10-14_invoice_sequence.sql` | orders.invoice_number, invoice_sequences counter, `assign_invoice_number()` |
-| 13 | `sql/migrations/2026-10-14_row_level_security.sql` | **Supabase only** - RLS + storage policies; do NOT run on Neon |
 | 14 | `sql/migrations/2026-10-14_analytics_events.sql` | analytics_events table (storefront funnel: view_item / add_to_cart / begin_checkout / purchase) |
 
 **Live database already at delta 010?** Run only steps 11-14 (or the
@@ -32,7 +31,7 @@ consolidated `PENDING_DELTAS.sql`).
 
 ### Neon Postgres
 
-Neon has no Supabase roles, no RLS requirement and no `storage` schema. Use the
+Neon has no roles, no RLS requirement and no `storage` schema. Use the
 single consolidated script instead of the per-feature order above:
 
 | Step | File | Notes |

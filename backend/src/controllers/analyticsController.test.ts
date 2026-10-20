@@ -15,7 +15,7 @@ import { isOrderQualifying, orderRevenue } from './analyticsController';
  * payment_status is 'paid' or 'pending', status is 'delivered' or 'pending'.
  */
 
-// Exactly as stored in Supabase.
+// Exactly as stored in the database.
 const COD = 'Cash On Delivery';
 const PREPAID = 'PayOnline (via PayU)';
 

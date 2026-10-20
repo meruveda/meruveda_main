@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from 'next/server'
 
 /**
  * Middleware — lightweight JWT cookie check.
- * Supabase has been replaced by a client-side mock auth system.
+ * The storefront auth is a client-side mock auth system.
  * This middleware checks for the mock auth token cookie on protected paths.
  *
  * When the real backend is integrated, replace the cookie check

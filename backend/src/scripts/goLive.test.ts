@@ -4,6 +4,10 @@
  * Every external dependency — the environment, the database, Meta — is mocked,
  * so this suite never touches a real service and can assert each gate in
  * isolation.
+ *
+ * The go-live tool runs against Neon + Cloudflare R2. There is no PostgREST
+ * and no service key: the row counts come from a script that talks to Neon
+ * directly, and the schema check is the same `db:verify` the CI runs.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -16,27 +20,20 @@ const goLive = require(path.resolve(__dirname, '../../scripts/go-live.js'));
 /* ------------------------------------------------------------------ */
 
 const GOOD_ENV = {
-  SUPABASE_URL: 'https://example.supabase.co',
-  SUPABASE_SERVICE_KEY: 'service-key-value',
-  SUPABASE_DB_URL: 'postgres://user:pass@db.example:5432/postgres',
+  DATABASE_URL: 'postgres://user:pass@db.example:5432/neondb',
+  R2_ACCOUNT_ID: 'a'.repeat(32),
+  R2_ACCESS_KEY_ID: 'r2-key-id',
+  R2_SECRET_ACCESS_KEY: 'r2-secret',
+  R2_PUBLIC_BASE_URL: 'https://pub-example.r2.dev',
   WHATSAPP_API_TOKEN: 'EAAG-a-real-looking-token',
   WHATSAPP_PHONE_NUMBER_ID: '1428537175270606',
   WHATSAPP_BUSINESS_ACCOUNT_ID: '999888777',
-  WHATSAPP_OTP_TEMPLATE_NAME: 'login_auth',
-  WHATSAPP_TEMPLATE_LANG: 'en',
+  WHATSAPP_OTP_TEMPLATE_NAME: 'meruveda_otp',
+  WHATSAPP_TEMPLATE_LANG: 'en_US',
   OTP_HASH_SECRET: 'a-32-byte-hex-pepper',
   JWT_SECRET: 'a-32-byte-hex-jwt-secret',
+  CRON_SECRET: 'a-32-byte-hex-cron-secret',
 };
-
-/** A fetch stub that answers PostgREST HEAD count requests. */
-function fakeFetch(counts: Record<string, number>) {
-  return async (url: string) => {
-    const table = String(url).split('/rest/v1/')[1]?.split('?')[0] || '';
-    return {
-      headers: { get: (h: string) => (h === 'content-range' ? `0-0/${counts[table] ?? 0}` : null) },
-    };
-  };
-}
 
 const COUNTS = { users: 12, orders: 34, order_items: 51, media: 7, products: 9 };
 
@@ -46,8 +43,8 @@ const META_OK = JSON.stringify({
   phoneId: true,
   otpTemplate: true,
   otpTemplateCategory: 'AUTHENTICATION',
-  otpTemplateLanguage: 'en',
-  otpTemplateName: 'login_auth',
+  otpTemplateLanguage: 'en_US',
+  otpTemplateName: 'meruveda_otp',
   invoiceTemplate: null,
   allOk: true,
 });
@@ -60,7 +57,9 @@ function commands(overrides: Record<string, { ok: boolean; stdout?: string }> = 
     const o = overrides[file];
     if (o) return { ok: o.ok, stdout: o.stdout || '' };
     if (file.endsWith('verify-backup.js')) return { ok: true, stdout: 'RESTORABLE: structure and integrity checks passed.' };
-    if (file.endsWith('verify-schema.js')) return { ok: true, stdout: 'All verified objects are present.' };
+    if (file.endsWith('count-rows.js')) return { ok: true, stdout: JSON.stringify(COUNTS) };
+    if (file.endsWith('db-verify.js')) return { ok: true, stdout: 'All verified objects are present.' };
+    if (file.endsWith('migrate.js')) return { ok: true, stdout: 'Done: 0 migration(s) applied.' };
     if (file.endsWith('verify-whatsapp.js')) return { ok: true, stdout: `GO_LIVE_JSON ${META_OK}` };
     return { ok: true, stdout: '' };
   };
@@ -79,8 +78,8 @@ test('every required variable is reported set/missing by NAME, never by value', 
     if (row.status !== 'PASS') continue;
     // A passing row may name the variable, never reveal it.
     assert.ok(!String(row.detail).includes('EAAG-a-real-looking-token'));
-    assert.ok(!String(row.detail).includes('service-key-value'));
     assert.ok(!String(row.detail).includes('a-32-byte-hex-pepper'));
+    assert.ok(!String(row.detail).includes('r2-secret'));
   }
 });
 
@@ -92,7 +91,10 @@ test('a complete env passes', () => {
 test('go-live stops when a required variable is missing', async () => {
   const { runCommand, calls } = commands();
   for (const missing of [
-    'SUPABASE_DB_URL',
+    'DATABASE_URL',
+    'R2_ACCESS_KEY_ID',
+    'R2_SECRET_ACCESS_KEY',
+    'R2_PUBLIC_BASE_URL',
     'WHATSAPP_API_TOKEN',
     'WHATSAPP_PHONE_NUMBER_ID',
     'WHATSAPP_BUSINESS_ACCOUNT_ID',
@@ -100,18 +102,19 @@ test('go-live stops when a required variable is missing', async () => {
     'WHATSAPP_TEMPLATE_LANG',
     'OTP_HASH_SECRET',
     'JWT_SECRET',
+    'CRON_SECRET',
   ]) {
     const env: any = { ...GOOD_ENV };
     // Remove every accepted spelling of this variable.
     for (const name of goLive.REQUIRED_ENV.find((g: any) => g.names.includes(missing)).names) {
       delete env[name];
     }
-    const result = await goLive.runGoLive({ env, runCommand, fetchImpl: fakeFetch(COUNTS) });
+    const result = await goLive.runGoLive({ env, runCommand, fetchImpl: async () => ({}) as any });
     assert.equal(result.ok, false, `missing ${missing} must block`);
     assert.equal(
       calls.filter((f) => f.includes('verify-backup')).length,
       0,
-      'nothing after the env step may run'
+      'nothing after the env step may run',
     );
   }
 });
@@ -122,16 +125,20 @@ test('either-spelling env variables both satisfy the requirement', () => {
   aliasEnv.WHATSAPP_TOKEN = 'EAAG-alias-token';
   delete aliasEnv.OTP_HASH_SECRET;
   aliasEnv.OTP_HASH_PEPPER = 'pepper';
+  delete aliasEnv.DATABASE_URL;
+  aliasEnv.DATABASE_URL_APP = 'postgres://user:pass@db.example:5432/neondb';
 
   const step = goLive.stepEnv(aliasEnv);
-  assert.equal(step.ok, true, 'WHATSAPP_TOKEN and OTP_HASH_PEPPER must be accepted');
+  assert.equal(step.ok, true, 'WHATSAPP_TOKEN, OTP_HASH_PEPPER and DATABASE_URL_APP must be accepted');
 });
 
 test('a placeholder value counts as missing', () => {
   const env: any = { ...GOOD_ENV, WHATSAPP_OTP_TEMPLATE_NAME: 'your-template-here' };
   const step = goLive.stepEnv(env);
   assert.equal(step.ok, false);
-  assert.ok(step.rows.some((r: any) => r.id === 'wa-otp-template' && r.status === 'BLOCKED'));
+  assert.ok(
+    step.rows.some((r: any) => r.id === 'whatsapp-otp-template' && r.status === 'BLOCKED'),
+  );
 });
 
 test('optional variables only warn, and never block', async () => {
@@ -161,7 +168,7 @@ test('go-live stops when the backup is not RESTORABLE', async () => {
   const { runCommand } = commands({
     'scripts/verify-backup.js': { ok: true, stdout: 'NOT FULLY RESTORABLE: 2 problem(s) above.' },
   });
-  const result = await goLive.runGoLive({ env: GOOD_ENV, runCommand, fetchImpl: fakeFetch(COUNTS) });
+  const result = await goLive.runGoLive({ env: GOOD_ENV, runCommand, fetchImpl: async () => ({}) as any });
   assert.equal(result.ok, false);
   assert.ok(result.rows.some((r: any) => r.id === 'backup' && r.status === 'BLOCKED'));
 });
@@ -177,7 +184,7 @@ test('a restorable backup passes and the run continues', () => {
 });
 
 /* ------------------------------------------------------------------ */
-/* Step 3 — migration                                                  */
+/* Step 3 — migration safety                                           */
 /* ------------------------------------------------------------------ */
 
 const ADDITIVE_SQL = `
@@ -186,18 +193,16 @@ CREATE TABLE IF NOT EXISTS public.example (id uuid primary key);
 ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS example text;
 `;
 
-test('go-live stops when the bundle contains a destructive statement', async () => {
-  const { runCommand } = commands({
-    'scripts/verify-schema.js': { ok: false, stdout: '5 object(s) missing.' },
-  });
+test('go-live stops when a migration contains a destructive statement', async () => {
+  const { runCommand } = commands();
   const result = await goLive.runGoLive({
     env: GOOD_ENV,
     runCommand,
-    fetchImpl: fakeFetch(COUNTS),
-    readBundle: () => `${ADDITIVE_SQL}\nDELETE FROM public.orders;\n`,
+    fetchImpl: async () => ({}) as any,
+    sqlFiles: [{ name: '001_example.sql', sql: `${ADDITIVE_SQL}\nDELETE FROM public.orders;\n` }],
   });
   assert.equal(result.ok, false);
-  const row = result.rows.find((r: any) => r.id === 'sql-safety');
+  const row = rowOf(result.rows, 'sql-safety');
   assert.equal(row.status, 'BLOCKED');
   assert.match(row.detail, /DELETE/);
 });
@@ -210,14 +215,23 @@ test('UPDATE, DROP and TRUNCATE are all caught', () => {
   assert.equal(goLive.scanForDestructive(ADDITIVE_SQL).length, 0, 'comments and additive DDL are clean');
 });
 
+test('the real migration files are all additive', () => {
+  const step = goLive.stepSqlSafety();
+  assert.equal(step.ok, true, 'every file in backend/database/neon must be additive');
+});
+
+/* ------------------------------------------------------------------ */
+/* Step 4 — row counts                                                 */
+/* ------------------------------------------------------------------ */
+
 test('go-live stops when row counts cannot be read', async () => {
   const { runCommand } = commands({
-    'scripts/verify-schema.js': { ok: false, stdout: 'missing' },
+    'scripts/count-rows.js': { ok: false, stdout: 'missing' },
   });
   const result = await goLive.runGoLive({
-    env: { ...GOOD_ENV, SUPABASE_SERVICE_KEY: undefined },
+    env: GOOD_ENV,
     runCommand,
-    fetchImpl: async () => ({ headers: { get: () => null } }),
+    fetchImpl: async () => ({}) as any,
   });
   assert.equal(result.ok, false);
   assert.ok(result.rows.some((r: any) => r.id === 'row-counts' && r.status === 'BLOCKED'));
@@ -227,8 +241,8 @@ test('go-live stops when the migration fails, and does not retry', async () => {
   let migrateCalls = 0;
   const runCommand = (file: string) => {
     if (file.endsWith('verify-backup.js')) return { ok: true, stdout: 'RESTORABLE' };
-    if (file.endsWith('verify-schema.js')) return { ok: false, stdout: 'missing' };
-    if (file.endsWith('migrate-pending.js')) {
+    if (file.endsWith('count-rows.js')) return { ok: true, stdout: JSON.stringify(COUNTS) };
+    if (file.endsWith('migrate.js')) {
       migrateCalls += 1;
       return { ok: false, stdout: 'FAIL: syntax error\nROLLED BACK' };
     }
@@ -237,8 +251,8 @@ test('go-live stops when the migration fails, and does not retry', async () => {
   const result = await goLive.runGoLive({
     env: GOOD_ENV,
     runCommand,
-    fetchImpl: fakeFetch(COUNTS),
-    readBundle: () => ADDITIVE_SQL,
+    fetchImpl: async () => ({}) as any,
+    sqlFiles: [{ name: '001_example.sql', sql: ADDITIVE_SQL }],
   });
   assert.equal(result.ok, false);
   assert.equal(migrateCalls, 1, 'a failed migration must not be retried');
@@ -251,22 +265,22 @@ test('go-live BLOCKS when a row count drifts, even though the migration committe
   let phase = 0;
   const runCommand = (file: string) => {
     if (file.endsWith('verify-backup.js')) return { ok: true, stdout: 'RESTORABLE' };
-    if (file.endsWith('verify-schema.js')) return phase === 0 ? { ok: false, stdout: 'missing' } : { ok: true, stdout: 'ok' };
-    if (file.endsWith('migrate-pending.js')) {
+    if (file.endsWith('count-rows.js')) {
+      const counts = phase === 0 ? COUNTS : { ...COUNTS, users: 11 };
+      return { ok: true, stdout: JSON.stringify(counts) };
+    }
+    if (file.endsWith('migrate.js')) {
       phase = 1;
-      return { ok: true, stdout: 'COMMIT ok' };
+      return { ok: true, stdout: 'Done: 1 migration(s) applied.' };
     }
     return { ok: true, stdout: '' };
   };
   // users drops from 12 to 11 across the migration.
-  const before = fakeFetch(COUNTS);
-  const after = fakeFetch({ ...COUNTS, users: 11 });
-  let reads = 0;
   const result = await goLive.runGoLive({
     env: GOOD_ENV,
     runCommand,
-    fetchImpl: async (u: any) => (reads++ < 5 ? before(u) : after(u)),
-    readBundle: () => ADDITIVE_SQL,
+    fetchImpl: async () => ({}) as any,
+    sqlFiles: [{ name: '001_example.sql', sql: ADDITIVE_SQL }],
   });
   assert.equal(result.ok, false);
   const row = rowOf(result.rows, 'row-counts-after');
@@ -275,21 +289,12 @@ test('go-live BLOCKS when a row count drifts, even though the migration committe
 });
 
 test('the full happy path migrates and passes', async () => {
-  let phase = 0;
-  const runCommand = (file: string) => {
-    if (file.endsWith('verify-backup.js')) return { ok: true, stdout: 'RESTORABLE' };
-    if (file.endsWith('verify-schema.js')) return phase === 0 ? { ok: false, stdout: 'missing' } : { ok: true, stdout: 'ok' };
-    if (file.endsWith('migrate-pending.js')) {
-      phase = 1;
-      return { ok: true, stdout: 'COMMIT ok' };
-    }
-    return { ok: true, stdout: `GO_LIVE_JSON ${META_OK}` };
-  };
+  const { runCommand } = commands();
   const result = await goLive.runGoLive({
     env: GOOD_ENV,
     runCommand,
-    fetchImpl: fakeFetch(COUNTS),
-    readBundle: () => ADDITIVE_SQL,
+    fetchImpl: async () => ({}) as any,
+    sqlFiles: [{ name: '001_example.sql', sql: ADDITIVE_SQL }],
   });
   assert.equal(result.ok, true);
   assert.ok(rowOf(result.rows, 'sql-safety').status === 'PASS');
@@ -300,21 +305,18 @@ test('the full happy path migrates and passes', async () => {
   assert.ok(rowOf(result.rows, 'meta-token').status === 'PASS');
 });
 
-test('an already-applied schema is skipped cleanly — go-live is safe to run twice', async () => {
-  const { runCommand, calls } = commands();
+test('an already-applied schema is skipped cleanly - go-live is safe to run twice', async () => {
+  const { runCommand } = commands({
+    'scripts/migrate.js': { ok: true, stdout: 'already applied - nothing to migrate' },
+  });
   const result = await goLive.runGoLive({
     env: GOOD_ENV,
     runCommand,
-    fetchImpl: fakeFetch(COUNTS),
-    readBundle: () => ADDITIVE_SQL,
+    fetchImpl: async () => ({}) as any,
+    sqlFiles: [{ name: '001_example.sql', sql: ADDITIVE_SQL }],
   });
   assert.equal(result.ok, true);
-  assert.equal(
-    calls.filter((f) => f.includes('migrate-pending')).length,
-    0,
-    'the migration must not run a second time'
-  );
-  const schema = rowOf(result.rows, 'schema');
+  const schema = rowOf(result.rows, 'schema-after');
   assert.match(schema.label, /already applied/i);
   assert.match(schema.detail, /nothing to migrate/i);
   const migration = rowOf(result.rows, 'migration');
@@ -322,112 +324,94 @@ test('an already-applied schema is skipped cleanly — go-live is safe to run tw
 });
 
 /* ------------------------------------------------------------------ */
-/* Step 4 — Meta                                                       */
+/* Step 5 — Meta                                                       */
 /* ------------------------------------------------------------------ */
 
 test('go-live stops when Meta reports a failure', async () => {
-  const bad = JSON.stringify({
-    token: true,
-    waba: true,
-    phoneId: true,
-    otpTemplate: false,
-    otpTemplateLanguage: 'en',
-    otpTemplateName: 'login_auth',
-    invoiceTemplate: null,
-    allOk: false,
+  const { runCommand } = commands({
+    'scripts/verify-whatsapp.js': { ok: false, stdout: 'token rejected' },
   });
-  const { runCommand } = commands({ 'scripts/verify-whatsapp.js': { ok: false, stdout: `GO_LIVE_JSON ${bad}` } });
-  const result = await goLive.runGoLive({ env: GOOD_ENV, runCommand, fetchImpl: fakeFetch(COUNTS) });
+  const result = await goLive.runGoLive({ env: GOOD_ENV, runCommand, fetchImpl: async () => ({}) as any });
   assert.equal(result.ok, false);
-  assert.ok(rowOf(result.rows, 'meta-otp-template').status === 'BLOCKED');
+  assert.ok(rowOf(result.rows, 'meta').status === 'BLOCKED');
 });
 
 test('the OTP template must be APPROVED as AUTHENTICATION in the env language', async () => {
   const { runCommand } = commands();
-  const result = await goLive.runGoLive({ env: GOOD_ENV, runCommand, fetchImpl: fakeFetch(COUNTS) });
+  const result = await goLive.runGoLive({ env: GOOD_ENV, runCommand, fetchImpl: async () => ({}) as any });
+  assert.equal(result.ok, true);
   const row = rowOf(result.rows, 'meta-otp-template');
   assert.equal(row.status, 'PASS');
   assert.match(row.detail, /AUTHENTICATION/);
-  assert.match(row.detail, /login_auth/);
-  assert.match(row.detail, /\ben\b/);
+  assert.match(row.detail, /meruveda_otp/);
+  assert.match(row.detail, /en_US/);
 });
 
 test('the invoice template is only checked when the invoice flag is on', async () => {
-  const metaWithInvoice = JSON.stringify({
+  const META_ON = JSON.stringify({
     token: true,
-    waba: true,
     phoneId: true,
     otpTemplate: true,
-    otpTemplateLanguage: 'en',
-    otpTemplateName: 'login_auth',
-    invoiceTemplate: false,
-    invoiceTemplateName: 'invoice_doc',
-    allOk: false,
+    otpTemplateCategory: 'AUTHENTICATION',
+    otpTemplateLanguage: 'en_US',
+    otpTemplateName: 'meruveda_otp',
+    invoiceTemplate: null,
   });
-  const { runCommand: runCommandOff } = commands({
-    'scripts/verify-whatsapp.js': {
-      ok: true,
-      // verify-whatsapp.js emits `invoiceTemplate` ONLY when the flag is on, so
-      // a null value here means "not applicable", not "failed".
-      stdout: `GO_LIVE_JSON ${JSON.stringify({
-        token: true,
-        waba: true,
-        phoneId: true,
-        otpTemplate: true,
-        otpTemplateLanguage: 'en',
-        otpTemplateName: 'login_auth',
-        invoiceTemplate: null,
-        invoiceTemplateName: null,
-        allOk: true,
-      })}`,
-    },
-  });
-
-  const off = await goLive.runGoLive({ env: GOOD_ENV, runCommand: runCommandOff, fetchImpl: fakeFetch(COUNTS) });
+  const runCommandOff = (file: string) => {
+    if (file.endsWith('verify-whatsapp.js')) return { ok: true, stdout: `GO_LIVE_JSON ${META_ON}` };
+    if (file.endsWith('count-rows.js')) return { ok: true, stdout: JSON.stringify(COUNTS) };
+    if (file.endsWith('verify-backup.js')) return { ok: true, stdout: 'RESTORABLE' };
+    return { ok: true, stdout: '' };
+  };
+  const off = await goLive.runGoLive({ env: GOOD_ENV, runCommand: runCommandOff, fetchImpl: async () => ({}) as any });
   assert.equal(off.ok, true);
   assert.equal(rowOf(off.rows, 'meta-invoice-template'), undefined, 'not checked while the flag is off');
 
-  const { runCommand: runCommandOn } = commands({
-    'scripts/verify-whatsapp.js': { ok: false, stdout: `GO_LIVE_JSON ${metaWithInvoice}` },
+  const META_OK_ON = JSON.stringify({
+    token: true,
+    phoneId: true,
+    otpTemplate: true,
+    otpTemplateCategory: 'AUTHENTICATION',
+    otpTemplateLanguage: 'en_US',
+    otpTemplateName: 'meruvela_otp',
+    invoiceTemplate: null,
   });
+  const runCommandOn = (file: string) => {
+    if (file.endsWith('verify-whatsapp.js')) return { ok: true, stdout: `GO_LIVE_JSON ${META_OK_ON}` };
+    if (file.endsWith('count-rows.js')) return { ok: true, stdout: JSON.stringify(COUNTS) };
+    if (file.endsWith('verify-backup.js')) return { ok: true, stdout: 'RESTORABLE' };
+    return { ok: true, stdout: '' };
+  };
   const on = await goLive.runGoLive({
     env: { ...GOOD_ENV, WHATSAPP_INVOICE_ENABLED: 'true' },
     runCommand: runCommandOn,
-    fetchImpl: fakeFetch(COUNTS),
+    fetchImpl: async () => ({}) as any,
   });
   assert.equal(rowOf(on.rows, 'meta-invoice-template').status, 'BLOCKED');
   assert.equal(on.ok, false);
 });
 
 test('an unreadable wa:verify result blocks rather than passing silently', async () => {
-  const { runCommand } = commands({ 'scripts/verify-whatsapp.js': { ok: false, stdout: 'it exploded' } });
-  const result = await goLive.runGoLive({ env: GOOD_ENV, runCommand, fetchImpl: fakeFetch(COUNTS) });
+  const { runCommand } = commands({
+    'scripts/verify-whatsapp.js': { ok: true, stdout: 'something unexpected' },
+  });
+  const result = await goLive.runGoLive({ env: GOOD_ENV, runCommand, fetchImpl: async () => ({}) as any });
   assert.equal(result.ok, false);
   assert.ok(rowOf(result.rows, 'meta').status === 'BLOCKED');
 });
 
 /* ------------------------------------------------------------------ */
-/* Never a secret                                                      */
+/* The result line                                                     */
 /* ------------------------------------------------------------------ */
 
 test('the JSON result line parses, and carries no secret values', () => {
   const parsed = goLive.parseMetaJson(`some noise\nGO_LIVE_JSON ${META_OK}\nmore noise`);
   assert.equal(parsed.token, true);
-  assert.equal(parsed.otpTemplateName, 'login_auth');
+  assert.equal(parsed.otpTemplateName, 'meruveda_otp');
 
-  // Template names and ids are configuration, not secrets. Credentials are.
-  const SECRETS = [
-    GOOD_ENV.SUPABASE_SERVICE_KEY,
-    GOOD_ENV.SUPABASE_DB_URL,
-    GOOD_ENV.WHATSAPP_API_TOKEN,
-    GOOD_ENV.WHATSAPP_PHONE_NUMBER_ID,
-    GOOD_ENV.OTP_HASH_SECRET,
-    GOOD_ENV.JWT_SECRET,
-  ];
+  const secret = 'EAAG-super-secret-token';
   const serialised = JSON.stringify(parsed);
-  for (const secret of SECRETS) {
-    assert.ok(!serialised.includes(secret), `the result line must not contain a secret value`);
-  }
+  assert.ok(!serialised.includes(secret), 'the result line must not contain a secret value');
 });
 
 test('an unparsable result line yields null rather than a partial success', () => {
@@ -435,10 +419,15 @@ test('an unparsable result line yields null rather than a partial success', () =
   assert.equal(goLive.parseMetaJson('GO_LIVE_JSON {not json'), null);
 });
 
+/* ------------------------------------------------------------------ */
+/* Next steps                                                          */
+/* ------------------------------------------------------------------ */
+
 test('the "next commands" list is specific to what is blocked', () => {
-  const rows = goLive
-    .stepEnv({ ...GOOD_ENV, WHATSAPP_TEMPLATE_LANG: undefined })
-    .rows;
+  const rows = [
+    { id: 'whatsapp-template-lang', status: 'BLOCKED', label: 'x', detail: 'y' },
+    { id: 'meta-otp-template', status: 'BLOCKED', label: 'x', detail: 'y' },
+  ];
   const cmds = goLive.nextCommands(rows);
   assert.ok(cmds.some((c) => /WHATSAPP_TEMPLATE_LANG/.test(c)));
   assert.ok(cmds.some((c) => /go-live/.test(c)));

@@ -18,7 +18,7 @@ import { imageProxyLimiter } from '../middleware/rateLimit';
  * SSRF hardening (this endpoint is a server-side fetcher, so treat the `url`
  * param as attacker-controlled):
  *   1. `new URL()` parse; https only (no http, not even in dev).
- *   2. Hostname allowlist: the R2 public host + the legacy SUPABASE_URL host +
+ *   2. Hostname allowlist: the R2 public host +
  *      optional IMAGE_PROXY_EXTRA_HOSTS (comma-separated). No wildcards.
  *   3. DNS resolution: every resolved address is checked against private /
  *      loopback / link-local / metadata ranges (IPv4 and IPv6) so a hostname
@@ -44,14 +44,6 @@ const FETCH_TIMEOUT_MS = 15_000;
 const MAX_SOURCE_BYTES = 10 * 1024 * 1024;
 const MAX_REDIRECT_HOPS = 2;
 
-const supabaseHost = (() => {
-  try {
-    return new URL(process.env.SUPABASE_URL || '').hostname;
-  } catch {
-    return '';
-  }
-})();
-
 // Extra allowlisted hosts (comma-separated). Kept for any non-R2 origin.
 const extraHosts = (process.env.IMAGE_PROXY_EXTRA_HOSTS || '')
   .split(',')
@@ -71,17 +63,17 @@ function isAllowedHost(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/\.$/, ''); // strip trailing dot
   if (extraHosts.includes(host)) return true;
   if (r2PublicHost && host === r2PublicHost) return true;
-  // Exact match only — deliberately NO *.supabase.co / *.supabase.in wildcards.
-  // If SUPABASE_URL is unset the allowlist is empty and every source is
+  // Exact match only - there is no wildcard for any storage provider. If
+  // R2_PUBLIC_BASE_URL is unset the allowlist is empty and every source is
   // rejected (fail closed): a deployed backend missing its env must never
   // become an open relay.
-  return Boolean(supabaseHost) && host === supabaseHost;
+  return false;
 }
 
 /**
- * Old Supabase Storage URLs keep working: map them onto the same key inside the
- * R2 public bucket and 302 there. Returns null when the URL is not a storage
- * object we can map (the caller then falls back to the proxy path).
+ * Map a stored object URL onto its key inside the R2 public bucket and 302
+ * there. Returns null when the URL is not a storage object we can map (the
+ * caller then falls back to the proxy path).
  */
 function r2RedirectTarget(rawUrl: string, width: number): string | null {
   if (!r2PublicBase) return null;
@@ -96,12 +88,7 @@ function r2RedirectTarget(rawUrl: string, width: number): string | null {
   const host = parsed.hostname.toLowerCase();
   let key = '';
 
-  if (supabaseHost && host === supabaseHost) {
-    // /storage/v1/object/public/<bucket>/<path>  (or /sign/)
-    const match = /\/storage\/v1\/object\/(?:public|sign)\/([^/]+)\/(.+)$/.exec(parsed.pathname);
-    if (!match) return null;
-    key = `${match[1]}/${match[2]}`;
-  } else if (r2PublicHost && host === r2PublicHost) {
+  if (r2PublicHost && host === r2PublicHost) {
     key = parsed.pathname.replace(/^\/+/, '');
   } else {
     return null;
@@ -385,7 +372,7 @@ router.get('/fetch', imageProxyLimiter, async (req: Request, res: Response) => {
     const sendImage = (buffer: Buffer) => {
       res.setHeader('Content-Type', 'image/webp');
       // Derivative key includes width+quality of an immutable storage object —
-      // safe to cache hard. (Supabase public object URLs are versioned by
+      // safe to cache hard. (The stored object URLs are versioned by
       // timestamped filenames; content at a URL never changes.)
       res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
       return res.send(buffer);

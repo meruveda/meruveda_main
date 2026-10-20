@@ -9,7 +9,7 @@ import * as pgTypes from 'pg-types';
  * atomic — order creation, payment confirmation, stock movement, invoice
  * numbering — goes through `withTransaction()`, which uses the WebSocket Pool.
  *
- * The Supabase service-role client used to return numbers for NUMERIC and
+ * The previous storage client used to return numbers for NUMERIC and
  * BIGINT columns. node-postgres (and Neon) return them as strings, which would
  * silently turn prices into strings on the wire. The custom type parsers below
  * restore the old behaviour in exactly one place.

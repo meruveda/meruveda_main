@@ -106,7 +106,7 @@ export async function putObject(
 
 /**
  * Atomic create-or-fail. Returns false when the key already exists (412 /
- * PreconditionFailed), which is exactly the Supabase `upsert:false` behaviour
+ * PreconditionFailed), which is the same create-or-fail behaviour
  * the invoice claim and counter markers relied on.
  */
 export async function putObjectIfAbsent(

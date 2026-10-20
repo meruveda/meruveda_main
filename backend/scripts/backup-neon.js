@@ -2,7 +2,7 @@
  * Neon-native backup: dumps the tables that the automation pipeline touches to
  * a timestamped JSON file in backend/backups/.
  *
- * The old backup script spoke to Supabase; this one speaks to Neon directly,
+ * The old backup script spoke to the previous provider; this one speaks to Neon directly,
  * so a backup can always be taken regardless of which storage provider is in
  * use.
  *

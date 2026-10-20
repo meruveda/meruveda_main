@@ -84,7 +84,7 @@ export const isEmailConfigured = (): boolean => Boolean(resend);
 
 /**
  * Short, plain invoice email body. The PDF is attached; a 7-day signed link is
- * included when the invoice PDF was mirrored to Supabase Storage.
+ * included when the invoice PDF was mirrored to object storage.
  */
 export const getInvoiceEmailTemplate = (options: {
   firstName?: string;

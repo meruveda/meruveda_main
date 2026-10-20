@@ -1,8 +1,8 @@
 /**
  * Boot-time invoice audit — deliberately a no-op.
  *
- * The invoice pipeline is storage-backed: it needs only `SUPABASE_URL` +
- * `SUPABASE_SERVICE_KEY` and the Storage API, and creates its own bucket at
+ * The invoice pipeline is storage-backed: it needs the R2 credentials and the
+ * S3 API, and creates its own bucket at
  * runtime. There is no schema requirement left to check, so there is nothing to
  * probe and nothing to complain about.
  *

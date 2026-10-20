@@ -6,7 +6,7 @@ import { config } from '../config/env';
  *
  * An OTP is a six-digit shared secret that authorises a full account login, so
  * the table must never hold it in a form that a database dump, a stray
- * `SELECT`, a Supabase dashboard export or a leaked service-role key turns
+ * `SELECT`, a database export or a leaked credential turns
  * straight into a working login.
  *
  * HMAC-SHA256(code, key = pepper) is used rather than a bare SHA-256 because a
