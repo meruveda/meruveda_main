@@ -3,7 +3,9 @@
 import { useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
-import { isValidPhone, normalizePhone10 } from "@/types/account";
+import { isValidPhone } from "@/types/account";
+import { CountryPhoneField } from "@/components/CountryPhoneField";
+import { DEFAULT_COUNTRY, formatDisplay, fullPhoneDigits, type Country } from "@/constants/countries";
 
 const RESEND_SECONDS = 45;
 
@@ -30,6 +32,7 @@ export default function OtpSignInPanel({ mode, onSuccess }: OtpSignInPanelProps)
 
   const [name, setName] = useState("");
   const [mobile, setMobile] = useState("");
+  const [phoneCountry, setPhoneCountry] = useState<Country>(DEFAULT_COUNTRY);
   const [code, setCode] = useState("");
   const [step, setStep] = useState<"phone" | "code">("phone");
   const [busy, setBusy] = useState(false);
@@ -52,13 +55,14 @@ export default function OtpSignInPanel({ mode, onSuccess }: OtpSignInPanelProps)
         setError("Please enter your first name.");
         return;
       }
-      if (!isValidPhone(mobile)) {
-        setError("Please enter a valid 10-digit mobile number.");
+      if (!isValidPhone(fullPhoneDigits(mobile, phoneCountry))) {
+        setError("Please enter a valid mobile number.");
         return;
       }
     }
 
-    const phone = normalizePhone10(mobile);
+    // The full international number, so the OTP reaches the right handset.
+    const phone = fullPhoneDigits(mobile, phoneCountry);
     setBusy(true);
     try {
       if (isResend) {
@@ -87,7 +91,7 @@ export default function OtpSignInPanel({ mode, onSuccess }: OtpSignInPanelProps)
     }
     setBusy(true);
     try {
-      await verifyOtp(normalizePhone10(mobile), digits, name.trim() || undefined);
+      await verifyOtp(fullPhoneDigits(mobile, phoneCountry), digits, name.trim() || undefined);
       onSuccess();
     } catch (err: unknown) {
       setError((err as Error)?.message || "That code is incorrect or has expired.");
@@ -143,21 +147,13 @@ export default function OtpSignInPanel({ mode, onSuccess }: OtpSignInPanelProps)
             <label className={label} htmlFor="otp-mobile">
               Mobile number *
             </label>
-            <div className="flex">
-              <span className="inline-flex items-center px-3 border border-r-0 border-gray-300 rounded-l text-sm text-gray-500 bg-gray-50">
-                +91
-              </span>
-              <input
-                id="otp-mobile"
-                type="tel"
-                className={`${input} rounded-l-none`}
-                value={mobile}
-                onChange={(e) => setMobile(e.target.value)}
-                placeholder="98765 43210"
-                autoComplete="tel"
-                inputMode="tel"
-              />
-            </div>
+            <CountryPhoneField
+              id="otp-mobile"
+              country={phoneCountry}
+              onCountryChange={setPhoneCountry}
+              value={mobile}
+              onValueChange={setMobile}
+            />
           </div>
           <button type="submit" disabled={busy} className={primaryButton}>
             {busy && <Loader2 size={14} className="animate-spin" />}
@@ -168,7 +164,7 @@ export default function OtpSignInPanel({ mode, onSuccess }: OtpSignInPanelProps)
         <form onSubmit={verify} className="space-y-4" noValidate>
           <div className="flex items-center justify-between text-[13px] text-gray-600">
             <span>
-              Mobile: <span className="font-semibold text-gray-900">+91 {normalizePhone10(mobile)}</span>
+              Mobile: <span className="font-semibold text-gray-900">{formatDisplay(mobile, phoneCountry)}</span>
             </span>
             <button
               type="button"

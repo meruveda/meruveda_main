@@ -3,6 +3,8 @@
 // tolerant of backend shape drift. Items are non-returnable (see Shipping
 // Policy), so there are no return/refund request types here.
 
+import { isValidPhoneAny } from "@meruveda/shared";
+
 export type AddressType = "Home" | "Work" | "Other";
 
 export interface AccountAddress {
@@ -138,9 +140,14 @@ export function normalizePhone10(v: string): string {
   return d;
 }
 
+/**
+ * Is this a usable phone number, from any supported country?
+ *
+ * The country list and the rules live in @meruveda/shared, so the storefront
+ * and the backend validate identically.
+ */
 export function isValidPhone(v: string): boolean {
-  const d = normalizePhone10(v);
-  return /^[6-9]\d{9}$/.test(d);
+  return isValidPhoneAny(v);
 }
 
 export function isValidPincode(v: string): boolean {

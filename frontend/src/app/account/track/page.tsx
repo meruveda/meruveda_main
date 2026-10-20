@@ -6,6 +6,8 @@ import { useSearchParams } from "next/navigation";
 import { Loader2, PackageSearch, Truck } from "lucide-react";
 import axiosInstance from "@/api/axiosInstance";
 import { orderService } from "@/services/accountService";
+import { CountryPhoneField } from "@/components/CountryPhoneField";
+import { DEFAULT_COUNTRY, fullPhoneDigits, type Country } from "@/constants/countries";
 import type { AccountOrder } from "@/types/account";
 import { EmptyState, ErrorBox, OrderTimeline, SectionHeader, StatusBadge } from "@/components/account/ui";
 
@@ -15,6 +17,7 @@ function TrackInner() {
   const [selectedId, setSelectedId] = useState(search.get("order") || "");
   const [guestRef, setGuestRef] = useState("");
   const [guestPhone, setGuestPhone] = useState("");
+  const [phoneCountry, setPhoneCountry] = useState<Country>(DEFAULT_COUNTRY);
   const [guestResult, setGuestResult] = useState<Record<string, unknown> | null>(null);
   const [guestAwb, setGuestAwb] = useState("");
   const [awbResult, setAwbResult] = useState<Record<string, unknown> | null>(null);
@@ -45,7 +48,7 @@ function TrackInner() {
     setGuestError(null);
     setGuestResult(null);
     try {
-      const res = await axiosInstance.get("/orders/track", { params: { order: guestRef.trim(), phone: guestPhone.trim() } });
+      const res = await axiosInstance.get("/orders/track", { params: { order: guestRef.trim(), phone: fullPhoneDigits(guestPhone, phoneCountry) } });
       setGuestResult(res.data?.data || null);
     } catch (e: unknown) {
       const err = e as { response?: { data?: { error?: { message?: string } } }; message?: string };
@@ -147,7 +150,13 @@ function TrackInner() {
         <p className="text-xs text-gray-500 mb-4">Order number + the mobile number used at checkout. No login needed.</p>
         <form onSubmit={guestTrack} className="grid sm:grid-cols-[1fr_1fr_auto] gap-3 max-w-2xl">
           <input value={guestRef} onChange={(e) => setGuestRef(e.target.value)} required placeholder="Order number (e.g. MV-2026-001)" className={input} aria-label="Order number" />
-          <input value={guestPhone} onChange={(e) => setGuestPhone(e.target.value)} required placeholder="Mobile number" inputMode="tel" className={input} aria-label="Mobile number" />
+          <CountryPhoneField
+            id="account-track-phone"
+            country={phoneCountry}
+            onCountryChange={setPhoneCountry}
+            value={guestPhone}
+            onValueChange={setGuestPhone}
+          />
           <button type="submit" disabled={guestLoading} className="px-6 py-2.5 bg-gold text-deep-purple hover:bg-gold/90 rounded-lg text-sm font-bold disabled:opacity-50 flex items-center justify-center gap-2 whitespace-nowrap">
             {guestLoading && <Loader2 size={15} className="animate-spin" />} Track
           </button>

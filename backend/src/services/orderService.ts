@@ -189,21 +189,35 @@ export const orderService = {
     // Shiprocket's 10-digit national check and WhatsApp's E.164-ish check both
     // work off the same value.
     {
+      // The delivery phone (an Indian number the parcel can be delivered to)
+      // and the customer's own number (for WhatsApp and the invoice) are two
+      // different things for an order placed from outside India.
       const rawPhone =
+        orderData.customer_phone ||
         orderData.delivery_phone ||
         orderData.shipping_address?.phone ||
         orderData.billing_address?.phone ||
         '';
       // Reuse the WhatsApp normaliser: 10-digit Indian gets 91 prepended,
       // 12-digit starting 91 passes through, anything else is digits-only as-is.
-      orderData.delivery_phone = normalizePhone(rawPhone);
+      const deliveryPhone = normalizePhone(orderData.delivery_phone || rawPhone);
+      const customerPhone = normalizePhone(orderData.customer_phone || rawPhone);
+      orderData.delivery_phone = deliveryPhone;
+      delete orderData.customer_phone;
       // Keep the jsonb address in sync so old readers (track page, invoice
-      // buyer phone) see the same canonical digits.
+      // buyer phone) see the same canonical digits. The customer's own number
+      // wins here, because that is who receives the WhatsApp messages.
       if (orderData.shipping_address && rawPhone) {
-        orderData.shipping_address = { ...orderData.shipping_address, phone: orderData.delivery_phone };
+        orderData.shipping_address = {
+          ...orderData.shipping_address,
+          phone: customerPhone || deliveryPhone,
+        };
       }
       if (orderData.billing_address && rawPhone) {
-        orderData.billing_address = { ...orderData.billing_address, phone: orderData.delivery_phone };
+        orderData.billing_address = {
+          ...orderData.billing_address,
+          phone: customerPhone || deliveryPhone,
+        };
       }
     }
 

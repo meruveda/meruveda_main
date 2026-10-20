@@ -6,6 +6,8 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Eye, EyeOff, Loader2, Lock } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { isValidEmail, isValidPhone, normalizePhone10 } from "@/types/account";
+import { CountryPhoneField } from "@/components/CountryPhoneField";
+import { DEFAULT_COUNTRY, toStoredPhone, type Country } from "@/constants/countries";
 import OtpSignInPanel from "@/components/account/OtpSignInPanel";
 
 /** Only same-site app paths; never external, protocol-relative or /login. */
@@ -22,6 +24,7 @@ function LoginInner() {
   const next = safeNext(searchParams.get("next") || searchParams.get("returnUrl"));
 
   const [mobile, setMobile] = useState("");
+  const [phoneCountry, setPhoneCountry] = useState<Country>(DEFAULT_COUNTRY);
   const [email, setEmail] = useState("");
   const [useEmail, setUseEmail] = useState(false);
   const [password, setPassword] = useState("");
@@ -58,7 +61,11 @@ function LoginInner() {
     }
     setBusy(true);
     try {
-      const identifier = useEmail ? email.trim() : normalizePhone10(mobile);
+      // The full international number is sent, so a customer who signed up
+      // from another country is found by the same lookup the backend uses.
+      const identifier = useEmail
+        ? email.trim()
+        : toStoredPhone(mobile, phoneCountry);
       await login(identifier, password, rememberMe);
       router.replace(next);
     } catch (err: unknown) {
@@ -155,22 +162,13 @@ function LoginInner() {
               <label className="block text-xs text-gray-500 mb-1.5" htmlFor="login-mobile">
                 Mobile number
               </label>
-              <div className="flex">
-                <span className="inline-flex items-center px-3 border border-r-0 border-gray-300 rounded-l text-sm text-gray-500 bg-gray-50">
-                  +91
-                </span>
-                <input
-                  id="login-mobile"
-                  type="tel"
-                  required
-                  className={`${input} rounded-l-none`}
-                  value={mobile}
-                  onChange={(e) => setMobile(e.target.value)}
-                  placeholder="98765 43210"
-                  autoComplete="tel"
-                  inputMode="tel"
-                />
-              </div>
+              <CountryPhoneField
+                id="login-mobile"
+                country={phoneCountry}
+                onCountryChange={setPhoneCountry}
+                value={mobile}
+                onValueChange={(v) => setMobile(v)}
+              />
             </div>
           )}
           <div>

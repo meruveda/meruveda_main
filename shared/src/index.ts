@@ -26,3 +26,24 @@ export {
   formatInvoiceAmount
 } from './utils/invoice';
 export type { InvoiceLineTotals } from './utils/invoice';
+
+export {
+  COUNTRIES,
+  POPULAR_COUNTRY_ISOS,
+  DEFAULT_COUNTRY,
+  INDIA,
+  findCountry,
+  countryByDial,
+  nationalDigits,
+  fullPhoneDigits,
+  toE164,
+  formatDisplay,
+  isValidNational,
+  detectCountryFromPaste,
+  toStoredPhone,
+  phoneVariants,
+  isIndianNumber,
+  canonicalPhoneAny,
+  isValidPhoneAny
+} from './phone';
+export type { Country } from './phone';

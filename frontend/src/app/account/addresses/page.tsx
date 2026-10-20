@@ -7,6 +7,10 @@ import type { AccountAddress, AddressType } from "@/types/account";
 import { isValidPhone, isValidPincode, normalizePhone10 } from "@/types/account";
 import { ConfirmDialog, EmptyState, Notice, SectionHeader } from "@/components/account/ui";
 import { INDIAN_STATES, isIndianState } from "@/constants/states";
+import { CountryPhoneField } from "@/components/CountryPhoneField";
+import { DEFAULT_COUNTRY, type Country } from "@/constants/countries";
+
+const [phoneCountry, setPhoneCountry] = useState<Country>(DEFAULT_COUNTRY);
 
 const EMPTY_FORM = {
   fullName: "",
@@ -153,7 +157,14 @@ export default function AddressesPage() {
             </div>
             <div>
               <label className={label} htmlFor="ad-phone">Phone number *</label>
-              <input id="ad-phone" className={input} value={form.phone} onChange={set("phone")} placeholder="98765 43210" inputMode="tel" autoComplete="tel" />
+              <CountryPhoneField
+                id="ad-phone"
+                country={phoneCountry}
+                onCountryChange={setPhoneCountry}
+                value={form.phone}
+                onValueChange={(v) => setForm((p) => ({ ...p, phone: v }))}
+                invalid={!!errors.phone}
+              />
               {errors.phone && <p className={err}>{errors.phone}</p>}
             </div>
           </div>

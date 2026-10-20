@@ -47,7 +47,8 @@ const INDIAN_STATES = STATES;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 const PIN_RE = /^\d{6}$/;
 
-import { COUNTRIES, DEFAULT_COUNTRY, Country, nationalDigits, fullPhoneDigits, isValidNational } from "@/constants/countries";
+import { DEFAULT_COUNTRY, Country, nationalDigits, fullPhoneDigits, isValidNational, isIndianNumber } from "@/constants/countries";
+import { CountryPhoneField } from "@/components/CountryPhoneField";
 
 // Records a completed OTP verification in this browser so a refresh (or an
 // already-signed-in session) is not mistaken for "never verified". This is the
@@ -56,68 +57,6 @@ import { COUNTRIES, DEFAULT_COUNTRY, Country, nationalDigits, fullPhoneDigits, i
 const OTP_VERIFIED_KEY = "meruveda_otp_verified_phone";
 
 const ADDRESS_TYPES = ["Home", "Work", "Other"] as const;
-
-/**
- * Country-code dropdown + phone input for the delivery contact.
- *
- * India is the default (this is an Indian GST store). The dial-code selector
- * lets an NRI buyer enter a non-Indian number; the full digits-only phone
- * (dial + national) is what gets stored on the order as `delivery_phone` and
- * inside `shipping_address.phone`, so the backend and Shiprocket both see one
- * canonical value. Non-Indian numbers are accepted at checkout but Shiprocket
- * push will skip fulfilment for them (recorded as a failed push the admin can
- * action) — that is intentional, not a bug.
- */
-function CountryPhoneField({
-  id,
-  country,
-  onCountryChange,
-  value,
-  onValueChange,
-  disabled,
-  invalid,
-}: {
-  id: string;
-  country: Country;
-  onCountryChange: (c: Country) => void;
-  value: string;
-  onValueChange: (v: string) => void;
-  disabled?: boolean;
-  invalid?: boolean;
-}) {
-  const display = country.format ? country.format(nationalDigits(value, country)) : nationalDigits(value, country);
-  return (
-    <div className="flex gap-2">
-      <select
-        aria-label="Country code"
-        value={country.iso}
-        disabled={disabled}
-        onChange={(e) => onCountryChange(COUNTRIES.find((c) => c.iso === e.target.value) || DEFAULT_COUNTRY)}
-        className="w-28 shrink-0 rounded-xl border border-gray-300 bg-white px-2 py-2.5 text-sm text-gray-800 focus:border-gold focus:outline-none disabled:bg-gray-100"
-      >
-        {COUNTRIES.map((c) => (
-          <option key={c.iso} value={c.iso}>
-            {c.name} {c.dial}
-          </option>
-        ))}
-      </select>
-      <input
-        id={id}
-        type="tel"
-        required
-        inputMode="tel"
-        autoComplete="tel-national"
-        value={display}
-        disabled={disabled}
-        onChange={(e) => onValueChange(nationalDigits(e.target.value, country))}
-        placeholder={country.iso === "in" ? "98765 43210" : `national number (${country.digits} digits)`}
-        className={`flex-1 min-w-0 rounded-xl border px-4 py-2.5 text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gold/40 focus:border-gold disabled:bg-gray-100 disabled:text-gray-500 ${
-          invalid ? "border-red-400" : "border-gray-300"
-        }`}
-      />
-    </div>
-  );
-}
 
 type AddressFormState = {
   house: string;
@@ -377,6 +316,16 @@ export default function CheckoutPage() {
   const [otpResendIn, setOtpResendIn] = useState(0);
   const [customerEmail, setCustomerEmail] = useState("");
   const [mobileError, setMobileError] = useState("");
+  /**
+   * The Indian delivery contact.
+   *
+   * Shiprocket only ships inside India, so an order placed from another
+   * country needs an Indian number the parcel can actually be delivered to.
+   * It is required whenever the customer's own country is not India, and it
+   * is the number Shiprocket receives.
+   */
+  const [deliveryContact, setDeliveryContact] = useState("");
+  const [deliveryContactError, setDeliveryContactError] = useState("");
 
   const hydratedFromProfileRef = useRef(false);
 
@@ -809,7 +758,12 @@ export default function CheckoutPage() {
     PIN_RE.test(selectedSavedAddress.zipCode.trim());
 
   const deliveryAddressValid = usesAddressForm ? formAddressValid : savedAddressValid;
-  const addressValid = deliveryAddressValid && emailValid;
+
+  // The Indian delivery contact, required for a non-Indian order.
+  const needsIndianDeliveryContact = phoneCountry.iso !== "in";
+  const deliveryContactValid = !needsIndianDeliveryContact || /^[6-9]\d{9}$/.test(deliveryContact);
+
+  const addressValid = deliveryAddressValid && emailValid && deliveryContactValid;
 
   // The address of record: what the order, invoice, Shiprocket label and admin
   // panel will all be built from.
@@ -999,8 +953,17 @@ export default function CheckoutPage() {
 
     if (!addressValid || !effectiveAddress) {
       setAddressSubmitted(true);
+      if (needsIndianDeliveryContact && !deliveryContactValid) {
+        setDeliveryContactError(
+          "Please enter a valid 10-digit Indian mobile number for delivery.",
+        );
+      }
       if (typeof window !== "undefined") {
-        const target = deliveryAddressValid && !emailValid ? "checkout-email" : "checkout-address";
+        const target = !deliveryContactValid
+          ? "checkout-delivery-contact"
+          : deliveryAddressValid && !emailValid
+            ? "checkout-email"
+            : "checkout-address";
         document.getElementById(target)?.scrollIntoView({ behavior: "smooth", block: "center" });
       }
       return;
@@ -1062,11 +1025,18 @@ export default function CheckoutPage() {
       tax: gstAmount,
       total: finalTotal,
       notes: orderNotes,
-      // Canonical delivery phone (dial code + national digits, e.g.
-      // 919876543210). The backend copies this into orders.delivery_phone and
-      // into shipping_address.phone so Shiprocket, tracking and WhatsApp
-      // invoicing all read one consistent value.
-      delivery_phone: fullPhoneDigits(mobile, phoneCountry),
+      // The delivery phone Shiprocket receives.
+      //
+      // For an Indian order this is the customer's own number. For an order
+      // from another country it is the Indian delivery contact the customer
+      // gave us, because the parcel is delivered inside India. The customer's
+      // own number still goes to the order as the contact for WhatsApp and
+      // invoices, inside the address jsonb.
+      delivery_phone: needsIndianDeliveryContact
+        ? `91${deliveryContact}`
+        : fullPhoneDigits(mobile, phoneCountry),
+      // The customer's own number, for WhatsApp and the invoice.
+      customer_phone: fullPhoneDigits(mobile, phoneCountry),
       shipping_address: buildAddressPayload(),
       billing_address: buildAddressPayload()
     };
@@ -1170,8 +1140,7 @@ export default function CheckoutPage() {
                       onValueChange={handleMobileChange}
                       disabled={otpVerified}
                       invalid={!!mobileError}
-                    />
-                    {/* WhatsApp OTP entry point. This button replaced "Sign up":
+                    />                    {/* WhatsApp OTP entry point. This button replaced "Sign up":
                         there is no separate login or signup on this page. The
                         backend 503s /api/auth/otp/* unless OTP_ENABLED=true. */}
                     {!otpVerified && (
@@ -1241,6 +1210,40 @@ export default function CheckoutPage() {
               )}
 
               {otpError && <p className="text-[11px] text-red-500 font-medium">{otpError}</p>}
+
+              {/* An order that ships inside India needs an Indian number the
+                  parcel can be delivered to. It is required whenever the
+                  customer's own country is not India. */}
+              {phoneCountry.iso !== "in" && (
+                <div className="border border-amber-200 bg-amber-50/60 rounded-xl p-4 space-y-2">
+                  <div>
+                    <label htmlFor="checkout-delivery-contact" className={labelClass}>
+                      Delivery contact number (India)
+                    </label>
+                    <p className="text-[11px] text-gray-500">
+                      We deliver within India, so we need a 10-digit Indian mobile
+                      number the parcel can be delivered to. Your own number
+                      ({phoneCountry.name}) stays on the order for WhatsApp and
+                      invoices.
+                    </p>
+                  </div>
+                  <input
+                    id="checkout-delivery-contact"
+                    type="tel"
+                    inputMode="tel"
+                    autoComplete="tel-national"
+                    required
+                    value={deliveryContact}
+                    onChange={(e) => {
+                      setDeliveryContact(e.target.value.replace(/\D/g, "").slice(0, 10));
+                      setDeliveryContactError("");
+                    }}
+                    placeholder="98765 43210"
+                    className={`${inputClass} ${deliveryContactError ? "border-red-400" : ""}`}
+                  />
+                  {deliveryContactError && <p className={errorClass}>{deliveryContactError}</p>}
+                </div>
+              )}
 
               {otpVerified && (
                 <div className="flex flex-wrap items-center justify-between gap-2 border border-green-200 bg-green-50 rounded-xl px-4 py-3">

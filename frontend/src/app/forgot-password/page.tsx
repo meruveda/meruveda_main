@@ -5,6 +5,8 @@ import Link from "next/link";
 import { authService } from "@/services/authService";
 import { isValidEmail, isValidPhone } from "@/types/account";
 import { Loader2 } from "lucide-react";
+import { CountryPhoneField } from "@/components/CountryPhoneField";
+import { DEFAULT_COUNTRY, fullPhoneDigits, type Country } from "@/constants/countries";
 
 const GENERIC_SENT =
   "If an account exists, password reset instructions have been sent to its registered email address.";
@@ -13,6 +15,9 @@ export default function ForgotPasswordPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [phone, setPhone] = useState("");
+  const [identifier, setIdentifier] = useState("");
+  const [phoneCountry, setPhoneCountry] = useState<Country>(DEFAULT_COUNTRY);
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -22,7 +27,10 @@ export default function ForgotPasswordPage() {
 
     const form = e.currentTarget;
     const data = new FormData(form);
-    const identifier = String(data.get("identifier") || "").trim();
+    const typed = String(data.get("identifier") || "").trim();
+    // A phone entered in the country field wins; otherwise the typed value
+    // (usually an email address) is used.
+    const identifier = phone.trim() ? fullPhoneDigits(phone, phoneCountry) : typed;
 
     if (!identifier) {
       setError("Mobile number or email address is required.");
@@ -30,7 +38,7 @@ export default function ForgotPasswordPage() {
       return;
     }
     if (!isValidPhone(identifier) && !isValidEmail(identifier)) {
-      setError("Please enter a valid 10-digit mobile number or email address.");
+      setError("Please enter a valid mobile number or email address.");
       setLoading(false);
       return;
     }
@@ -76,15 +84,25 @@ export default function ForgotPasswordPage() {
         <form onSubmit={handleSubmit} noValidate>
           <div className="mb-6">
             <label className={labelClass}>Mobile number or email address</label>
-            <input
-              name="identifier"
-              required
-              type="text"
-              className={inputClass}
-              placeholder="98765 43210 or you@example.com"
-              autoComplete="username"
-              inputMode="text"
-            />
+            <div className="flex gap-2">
+              <CountryPhoneField
+                id="forgot-mobile"
+                country={phoneCountry}
+                onCountryChange={setPhoneCountry}
+                value={phone}
+                onValueChange={setPhone}
+              />
+              <input
+                name="identifier"
+                type="text"
+                className={inputClass}
+                placeholder="you@example.com"
+                autoComplete="username"
+                inputMode="email"
+                value={identifier}
+                onChange={(e) => setIdentifier(e.target.value)}
+              />
+            </div>
           </div>
 
           <button

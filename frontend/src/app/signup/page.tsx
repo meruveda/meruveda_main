@@ -5,7 +5,9 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Eye, EyeOff, Loader2, UserRound } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
-import { isValidEmail, isValidPhone, normalizePhone10 } from "@/types/account";
+import { isValidEmail, isValidPhone } from "@/types/account";
+import { CountryPhoneField } from "@/components/CountryPhoneField";
+import { DEFAULT_COUNTRY, toStoredPhone, type Country } from "@/constants/countries";
 import OtpSignInPanel from "@/components/account/OtpSignInPanel";
 
 /** Only same-site app paths; never external, protocol-relative or /login. */
@@ -22,6 +24,7 @@ function SignupInner() {
   const next = safeNext(searchParams.get("next") || searchParams.get("returnUrl"));
 
   const [form, setForm] = useState({ firstName: "", lastName: "", email: "", phone: "", password: "", confirm: "" });
+  const [phoneCountry, setPhoneCountry] = useState<Country>(DEFAULT_COUNTRY);
   const [showPw, setShowPw] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -67,7 +70,7 @@ function SignupInner() {
         firstName: form.firstName.trim(),
         lastName: form.lastName.trim(),
         email: cleanEmail || undefined,
-        phone: normalizePhone10(form.phone),
+        phone: toStoredPhone(form.phone, phoneCountry),
         password: form.password,
       });
       router.replace(next);
@@ -162,12 +165,13 @@ function SignupInner() {
             <label className={label} htmlFor="su-phone">
               Mobile number *
             </label>
-            <div className="flex">
-              <span className="inline-flex items-center px-3 border border-r-0 border-gray-300 rounded-l text-sm text-gray-500 bg-gray-50">
-                +91
-              </span>
-              <input id="su-phone" className={`${input} rounded-l-none`} value={form.phone} onChange={set("phone")} inputMode="tel" autoComplete="tel" placeholder="98765 43210" />
-            </div>
+            <CountryPhoneField
+              id="su-phone"
+              country={phoneCountry}
+              onCountryChange={setPhoneCountry}
+              value={form.phone}
+              onValueChange={(v) => setForm((p) => ({ ...p, phone: v }))}
+            />
           </div>
           <div>
             <label className={label} htmlFor="su-email">

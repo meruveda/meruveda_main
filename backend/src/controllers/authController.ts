@@ -15,11 +15,11 @@ import {
   RESET_TOKEN_TTL_MS,
 } from '../utils/resetToken';
 import {
-  canonicalPhone,
+  canonicalPhoneAny,
   classifyIdentifier,
   isPlaceholderEmail,
   isValidEmail,
-  isValidPhone10,
+  isValidPhoneAny,
   normalizePhone10,
   phoneVariants,
   placeholderEmailFor,
@@ -54,12 +54,6 @@ export const register = async (req: Request, res: Response, next: NextFunction) 
     const trustedAdminCaller = requestedRoleIsAdminTrusted(req);
     const requestedRole = trustedAdminCaller && (role === 'admin' || role === 'customer') ? role : 'customer';
 
-    const hasPhoneInput = isValidPhone10(phone);
-    let phone10: string | null = null;
-    if (hasPhoneInput) {
-      phone10 = normalizePhone10(phone);
-    }
-
     const cleanEmail = typeof email === 'string' ? email.trim() : '';
     if (cleanEmail && !isValidEmail(cleanEmail)) {
       return res.status(400).json({ error: { message: 'Please enter a valid email address' } });
@@ -68,17 +62,20 @@ export const register = async (req: Request, res: Response, next: NextFunction) 
       return res.status(400).json({ error: { message: 'Please enter a valid email address' } });
     }
 
-    if (!phone10 && !cleanEmail) {
-      return res.status(400).json({ error: { message: 'Please enter a 10-digit mobile number' } });
+    // A phone number is optional at signup, but when one is given it must be
+    // valid for its country. Indian numbers are stored as 91XXXXXXXXXX, every
+    // other country as +<code><national>.
+    const storedPhone = canonicalPhoneAny(phone) || null;
+
+    if (!storedPhone && !cleanEmail) {
+      return res.status(400).json({ error: { message: 'Please enter a valid mobile number' } });
     }
-    if (phone !== undefined && phone !== null && String(phone).trim() !== '' && !phone10) {
-      return res.status(400).json({ error: { message: 'Please enter a valid 10-digit mobile number' } });
+    if (phone !== undefined && phone !== null && String(phone).trim() !== '' && !storedPhone) {
+      return res.status(400).json({ error: { message: 'Please enter a valid mobile number' } });
     }
 
-    const storedPhone = phone10 ? canonicalPhone(phone10) : null;
-
-    if (phone10) {
-      const phoneOwner = await usersRepo.findByPhoneVariants(phoneVariants(phone10), 'id');
+    if (storedPhone) {
+      const phoneOwner = await usersRepo.findByPhoneVariants(phoneVariants(phone), 'id');
       if (phoneOwner) {
         return res.status(400).json({ error: { message: 'This mobile number is already registered. Please log in instead.' } });
       }
@@ -147,7 +144,7 @@ export const login = async (req: Request, res: Response, next: NextFunction) => 
     const selectCols = 'id, email, phone, password_hash, first_name, last_name, role, active';
 
     if (phone && String(phone).trim()) {
-      if (!isValidPhone10(phone)) {
+      if (!isValidPhoneAny(phone)) {
         return res.status(401).json({ error: { message: 'Invalid credentials' } });
       }
       user = await usersRepo.findByPhoneVariants(phoneVariants(phone), selectCols);
@@ -156,7 +153,7 @@ export const login = async (req: Request, res: Response, next: NextFunction) => 
     } else if (identifier && String(identifier).trim()) {
       const classified = classifyIdentifier(identifier);
       if (classified.kind === 'phone') {
-        user = await usersRepo.findByPhoneVariants(phoneVariants(classified.phone10), selectCols);
+        user = await usersRepo.findByPhoneVariants(phoneVariants(classified.phone), selectCols);
       } else {
         user = await usersRepo.findByEmail(classified.email, selectCols);
       }
@@ -234,15 +231,15 @@ export const forgotPassword = async (req: Request, res: Response, next: NextFunc
 
     let user: any = null;
     if (phone && String(phone).trim()) {
-      if (!isValidPhone10(phone)) return res.status(200).json({ message: GENERIC_OK });
+      if (!isValidPhoneAny(phone)) return res.status(200).json({ message: GENERIC_OK });
       user = await usersRepo.findByPhoneVariants(phoneVariants(phone), 'id, email, first_name');
     } else if (email && String(email).trim()) {
       user = await usersRepo.findByEmail(String(email).trim(), 'id, email, first_name');
     } else if (identifier && String(identifier).trim()) {
       const classified = classifyIdentifier(identifier);
       if (classified.kind === 'phone') {
-        user = await usersRepo.findByPhoneVariants(phoneVariants(classified.phone10), 'id, email, first_name');
-      } else if (classified.email) {
+        user = await usersRepo.findByPhoneVariants(phoneVariants(classified.phone), 'id, email, first_name');
+      } else {
         user = await usersRepo.findByEmail(classified.email, 'id, email, first_name');
       }
     } else {

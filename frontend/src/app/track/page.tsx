@@ -4,6 +4,8 @@ import { FormEvent, useState } from "react";
 import Link from "next/link";
 import { Package, Search, Loader2, ExternalLink, MapPin } from "lucide-react";
 import axiosInstance from "@/api/axiosInstance";
+import { CountryPhoneField } from "@/components/CountryPhoneField";
+import { DEFAULT_COUNTRY, fullPhoneDigits, type Country } from "@/constants/countries";
 
 interface TrackingLog {
   activity: string;
@@ -66,6 +68,7 @@ export default function TrackOrderPage() {
   const [mode, setMode] = useState<"order" | "awb">("order");
   const [orderRef, setOrderRef] = useState("");
   const [phone, setPhone] = useState("");
+  const [phoneCountry, setPhoneCountry] = useState<Country>(DEFAULT_COUNTRY);
   const [awb, setAwb] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -109,7 +112,7 @@ export default function TrackOrderPage() {
         return;
       }
       const response = await axiosInstance.get("/orders/track", {
-        params: { order: orderRef.trim(), phone: phone.trim() },
+        params: { order: orderRef.trim(), phone: fullPhoneDigits(phone, phoneCountry) },
       });
       setResult(response.data?.data ?? null);
       if (!response.data?.data) setError("No order found for these details.");
@@ -196,14 +199,12 @@ export default function TrackOrderPage() {
             <label htmlFor="phone" className="block text-sm font-semibold text-deep-purple mb-2">
               Mobile Number
             </label>
-            <input
+            <CountryPhoneField
               id="phone"
-              type="tel"
-              required
+              country={phoneCountry}
+              onCountryChange={setPhoneCountry}
               value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-              placeholder="10-digit mobile number"
-              className="w-full h-12 px-4 rounded-lg border border-gray-300 focus:border-gold focus:ring-2 focus:ring-gold/30 outline-none transition"
+              onValueChange={setPhone}
             />
           </div>
         </div>
