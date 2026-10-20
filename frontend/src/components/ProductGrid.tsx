@@ -41,7 +41,19 @@ export default function ProductGrid({ products }: { products: any[] }) {
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-8">
-      {products.map((product) => (
+      {products.map((product) => {
+        // pg/Neon returns NUMERIC as a string; normalise once so every
+        // comparison, arithmetic operation and .toFixed() below is safe.
+        const priceNum = Number(product.price);
+        const safePrice = Number.isFinite(priceNum) ? priceNum : 0;
+        const originalRaw = product.originalPrice;
+        const originalNum = originalRaw === null || originalRaw === undefined || originalRaw === ''
+          ? NaN
+          : Number(originalRaw);
+        const safeOriginalPrice = Number.isFinite(originalNum) ? originalNum : null;
+        const normalized = { ...product, price: safePrice, originalPrice: safeOriginalPrice };
+
+        return (
         <div key={product.id} className="bg-white border border-gray-100 rounded-xl overflow-hidden shadow-sm hover:shadow-xl transition-all group flex flex-col relative">
           <Link href={`/products/${product.id}`} className="relative h-64 bg-[#f8f5f0] p-4 flex items-center justify-center block">
             <div className="absolute top-3 left-3 flex flex-col gap-1.5 z-10">
@@ -66,9 +78,9 @@ export default function ProductGrid({ products }: { products: any[] }) {
                 </div>
               )}
             </div>
-            {product.originalPrice && product.originalPrice > product.price && (
+            {safeOriginalPrice !== null && safeOriginalPrice > safePrice && (
               <div className="absolute top-3 right-3 bg-[#446f4b] text-white text-[10px] font-bold px-2.5 py-1 rounded-full z-10">
-                {Math.round(((product.originalPrice - product.price) / product.originalPrice) * 100)}% OFF
+                {Math.round(((safeOriginalPrice - safePrice) / safeOriginalPrice) * 100)}% OFF
               </div>
             )}
             <div className="relative w-full h-full transform group-hover:scale-105 transition-transform duration-500">
@@ -80,10 +92,10 @@ export default function ProductGrid({ products }: { products: any[] }) {
             <div className="text-sm font-medium text-gold mb-1">{product.category}</div>
             <h3 className="text-lg font-playfair font-bold text-deep-purple mb-2 line-clamp-2">{product.name}</h3>
             <div className="flex items-center justify-center gap-2 mb-4">
-              {product.originalPrice && (
-                <span className="text-gray-400 line-through text-sm">₹{product.originalPrice.toFixed(2)}</span>
+              {safeOriginalPrice !== null && safeOriginalPrice > safePrice && (
+                <span className="text-gray-400 line-through text-sm">₹{safeOriginalPrice.toFixed(2)}</span>
               )}
-              <span className="text-rust font-bold text-lg">₹{product.price.toFixed(2)}</span>
+              <span className="text-rust font-bold text-lg">₹{safePrice.toFixed(2)}</span>
             </div>
           </Link>
 
@@ -113,7 +125,7 @@ export default function ProductGrid({ products }: { products: any[] }) {
               }
               return (
                 <button
-                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleAddToCart(product); }}
+                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleAddToCart(normalized); }}
                   className="w-full py-2 h-[42px] border border-gold text-gold rounded font-medium text-[11px] sm:text-xs hover:bg-gold hover:text-white transition-colors"
                 >
                   Add to Cart
@@ -121,14 +133,15 @@ export default function ProductGrid({ products }: { products: any[] }) {
               );
             })()}
             <button
-              onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleBuyNow(product); }}
+              onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleBuyNow(normalized); }}
               className="w-full h-[42px] bg-deep-purple text-white rounded font-bold text-[11px] sm:text-xs tracking-wide hover:bg-deep-purple/90 transition-colors"
             >
               Buy Now
             </button>
           </div>
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
