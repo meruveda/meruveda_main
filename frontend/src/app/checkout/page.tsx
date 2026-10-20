@@ -56,6 +56,17 @@ import { CountryPhoneField } from "@/components/CountryPhoneField";
 // actually accepted — it just survives a reload.
 const OTP_VERIFIED_KEY = "meruveda_otp_verified_phone";
 
+/**
+ * A synthetic identity, never a real inbox.
+ *
+ * A guest checkout and a phone-only account both get a placeholder address.
+ * It must never end up on an order as the customer's email.
+ */
+function isSyntheticEmail(email?: string | null): boolean {
+  const e = String(email || "").toLowerCase();
+  return e.endsWith("@meruveda.whatsapp") || e.endsWith("@meruveda.guest");
+}
+
 const ADDRESS_TYPES = ["Home", "Work", "Other"] as const;
 
 type AddressFormState = {
@@ -327,7 +338,15 @@ export default function CheckoutPage() {
    * The contact is confirmed: either the OTP was verified, or the customer
    * pressed "Continue" and the guest session was opened.
    */
-  const [contactConfirmed, setContactConfirmed] = useState(false);
+  /**
+   * The contact that was confirmed, as a SNAPSHOT of the name and the number.
+   *
+   * The confirmation is DERIVED from it, never a boolean that some other
+   * state change can quietly clear: if the customer edits the name or the
+   * number, the snapshot no longer matches and the pill goes back to
+   * "Continue" by itself.
+   */
+  const [confirmedContact, setConfirmedContact] = useState<{ name: string; digits: string } | null>(null);
   const [isConfirmingContact, setIsConfirmingContact] = useState(false);
   const [contactError, setContactError] = useState("");
   const [isSendingOtp, setIsSendingOtp] = useState(false);
@@ -479,8 +498,9 @@ export default function CheckoutPage() {
     const signedIn = user.phone.replace(/\D/g, '');
     const entered = fullPhoneDigits(mobile, phoneCountry);
     if (signedIn && entered && signedIn.slice(-10) === entered.slice(-10)) {
-      setContactConfirmed(true);
+      setConfirmedContact({ name: contactName.trim() || 'Customer', digits: entered });
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.phone, mobile, phoneCountry]);
 
   // The address book is also mirrored on the customer profile, so signing in
@@ -515,7 +535,7 @@ export default function CheckoutPage() {
     const fullName = [user.firstName, user.lastName].filter(Boolean).join(" ");
     if (!contactName && fullName) setContactName(fullName);
     if (!mobile && user.phone) setMobile(user.phone);
-    if (!customerEmail && user.email && !String(user.email).endsWith("@meruveda.whatsapp")) {
+    if (!customerEmail && user.email && !isSyntheticEmail(user.email)) {
       setCustomerEmail(user.email);
     }
     if (isAuthenticated) {
@@ -569,17 +589,8 @@ export default function CheckoutPage() {
 
   const handleMobileChange = (value: string) => {
     const next = normalizeMobile(value);
-    const changed = next !== mobile;
     setMobile(next);
     setMobileError("");
-    if (changed) {
-      // Editing the number un-confirms the contact, in both flows.
-      setContactConfirmed(false);
-      setContactError("");
-      if (otpVerified) {
-        resetVerification("Mobile number changed - please verify it again.");
-      }
-    }
   };
 
   // Lets a verified customer unlock the number field (fields are locked on success).
@@ -1006,8 +1017,21 @@ export default function CheckoutPage() {
   // the contact and opens a checkout-only session.
   const guestMode = otpModeKnown && !otpRequired;
 
+  /** The number as it will be stored, used for the confirmation snapshot. */
+  const currentDigits = fullPhoneDigits(mobile, phoneCountry);
+
+  /**
+   * The contact is confirmed when it still matches the snapshot taken when
+   * "Continue" was pressed. Editing the name or the number therefore
+   * un-confirms it by itself, with no extra bookkeeping to keep in sync.
+   */
+  const contactConfirmed =
+    confirmedContact !== null &&
+    confirmedContact.digits === currentDigits &&
+    confirmedContact.name === contactName.trim();
+
   /** The contact is confirmed: the OTP was verified, or "Continue" was pressed. */
-  const contactReady = otpVerified || contactConfirmed;
+  const contactReady = guestMode ? contactConfirmed : otpVerified;
 
   /**
    * "Continue" - confirm the name and the number and open a guest session.
@@ -1042,7 +1066,7 @@ export default function CheckoutPage() {
         website,
         renderedAt: formRenderedAt.current,
       });
-      setContactConfirmed(true);
+      setConfirmedContact({ name, digits: fullPhoneDigits(mobile, phoneCountry) });
       setOtpVerified(true);
     } catch (err: any) {
       setContactError(
@@ -1259,8 +1283,6 @@ export default function CheckoutPage() {
                     value={contactName}
                     onChange={(e) => {
                       setContactName(e.target.value);
-                      // Editing the name un-confirms the contact.
-                      setContactConfirmed(false);
                       setContactError("");
                     }}
                     className={inputClass}
@@ -1313,6 +1335,7 @@ export default function CheckoutPage() {
                     type="button"
                     onClick={handleConfirmContact}
                     disabled={isConfirmingContact}
+                    data-contact-confirmed={contactConfirmed ? 'yes' : 'no'}
                     className={`w-full rounded-full py-3.5 text-sm font-bold transition-all flex items-center justify-center gap-2 shadow-sm disabled:opacity-60 ${
                       contactConfirmed
                         ? "bg-green-50 text-green-700 border border-green-200"
