@@ -4,6 +4,7 @@ import { config } from '../config/env';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { invoiceDispatchService } from '../services/invoiceDispatchService';
 import { retryFailedShiprocketPushes } from '../services/orderService';
+import { runSweep } from '../services/sweepService';
 import { timingSafeEqualStr } from '../utils/timingSafe';
 
 /**
@@ -54,6 +55,35 @@ router.get('/review-requests', authorize, async (req: Request, res: Response, ne
     next(error);
   }
 });
+
+/**
+ * GET|POST /api/jobs/sweep
+ *
+ * The single housekeeping endpoint. It retries due Shiprocket pushes, retries
+ * invoices that were generated but not sent, polls Shiprocket tracking for
+ * pushed orders, and picks up the invoice backlog the moment the WhatsApp
+ * template is approved.
+ *
+ * Authenticated with CRON_SECRET (the Vercel cron uses it) or an admin
+ * session. GET and POST behave identically so any cron provider works.
+ */
+router.get('/sweep', authorize, sweepHandler);
+router.post('/sweep', authorize, sweepHandler);
+
+async function sweepHandler(req: Request, res: Response, next: NextFunction) {
+  try {
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 15));
+    const result = await runSweep({
+      limit,
+      // The sweep is the one place that notices a fresh template approval, so
+      // it always refreshes the resolver cache.
+      refreshTemplates: true,
+    });
+    res.json({ data: result });
+  } catch (error) {
+    next(error);
+  }
+}
 
 router.get('/retry-failures', authorize, retryFailuresHandler);
 router.post('/retry-failures', authorize, retryFailuresHandler);

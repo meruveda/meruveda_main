@@ -128,7 +128,63 @@ export function postOrderConfirmed(
       shiprocket: { ok: false },
     };
 
-    const invoiceJob = (async () => {
+    /**
+     * The Shiprocket push runs FIRST, then the invoice.
+     *
+     * The two are independent: a failed push must never stop the invoice, and a
+     * failed invoice must never stop the push. Only the order is the
+     * customer's promise; fulfilment and paperwork are separate promises to
+     * the store.
+     */
+    const shiprocketJob = async (): Promise<void> => {
+      try {
+        // SHIPROCKET_AUTO_PUSH (default ON) is the single kill switch for
+        // automatic pushes from every source. SHIPROCKET_TEST_MODE is an
+        // explicit local/test override and intentionally ignores it.
+        const autoPushEnabled = config.shiprocketTestMode || config.shiprocketAutoPush;
+
+        if (autoPushEnabled) {
+          if (!(await hasColumn('orders', 'shiprocket_push_status'))) {
+            // Delta 010 not applied: the atomic in_progress claim cannot
+            // serialise the outbound Shiprocket create call, so two parallel
+            // auto-triggers could create two shipments. Skip the AUTO push to
+            // guarantee no double push.
+            result.shiprocket = {
+              ok: true,
+              skipped: true,
+              reason: 'auto-push skipped: needs delta 010 (orders.shiprocket_push_status)',
+            };
+          } else {
+            const pushed = await pushOrderToShiprocket(orderId);
+            result.shiprocket = (pushed as any)?.skipped
+              ? { ok: true, skipped: true, reason: (pushed as any).reason }
+              : { ok: true };
+            // Self-healing: after a real push, retry at most two recent
+            // failures. Skipped pushes (already pushed / in flight) do not
+            // trigger the sweep, so this cannot recurse.
+            if (!(pushed as any)?.skipped) {
+              try {
+                await retryRecentFailedShiprocketPushes(2, 24);
+              } catch (retryErr: any) {
+                console.error(
+                  `[PostOrder] opportunistic shiprocket retry failed for ${orderId}:`,
+                  retryErr?.message || retryErr
+                );
+              }
+            }
+          }
+        } else {
+          result.shiprocket = { ok: true, skipped: true, reason: 'SHIPROCKET_AUTO_PUSH is off' };
+        }
+      } catch (err: any) {
+        const message = err?.message || String(err);
+        console.error(`[PostOrder] shiprocket step failed for ${orderId}:`, message);
+        await saveShiprocketError(orderId, message);
+        result.shiprocket = { ok: false, reason: message };
+      }
+    };
+
+    const invoiceJob = async (): Promise<void> => {
       try {
         const order = await ordersRepo.getOrderRow(orderId);
 
@@ -159,55 +215,13 @@ export function postOrderConfirmed(
         await saveInvoiceError(orderId, message);
         result.invoice = { ok: false, reason: message };
       }
-    })();
+    };
 
-    const shiprocketJob = (async () => {
-      try {
-        // SHIPROCKET_AUTO_PUSH (default ON) is the single kill switch for
-        // automatic pushes from every source. SHIPROCKET_TEST_MODE is an
-        // explicit local/test override and intentionally ignores it.
-        const autoPushEnabled = config.shiprocketTestMode || config.shiprocketAutoPush;
+    // Push first, then invoice. Each has its own try/catch, so one failing
+    // never stops the other, and neither can fail the order.
+    await shiprocketJob();
+    await invoiceJob();
 
-        if (autoPushEnabled) {
-          if (!(await hasColumn('orders', 'shiprocket_push_status'))) {
-            // Delta 010 not applied: the atomic in_progress claim cannot
-            // serialise the outbound Shiprocket create call, so two parallel
-            // auto-triggers could create two shipments. Skip the AUTO push to
-            // guarantee no double push.
-            result.shiprocket = {
-              ok: true,
-              skipped: true,
-              reason: 'auto-push skipped: needs delta 010 (orders.shiprocket_push_status)',
-            };
-          } else {
-            const pushed = await pushOrderToShiprocket(orderId);
-            result.shiprocket = { ok: true };
-            // Self-healing: after a real push, retry at most two recent
-            // failures. Skipped pushes (already pushed / in flight) do not
-            // trigger the sweep, so this cannot recurse.
-            if (!(pushed as any)?.skipped) {
-              try {
-                await retryRecentFailedShiprocketPushes(2, 24);
-              } catch (retryErr: any) {
-                console.error(
-                  `[PostOrder] opportunistic shiprocket retry failed for ${orderId}:`,
-                  retryErr?.message || retryErr
-                );
-              }
-            }
-          }
-        } else {
-          result.shiprocket = { ok: true, skipped: true, reason: 'SHIPROCKET_AUTO_PUSH is off' };
-        }
-      } catch (err: any) {
-        const message = err?.message || String(err);
-        console.error(`[PostOrder] shiprocket step failed for ${orderId}:`, message);
-        await saveShiprocketError(orderId, message);
-        result.shiprocket = { ok: false, reason: message };
-      }
-    })();
-
-    await Promise.allSettled([invoiceJob, shiprocketJob]);
     return result;
   })();
 

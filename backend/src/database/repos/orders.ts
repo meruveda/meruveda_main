@@ -418,6 +418,8 @@ export interface RetryPushOptions {
   failedOnly?: boolean;
   /** Only rows created within the last N hours (opportunistic retry sweep). */
   sinceHours?: number;
+  /** Ignore the scheduled next-attempt time and take every candidate. */
+  ignoreSchedule?: boolean;
 }
 
 export async function retryPushCandidates(
@@ -430,6 +432,10 @@ export async function retryPushCandidates(
     // A non-Indian delivery phone can never satisfy Shiprocket; retrying it
     // every day would just burn API calls. The admin can still push manually.
     "(shiprocket_push_error IS NULL OR shiprocket_push_error NOT LIKE 'Non-Indian phone number%')",
+    // A deliberately skipped order is final: never retry it.
+    'COALESCE(shiprocket_push_skipped, false) = false',
+    // Orders that have exhausted their attempts are terminal.
+    'COALESCE(shiprocket_push_attempts, 0) < 8',
   ];
   const params: any[] = [];
 
@@ -440,16 +446,82 @@ export async function retryPushCandidates(
     params.push(Math.floor(opts.sinceHours));
     clauses.push(`created_at >= NOW() - ($${params.length}::int * INTERVAL '1 hour')`);
   }
+  // The backoff schedule: an order is only retried once its next-attempt time
+  // has passed. A row that has never been scheduled (NULL) is due immediately.
+  if (!opts.ignoreSchedule) {
+    clauses.push('(shiprocket_push_next_attempt_at IS NULL OR shiprocket_push_next_attempt_at <= NOW())');
+  }
 
   params.push(limit);
 
   return query(
-    `SELECT id, order_number, status, payment_status, payment_method, created_at
+    `SELECT id, order_number, status, payment_status, payment_method, created_at,
+            shiprocket_push_attempts, shiprocket_push_error, shiprocket_push_status
        FROM orders
       WHERE ${clauses.join(' AND ')}
-      ORDER BY created_at ASC
+      ORDER BY COALESCE(shiprocket_push_next_attempt_at, created_at) ASC
       LIMIT $${params.length}`,
     params,
+  );
+}
+
+/**
+ * Claim the single "tell the store owner" slot for an order.
+ *
+ * The conditional UPDATE is the whole point: two concurrent sweeps must not
+ * both send the alert.
+ */
+export async function claimAdminAlert(orderId: string, at: string): Promise<boolean> {
+  const rows = await query(
+    `UPDATE orders SET shiprocket_admin_alerted_at = $1
+      WHERE id = $2 AND shiprocket_admin_alerted_at IS NULL
+      RETURNING id`,
+    [at, orderId],
+  );
+  return rows.length > 0;
+}
+
+/** Stamp the time a tracking poll ran, so the sweep can rate-limit itself. */
+export async function touchTrackingPolled(orderId: string): Promise<void> {
+  await query(
+    'UPDATE orders SET shiprocket_tracking_polled_at = NOW() WHERE id = $1',
+    [orderId],
+  );
+}
+
+/**
+ * Count one push attempt and return the new total.
+ *
+ * The increment is atomic, so parallel attempts cannot both read the same
+ * count. Returns the new value.
+ */
+export async function incrementPushAttempts(orderId: string): Promise<number> {
+  const rows = await query<{ attempts: number }>(
+    `UPDATE orders SET shiprocket_push_attempts = COALESCE(shiprocket_push_attempts, 0) + 1
+      WHERE id = $1
+      RETURNING shiprocket_push_attempts`,
+    [orderId],
+  );
+  return Number(rows[0]?.attempts ?? 0);
+}
+
+/**
+ * Pushed orders that are not delivered yet, for the tracking poll.
+ *
+ * Ordered by the oldest poll, so the orders nobody has checked for the
+ * longest time are checked first.
+ */
+export async function trackingPollCandidates(limit: number): Promise<any[]> {
+  return query(
+    `SELECT id, order_number, awb_code, courier_name, status, shiprocket_order_id
+       FROM orders
+      WHERE shiprocket_order_id IS NOT NULL
+        AND awb_code IS NOT NULL
+        AND status NOT IN ('delivered', 'cancelled', 'canceled', 'returned')
+        AND (shiprocket_tracking_polled_at IS NULL OR shiprocket_tracking_polled_at < NOW() - INTERVAL '30 minutes')
+      ORDER BY COALESCE(shiprocket_tracking_polled_at, created_at) ASC
+      LIMIT $1`,
+    [limit],
   );
 }
 

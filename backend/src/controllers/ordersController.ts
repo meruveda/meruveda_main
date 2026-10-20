@@ -10,6 +10,7 @@ import { config, invoiceWhatsapp } from '../config/env';
 import { timingSafeEqualStr } from '../utils/timingSafe';
 import { shiprocketTrackingService } from '../services/shiprocket/tracking.service';
 import { shiprocketWebhookService } from '../services/shiprocket/webhook.service';
+import { runSweepIfDue, refreshOrderState } from '../services/sweepService';
 import { deleteInvoiceClaim, downloadInvoicePdf, readInvoiceState } from '../services/invoiceStore';
 import { generateInvoicePdf, getOrderForInvoice } from '../services/invoiceService';
 
@@ -17,6 +18,11 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 
 export const getOrders = async (req: Request, res: Response, next: NextFunction) => {
   try {
+    // Opening the admin orders list is a natural moment to refresh the
+    // pipeline: a failed push gets retried and a stale tracking status gets
+    // re-polled. The sweep is throttled to once a minute, so hammering the
+    // list costs nothing.
+    keepAlive(runSweepIfDue({ limit: 15 }));
     const result = await orderService.getOrders(req.query);
     res.json(result);
   } catch (error) {
@@ -27,6 +33,8 @@ export const getOrders = async (req: Request, res: Response, next: NextFunction)
 export const getOrderById = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
+    // Same idea as the list: an admin opening an order detail refreshes it.
+    keepAlive(runSweepIfDue({ limit: 15 }));
     const data = await orderService.getOrderById(id as string);
     // Ownership check: shoppers may only fetch their own orders; admins any.
     if (req.user?.role !== 'admin' && (data as any)?.user_id !== req.user?.id) {
@@ -111,6 +119,11 @@ export const trackOrder = async (req: Request, res: Response, next: NextFunction
       // Same message as "not found" so the endpoint cannot be used to enumerate orders.
       return res.status(404).json({ error: { message: 'No order found for these details.' } });
     }
+
+    // A customer looking up their order is the moment the pipeline is most
+    // likely to have something new to say. Refresh it in the background; the
+    // response is never delayed by it.
+    keepAlive(refreshOrderState(order.id));
 
     res.json({
       data: {

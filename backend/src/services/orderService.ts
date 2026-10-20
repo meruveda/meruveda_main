@@ -6,6 +6,12 @@ import * as trackingRepo from '../database/repos/tracking';
 import { withTransaction } from '../database/db';
 import { addressService } from './addressService';
 import { shiprocketOrderService } from './shiprocket/order.service';
+import {
+  MAX_PUSH_ATTEMPTS,
+  alertAdminOfTerminalFailure,
+  nextAttemptAt,
+  recordTimelineEvent,
+} from './shiprocketAutomation';
 import { shiprocketTrackingService } from './shiprocket/tracking.service';
 import { shiprocketWebhookService } from './shiprocket/webhook.service';
 import { orderNotifyService } from './orderNotifyService';
@@ -570,6 +576,20 @@ export const orderService = {
     }
 };
 
+/**
+ * A push that was deliberately not made.
+ *
+ * The only reason today is "no Indian delivery contact": Shiprocket cannot
+ * ship such an order. A skip is NOT a failure — it is recorded separately, is
+ * never retried, and never affects the order or the payment.
+ */
+export class ShiprocketPushSkipped extends Error {
+  constructor(public readonly reason: string) {
+    super(`Shiprocket push skipped: ${reason}`);
+    this.name = 'ShiprocketPushSkipped';
+  }
+}
+
 /** Mark a push attempt as failed (guarded by delta 010 columns). */
 async function markPushFailed(orderId: string, message: string): Promise<void> {
   try {
@@ -582,6 +602,58 @@ async function markPushFailed(orderId: string, message: string): Promise<void> {
     });
   } catch (err: any) {
     console.error('[Shiprocket] could not persist push failure:', err?.message || err);
+  }
+}
+
+/**
+ * Record a deliberate skip.
+ *
+ * The order keeps its normal status, the customer is never blocked, and the
+ * admin list shows the reason instead of a scary failure.
+ */
+async function markPushSkipped(orderId: string, reason: string): Promise<void> {
+  try {
+    const patch: Record<string, any> = {
+      shiprocket_push_skipped: true,
+      shiprocket_push_skipped_reason: String(reason).slice(0, 200),
+    };
+    if (await hasColumn('orders', 'shiprocket_push_status')) {
+      patch.shiprocket_push_status = 'skipped';
+    }
+    if (await hasColumn('orders', 'shiprocket_push_error')) {
+      patch.shiprocket_push_error = null;
+    }
+    await ordersRepo.updateOrderById(orderId, patch);
+  } catch (err: any) {
+    console.error('[Shiprocket] could not persist push skip:', err?.message || err);
+  }
+}
+
+/**
+ * Count the attempt and schedule the next one.
+ *
+ * The schedule is immediate, 5m, 15m, 1h, 6h, 24h and stops after 8
+ * attempts, at which point the failure is terminal and the store owner is
+ * alerted once.
+ */
+async function recordPushAttempt(orderId: string, ok: boolean): Promise<number> {
+  try {
+    if (!(await hasColumn('orders', 'shiprocket_push_attempts'))) return 0;
+    const attempts = await ordersRepo.incrementPushAttempts(orderId);
+    if (ok) {
+      if (await hasColumn('orders', 'shiprocket_push_next_attempt_at')) {
+        await ordersRepo.updateOrderById(orderId, { shiprocket_push_next_attempt_at: null });
+      }
+      return attempts;
+    }
+    const next = nextAttemptAt(attempts);
+    if (await hasColumn('orders', 'shiprocket_push_next_attempt_at')) {
+      await ordersRepo.updateOrderById(orderId, { shiprocket_push_next_attempt_at: next });
+    }
+    return attempts;
+  } catch (err: any) {
+    console.error('[Shiprocket] could not record push attempt:', err?.message || err);
+    return 0;
   }
 }
 
@@ -667,6 +739,15 @@ export async function pushOrderToShiprocket(orderId: string) {
     return { skipped: true, shiprocket_order_id: (order as any).shiprocket_order_id };
   }
 
+  // A deliberate skip is final: never attempt it again.
+  if ((order as any).shiprocket_push_skipped) {
+    return {
+      skipped: true,
+      reason: (order as any).shiprocket_push_skipped_reason || 'no Indian delivery contact',
+      shiprocket_order_id: null,
+    };
+  }
+
   const claim = await claimShiprocketPush(order.id);
   if (claim === 'busy') {
     console.log(`[Shiprocket] order ${order.order_number} push already in progress elsewhere, skipping.`);
@@ -674,9 +755,34 @@ export async function pushOrderToShiprocket(orderId: string) {
   }
 
   try {
-    return await executeShiprocketPush(order);
+    const result = await executeShiprocketPush(order);
+    await recordPushAttempt(order.id, true);
+    return result;
   } catch (err: any) {
+    if (err instanceof ShiprocketPushSkipped) {
+      // Not a failure: the order stays exactly as it is.
+      await markPushSkipped(order.id, err.reason);
+      console.warn(`[Shiprocket] order ${order.order_number} skipped: ${err.reason}`);
+      await recordTimelineEvent(order.id, 'Shiprocket push skipped', { reason: err.reason });
+      return { skipped: true, reason: err.reason, shiprocket_order_id: null };
+    }
+
+    const attempts = await recordPushAttempt(order.id, false);
     await markPushFailed(order.id, err?.message || String(err));
+    await recordTimelineEvent(order.id, 'Shiprocket push failed', {
+      reason: String(err?.message || err).slice(0, 300),
+      attempt: attempts,
+    });
+
+    // The attempt budget is spent: tell the store owner once, so a parcel
+    // never silently disappears.
+    if (attempts >= MAX_PUSH_ATTEMPTS) {
+      try {
+        await alertAdminOfTerminalFailure(order, err?.message || String(err));
+      } catch (alertErr: any) {
+        console.error('[Shiprocket] admin alert failed:', alertErr?.message || alertErr);
+      }
+    }
     throw err;
   }
 }
@@ -790,15 +896,17 @@ async function executeShiprocketPush(order: any) {
   const deliveryPhoneRaw = order.delivery_phone || shipping.phone;
   const shippingPhone10 = normalizePhone10(deliveryPhoneRaw);
   if (!/^[6-9]\d{9}$/.test(shippingPhone10)) {
-    // Shiprocket only accepts Indian mobile numbers. A non-Indian delivery
-    // contact must never block the order — it is recorded as a failed push so
-    // the admin can follow up, while the order/payment flow stays untouched.
+    // Shiprocket only accepts Indian mobile numbers. An order without an
+    // Indian delivery contact is DELIBERATELY SKIPPED, not failed: the order
+    // and the payment stay untouched, the customer is not blocked, and the
+    // admin sees "Skipped - no Indian delivery contact" so they can fulfil
+    // it by hand. A skip is never retried.
     const rawDigits = String(deliveryPhoneRaw || '').replace(/\D/g, '');
     const looksNonIndian = rawDigits.length > 10;
-    throw new Error(
+    throw new ShiprocketPushSkipped(
       looksNonIndian
-        ? `Non-Indian phone number: shipping phone "${deliveryPhoneRaw}" is not a 10-digit Indian mobile (order ${order.order_number}).`
-        : `Cannot push to Shiprocket: shipping phone "${deliveryPhoneRaw || '(empty)'}" is not a valid 10-digit Indian mobile number for order ${order.order_number}.`
+        ? 'no Indian delivery contact (non-Indian delivery phone)'
+        : 'no Indian delivery contact (missing or invalid delivery phone)',
     );
   }
   if (!/^\d{6}$/.test(String(shipping.zipCode || '').trim())) {
