@@ -47,7 +47,7 @@ const INDIAN_STATES = STATES;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 const PIN_RE = /^\d{6}$/;
 
-import { DEFAULT_COUNTRY, Country, nationalDigits, fullPhoneDigits, isValidNational, isIndianNumber } from "@/constants/countries";
+import { DEFAULT_COUNTRY, Country, nationalDigits, fullPhoneDigits, isValidNational, isIndianNumber, formatDisplay } from "@/constants/countries";
 import { CountryPhoneField } from "@/components/CountryPhoneField";
 
 // Records a completed OTP verification in this browser so a refresh (or an
@@ -285,7 +285,7 @@ function writeStoredAddresses(list: Address[]) {
 
 export default function CheckoutPage() {
   const { cart, cartTotal, removeFromCart, updateQuantity } = useCart();
-  const { user, isAuthenticated, isLoading, sendOtp, resendOtp, verifyOtp, saveProfile, guestCheckout, getOtpStatus } = useAuth();
+  const { user, isAuthenticated, isLoading, sendOtp, resendOtp, verifyOtp, saveProfile, guestCheckout, getOtpConfig } = useAuth();
   const router = useRouter();
 
   // No separate login screen: the checkout form itself is the login.
@@ -313,16 +313,23 @@ export default function CheckoutPage() {
    * Whether the checkout asks for an OTP.
    *
    * 'off' means the store is taking guest checkouts (name + number) while a
-   * WhatsApp template is reviewed. The answer comes from the server, so
-   * switching OTP_MODE back to 'auto' restores the OTP flow with no rebuild.
-   * Until it is known, the OTP form is shown: the safe default.
+   * WhatsApp template is reviewed. The answer comes from a never-cached public
+   * endpoint, so switching OTP_MODE back to 'auto' restores the OTP flow with
+   * no rebuild. Until it is known, the OTP form is shown: the safe default.
    */
-  const [otpMode, setOtpMode] = useState<'auto' | 'on' | 'off'>('auto');
+  const [otpRequired, setOtpRequired] = useState(true);
   const [otpModeKnown, setOtpModeKnown] = useState(false);
   /** The honeypot: a field a human never sees and never fills in. */
   const [website, setWebsite] = useState("");
   /** When the form was rendered - a form filled in implausibly fast is a bot. */
   const formRenderedAt = useRef<number>(Date.now());
+  /**
+   * The contact is confirmed: either the OTP was verified, or the customer
+   * pressed "Continue" and the guest session was opened.
+   */
+  const [contactConfirmed, setContactConfirmed] = useState(false);
+  const [isConfirmingContact, setIsConfirmingContact] = useState(false);
+  const [contactError, setContactError] = useState("");
   const [isSendingOtp, setIsSendingOtp] = useState(false);
   const [isVerifyingOtp, setIsVerifyingOtp] = useState(false);
   const [otpMessage, setOtpMessage] = useState("");
@@ -446,14 +453,15 @@ export default function CheckoutPage() {
   // Ask the server whether the checkout needs an OTP.
   //
   // The answer changes with OTP_MODE (a store-wide switch, not a build), so
-  // it is read at page load. Until it arrives the OTP form is shown: it is
-  // the safe default, and a guest checkout simply waits a moment for it.
+  // it is read at page load from a never-cached public endpoint. Until it
+  // arrives the OTP form is shown: it is the safe default, and a guest
+  // checkout simply waits a moment for it.
   useEffect(() => {
     let cancelled = false;
-    getOtpStatus()
-      .then((status) => {
+    getOtpConfig()
+      .then((config) => {
         if (cancelled) return;
-        setOtpMode(status.mode);
+        setOtpRequired(config.otpRequired);
         setOtpModeKnown(true);
       })
       .catch(() => {
@@ -462,7 +470,18 @@ export default function CheckoutPage() {
     return () => {
       cancelled = true;
     };
-  }, [getOtpStatus]);
+  }, [getOtpConfig]);
+
+  // A customer who is already signed in with THIS number is confirmed without
+  // pressing anything: there is nothing to prove.
+  useEffect(() => {
+    if (!user?.phone || !mobile) return;
+    const signedIn = user.phone.replace(/\D/g, '');
+    const entered = fullPhoneDigits(mobile, phoneCountry);
+    if (signedIn && entered && signedIn.slice(-10) === entered.slice(-10)) {
+      setContactConfirmed(true);
+    }
+  }, [user?.phone, mobile, phoneCountry]);
 
   // The address book is also mirrored on the customer profile, so signing in
   // on a fresh browser still restores what was saved last time.
@@ -553,8 +572,13 @@ export default function CheckoutPage() {
     const changed = next !== mobile;
     setMobile(next);
     setMobileError("");
-    if (changed && otpVerified) {
-      resetVerification("Mobile number changed — please verify it again.");
+    if (changed) {
+      // Editing the number un-confirms the contact, in both flows.
+      setContactConfirmed(false);
+      setContactError("");
+      if (otpVerified) {
+        resetVerification("Mobile number changed - please verify it again.");
+      }
     }
   };
 
@@ -976,11 +1000,60 @@ export default function CheckoutPage() {
 
   // Place Order / Pay Action.
   //
-  // With the OTP flow (OTP_MODE=auto/on) the WhatsApp code is the identity
-  // gate: there is no login redirect, verifying the number signs the customer
-  // in. With guest checkout (OTP_MODE=off) the customer checks out with a
-  // name and a number, and the order is flagged as an unverified phone.
-  const guestMode = otpMode === 'off';
+  // With the OTP flow the WhatsApp code is the identity gate: there is no
+  // login redirect, verifying the number signs the customer in. With guest
+  // checkout the customer presses "Continue" under the number, which confirms
+  // the contact and opens a checkout-only session.
+  const guestMode = otpModeKnown && !otpRequired;
+
+  /** The contact is confirmed: the OTP was verified, or "Continue" was pressed. */
+  const contactReady = otpVerified || contactConfirmed;
+
+  /**
+   * "Continue" - confirm the name and the number and open a guest session.
+   *
+   * A customer who is already signed in with THIS number is confirmed without
+   * pressing anything.
+   */
+  const handleConfirmContact = async () => {
+    if (isConfirmingContact) return;
+    setContactError("");
+
+    const name = contactName.trim();
+    if (name.length < 2) {
+      setContactError("Please enter your full name.");
+      document.getElementById("checkout-contact")?.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    const digits = nationalDigits(mobile, phoneCountry);
+    if (!isValidNational(digits, phoneCountry)) {
+      setContactError(
+        phoneCountry.iso === "in"
+          ? "Please enter a valid 10-digit Indian mobile number."
+          : `Please enter a valid ${phoneCountry.digits}-digit ${phoneCountry.name} number.`,
+      );
+      document.getElementById("checkout-mobile")?.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+
+    setIsConfirmingContact(true);
+    try {
+      await guestCheckout(name, fullPhoneDigits(mobile, phoneCountry), {
+        website,
+        renderedAt: formRenderedAt.current,
+      });
+      setContactConfirmed(true);
+      setOtpVerified(true);
+    } catch (err: any) {
+      setContactError(
+        err?.response?.data?.error?.message ||
+          err?.message ||
+          "We could not confirm your details. Please try again.",
+      );
+    } finally {
+      setIsConfirmingContact(false);
+    }
+  };
 
   const handlePlaceOrder = async () => {
     if (!guestMode && !otpVerified) {
@@ -1032,28 +1105,12 @@ export default function CheckoutPage() {
     setIsPlacingOrder(true);
     const selectedAddr = effectiveAddress;
 
-    // Guest checkout: open a checkout-only session first.
-    //
-    // The session may place the order and read that order - nothing else. It
-    // is created here so the order is linked to it, and so the success page
-    // can show the order.
-    if (guestMode) {
-      try {
-        await guestCheckout(contactName.trim(), fullPhoneDigits(mobile, phoneCountry), {
-          website,
-          renderedAt: formRenderedAt.current,
-        });
-        setOtpVerified(true);
-      } catch (guestErr: any) {
-        console.error("Guest checkout failed", guestErr);
-        setOtpError(
-          guestErr?.response?.data?.error?.message ||
-            guestErr?.message ||
-            "We could not start the checkout. Please try again.",
-        );
-        setIsPlacingOrder(false);
-        return;
-      }
+    // Guest checkout: the contact was already confirmed by "Continue", which
+    // opened the checkout-only session. Nothing to do here.
+    if (guestMode && !contactConfirmed) {
+      setOtpError("Please confirm your contact details first.");
+      document.getElementById("checkout-contact")?.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
     }
 
     // Save the latest name / email / address against the account before the
@@ -1200,7 +1257,12 @@ export default function CheckoutPage() {
                     type="text"
                     required
                     value={contactName}
-                    onChange={(e) => setContactName(e.target.value)}
+                    onChange={(e) => {
+                      setContactName(e.target.value);
+                      // Editing the name un-confirms the contact.
+                      setContactConfirmed(false);
+                      setContactError("");
+                    }}
                     className={inputClass}
                     placeholder="Enter your full name"
                   />
@@ -1241,6 +1303,50 @@ export default function CheckoutPage() {
                   {mobileError && <p className={errorClass}>{mobileError}</p>}
                 </div>
               </div>
+
+              {/* Guest checkout: confirm the name and the number.
+                  In the OTP flow this section keeps the "Send OTP" button and
+                  the code box, and nothing here changes. */}
+              {guestMode && (
+                <div className="space-y-2">
+                  <button
+                    type="button"
+                    onClick={handleConfirmContact}
+                    disabled={isConfirmingContact}
+                    className={`w-full rounded-full py-3.5 text-sm font-bold transition-all flex items-center justify-center gap-2 shadow-sm disabled:opacity-60 ${
+                      contactConfirmed
+                        ? "bg-green-50 text-green-700 border border-green-200"
+                        : "bg-deep-purple text-white hover:bg-deep-purple/90"
+                    }`}
+                  >
+                    {isConfirmingContact ? (
+                      <>
+                        <Loader2 size={16} className="animate-spin" />
+                        Confirming...
+                      </>
+                    ) : contactConfirmed ? (
+                      <>
+                        <CheckCircle2 size={16} />
+                        Contact confirmed
+                      </>
+                    ) : (
+                      "Continue"
+                    )}
+                  </button>
+                  {contactConfirmed ? (
+                    <p className="text-[11px] text-gray-500 text-center">
+                      {contactName.trim()} · {formatDisplay(mobile, phoneCountry)}
+                    </p>
+                  ) : (
+                    <p className="text-[11px] text-gray-500 text-center">
+                      Order updates aur invoice isi WhatsApp number par aayenge
+                    </p>
+                  )}
+                  {contactError && (
+                    <p className="text-[11px] text-red-500 font-medium text-center">{contactError}</p>
+                  )}
+                </div>
+              )}
 
               {/* The honeypot. A human never sees this field and never fills
                   it in; a bot fills everything it finds. It is off-screen and
@@ -1864,29 +1970,54 @@ export default function CheckoutPage() {
               </div>
             </div>
 
-            {/* Submit Action — signed-in account required (old setup). */}
-            <button
-              onClick={handlePlaceOrder}
-              disabled={isPlacingOrder || !isServiceable || !otpVerified || !addressValid}
-              className="w-full bg-gold text-deep-purple font-bold py-3.5 rounded-xl hover:bg-gold-light transition-all flex items-center justify-center gap-2 text-sm shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {isPlacingOrder ? (
+            {/* Submit Action. The button is disabled until the contact and the
+                address are confirmed, and the reason is spelled out below it
+                - a grey button with no explanation is the worst of both. */}
+            {(() => {
+              const blockedReason = !isServiceable
+                ? "This pincode is not serviceable yet."
+                : !contactReady
+                  ? guestMode
+                    ? "Confirm your contact details to continue"
+                    : "Verify your WhatsApp number to continue"
+                  : !deliveryAddressValid
+                    ? "Select a delivery address"
+                    : !emailValid
+                      ? "Enter a valid email to continue"
+                      : "";
+              return (
                 <>
-                  <Loader2 size={18} className="animate-spin" />
-                  Processing...
+                  <button
+                    onClick={handlePlaceOrder}
+                    disabled={isPlacingOrder || Boolean(blockedReason)}
+                    className="w-full bg-gold text-deep-purple font-bold py-3.5 rounded-xl hover:bg-gold-light transition-all flex items-center justify-center gap-2 text-sm shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isPlacingOrder ? (
+                      <>
+                        <Loader2 size={18} className="animate-spin" />
+                        Processing...
+                      </>
+                    ) : !contactReady && !guestMode ? (
+                      "Verify your WhatsApp number to continue"
+                    ) : !deliveryAddressValid ? (
+                      "Complete address to continue"
+                    ) : !emailValid ? (
+                      "Enter a valid email to continue"
+                    ) : paymentMethod === "payu" ? (
+                      `Pay Now (₹${finalTotal.toFixed(2)})`
+                    ) : (
+                      `Place Order (₹${finalTotal.toFixed(2)})`
+                    )}
+                  </button>
+
+                  {blockedReason && (
+                    <p className="text-[11px] text-amber-600 font-medium text-center mt-2">
+                      {blockedReason}
+                    </p>
+                  )}
                 </>
-              ) : !otpVerified && !guestMode ? (
-                "Verify your WhatsApp number to continue"
-              ) : !deliveryAddressValid ? (
-                "Complete address to continue"
-              ) : !emailValid ? (
-                "Enter a valid email to continue"
-              ) : paymentMethod === "payu" ? (
-                `Pay Now (₹${finalTotal.toFixed(2)})`
-              ) : (
-                `Place Order (₹${finalTotal.toFixed(2)})`
-              )}
-            </button>
+              );
+            })()}
 
             {!otpVerified && !addressValid && !guestMode && (
               <p className="text-[11px] text-gray-400 text-center mt-2">

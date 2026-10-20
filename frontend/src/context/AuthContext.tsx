@@ -55,6 +55,18 @@ interface AuthContextType {
     templateName: string | null;
     reason: string | null;
   }>;
+  /**
+   * What the checkout needs before it renders: whether an OTP is required.
+   *
+   * Read at request time from a never-cached public endpoint, so a store-wide
+   * switch takes effect on the next page load.
+   */
+  getOtpConfig: () => Promise<{
+    otpRequired: boolean;
+    mode: 'auto' | 'on' | 'off';
+    guestCheckout: boolean;
+    message: string | null;
+  }>;
   /** Persist name / email / address collected during checkout. */
   saveProfile: (payload: { name?: string; email?: string; address?: any; phone?: string }) => Promise<void>;
 }
@@ -127,6 +139,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const getOtpStatus = useCallback(() => authService.getOtpStatus(), []);
 
+  const getOtpConfig = useCallback(() => authService.getOtpConfig(), []);
+
   const saveProfile = useCallback(async (payload: { name?: string; email?: string; address?: any; phone?: string }) => {
     await authService.saveProfile(payload);
     // Refresh the in-memory user so later steps see the saved details.
@@ -152,6 +166,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         quickLogin,
     guestCheckout,
     getOtpStatus,
+    getOtpConfig,
         saveProfile,
       }}
     >

@@ -122,6 +122,46 @@ export const otpStatus = async (_req: Request, res: Response) => {
   }
 };
 
+/**
+ * PUBLIC: what the checkout needs to know before it renders.
+ *
+ * `{ otpRequired: boolean }` is the one value the storefront gates on. It is
+ * read at request time (never baked into a build) so a store-wide switch -
+ * OTP_MODE=off while a WhatsApp template is reviewed - takes effect on the
+ * next page load, with no rebuild.
+ */
+export const otpConfig = async (_req: Request, res: Response) => {
+  // Never cached: the mode can change at any moment.
+  res.set('Cache-Control', 'no-store, max-age=0');
+  try {
+    if (config.otpMode === 'off') {
+      return res.json({
+        data: {
+          otpRequired: false,
+          mode: 'off',
+          guestCheckout: true,
+          message: 'Order updates and your invoice will come to this WhatsApp number.',
+        },
+      });
+    }
+    const availability = await otpAvailability();
+    res.json({
+      data: {
+        otpRequired: availability.required,
+        mode: availability.mode,
+        guestCheckout: false,
+        message: null,
+      },
+    });
+  } catch (error: any) {
+    console.error('[OTP] config probe failed:', error?.message || error);
+    // The safe default is to require the OTP.
+    res.json({
+      data: { otpRequired: true, mode: 'auto', guestCheckout: false, message: null },
+    });
+  }
+};
+
 export const verifyOtp = async (req: Request, res: Response, next: NextFunction) => {
   try {
     // OTP_DISABLED TEMPORARILY - re-enable by setting OTP_ENABLED=true.

@@ -249,6 +249,35 @@ export const authService = {
     }
   },
 
+  /**
+   * What the checkout needs before it renders.
+   *
+   * Read at request time from a never-cached public endpoint, so a
+   * store-wide switch (OTP_MODE=off while a WhatsApp template is reviewed)
+   * takes effect on the next page load - no rebuild, no hardcoded env var.
+   */
+  getOtpConfig: async (): Promise<{
+    otpRequired: boolean;
+    mode: 'auto' | 'on' | 'off';
+    guestCheckout: boolean;
+    message: string | null;
+  }> => {
+    try {
+      const response = await axiosInstance.get('/auth/otp/config');
+      const d = response.data?.data || {};
+      return {
+        otpRequired: d.otpRequired !== false,
+        mode: d.mode || 'auto',
+        guestCheckout: Boolean(d.guestCheckout),
+        message: d.message || null,
+      };
+    } catch {
+      // If the config cannot be read, keep the OTP flow: it is the safe
+      // default, and the customer can still check out.
+      return { otpRequired: true, mode: 'auto', guestCheckout: false, message: null };
+    }
+  },
+
   /** Persist the name / email / address collected in the checkout form. */
   saveProfile: async (payload: {
     name?: string;

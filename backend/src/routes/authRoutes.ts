@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { login, register, getMe, forgotPassword, resetPassword, getPreferences, updatePreferences, getCustomerPreferences } from '../controllers/authController';
-import { sendOtp, verifyOtp, resendOtp, quickLogin, otpStatus, guestCheckout } from '../controllers/otpController';
+import { sendOtp, verifyOtp, resendOtp, quickLogin, otpStatus, otpConfig, guestCheckout } from '../controllers/otpController';
 import { updateCheckoutProfile } from '../controllers/otpController';
 import { requireAuth, requireFullAuth } from '../middleware/auth';
 import {
@@ -32,6 +32,9 @@ router.post('/reset-password', passwordResetLimiter, resetPassword as any);
 // Strict rate limit: 10 / 10 min per IP+phone, 30 / 10 min per IP alone.
 const quickLoginLimiter = createRateLimiter({ windowMs: 10 * 60 * 1000, max: 10, prefix: 'quicklogin' });
 router.post('/quick-login', quickLoginLimiter, quickLogin as any);
+
+// What the checkout needs to know before it renders. Public, never cached.
+router.get('/otp/config', otpConfig as any);
 
 // Guest checkout - name + number, no OTP. Only live when OTP_MODE=off.
 const guestLimiter = [
