@@ -6,6 +6,7 @@ import { otpService } from '../services/otpService';
 import { normalizePhone, isWhatsappConfigured } from '../services/whatsappService';
 import { canonicalPhone, isPlaceholderEmail, isValidEmail, isValidPhone10 } from '../utils/phone';
 import { otpAvailability } from '../services/whatsappTemplateResolver';
+import * as guestCheckoutService from '../services/guestCheckoutService';
 import { config } from '../config/env';
 import { hasColumn } from '../services/schemaGuard';
 
@@ -66,11 +67,32 @@ export const resendOtp = handleSend;
  */
 export const otpStatus = async (_req: Request, res: Response) => {
   try {
+    // OTP_MODE=off switches the checkout over to the "name + number" flow.
+    // It is reported here so the storefront can render the right form without
+    // a rebuild, and so switching the mode back to 'auto' restores the OTP
+    // flow with no code change.
+    if (config.otpMode === 'off') {
+      return res.json({
+        data: {
+          mode: 'off',
+          required: false,
+          guestCheckout: true,
+          templateAvailable: false,
+          templateName: null,
+          templateLanguage: null,
+          reason: 'OTP is switched off; guests check out with their name and number.',
+          otpEnabled: config.otpEnabled,
+          whatsappConfigured: isWhatsappConfigured(),
+        },
+      });
+    }
+
     const availability = await otpAvailability();
     res.json({
       data: {
         mode: availability.mode,
         required: availability.required,
+        guestCheckout: false,
         templateAvailable: availability.templateAvailable,
         templateName: availability.templateName || null,
         templateLanguage: availability.templateLanguage || null,
@@ -88,6 +110,7 @@ export const otpStatus = async (_req: Request, res: Response) => {
       data: {
         mode: 'auto',
         required: false,
+        guestCheckout: false,
         templateAvailable: false,
         templateName: null,
         templateLanguage: null,
@@ -236,6 +259,37 @@ export const updateCheckoutProfile = async (req: Request, res: Response, next: N
  * other sensitive reads) can refuse until a real OTP verification flips
  * the flag. Rate limiting lives on the route (createRateLimiter).
  */
+/**
+ * Guest checkout - place an order with a name and a number, no OTP.
+ *
+ * Only available when OTP_MODE=off. The session it returns is a GUEST
+ * session: it may place an order and read that one order, and it can never
+ * read an existing account's data.
+ */
+export const guestCheckout = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    if (!guestCheckoutService.guestCheckoutEnabled()) {
+      return res.status(403).json({
+        error: { message: 'Guest checkout is switched off. Please verify your WhatsApp number.' },
+      });
+    }
+
+    const result = await guestCheckoutService.guestCheckout(req.body || {});
+    if (!result.ok) {
+      return res.status(result.status).json({ error: { message: result.message } });
+    }
+
+    res.json({
+      message: 'You can check out now.',
+      token: result.token,
+      user: { id: result.userId, phone: result.phone, phone_verified: false, scope: 'guest' },
+      isNewUser: true,
+    });
+  } catch (error: any) {
+    next(error);
+  }
+};
+
 export const quickLogin = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { phone, name } = req.body;
@@ -267,6 +321,12 @@ export const quickLogin = async (req: Request, res: Response, next: NextFunction
       email: user.email,
       role: user.role,
       phone_verified: phoneVerified,
+      // A quick login never proved ownership of the number, so the session is
+      // a checkout-only GUEST session. It may place an order and read that
+      // order - it may not read the account history, the addresses, the cart
+      // or the profile. Without this, typing somebody else's phone number
+      // would hand over their account.
+      scope: 'guest',
     });
 
     try {

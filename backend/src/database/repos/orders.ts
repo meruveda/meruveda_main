@@ -592,6 +592,33 @@ export async function getShiprocketIds(
 }
 
 /** Guarded write: only store Shiprocket IDs if no concurrent push beat us. */
+/**
+ * Adopt the guest orders placed for a phone number.
+ *
+ * A guest checkout creates its own user row. When the same number is later
+ * verified with an OTP, the orders placed as a guest move to the real
+ * account, so the customer finds them in their history.
+ */
+export async function adoptGuestOrdersForPhone(
+  userId: string,
+  phone: string,
+  q: QueryFn = query,
+): Promise<number> {
+  const rows = await q(
+    `UPDATE orders o
+        SET user_id = $1
+       FROM users g
+      WHERE g.id = o.user_id
+        AND g.id <> $1
+        AND g.phone = $2
+        AND o.delivery_phone = $2
+      RETURNING o.id`,
+    [userId, phone],
+  );
+  return rows.length;
+}
+
+/** Guarded write: only store Shiprocket IDs if no concurrent push beat us. */
 export async function claimShiprocketIds(orderId: string, patch: Record<string, any>): Promise<boolean> {
   const cols = Object.keys(patch);
   const sets = cols.map((c, i) => `"${c}" = $${i + 1}`).join(', ');

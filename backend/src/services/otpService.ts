@@ -3,6 +3,7 @@ import bcrypt from 'bcrypt';
 import { isUniqueViolation } from '../database/db';
 import * as otpsRepo from '../database/repos/otps';
 import * as usersRepo from '../database/repos/users';
+import * as ordersRepo from '../database/repos/orders';
 import { config } from '../config/env';
 import { hasColumn, hasTable } from './schemaGuard';
 import { normalizePhone, sendAuthenticationTemplate, sendAuthenticationTemplateDetailed, sendOnce, logMessage, isWhatsappConfigured, WHATSAPP_TEMPLATES } from './whatsappService';
@@ -197,7 +198,12 @@ export const otpService = {
     const variants = phoneVariants(phoneRaw);
     const lookup = variants.length > 0 ? variants : [phone];
 
-    const existing = await usersRepo.findByPhoneVariants(lookup, '*');
+    // A PROVEN account always wins. A number can have a guest-checkout row
+    // (created without an OTP) AND a real account row; the OTP proves the
+    // number, so the login must land on the proven account. The guest rows
+    // are folded into it so their orders are not orphaned.
+    const verified = await usersRepo.findVerifiedByPhoneVariants(lookup, '*');
+    const existing = verified || (await usersRepo.findByPhoneVariants(lookup, '*'));
 
     if (existing) {
       const user = existing;
@@ -213,6 +219,12 @@ export const otpService = {
         if (rest.length) patch.last_name = rest.join(' ');
       }
       const updated = await usersRepo.updateUser(user.id, patch);
+      // This account has now proven the number.
+      if (await hasColumn('users', 'phone_verified')) {
+        await usersRepo.setPhoneVerified(user.id, true);
+      }
+      // Any guest orders placed for this number now belong to the account.
+      await ordersRepo.adoptGuestOrdersForPhone(user.id, phone);
       return { user: updated || user, created: false };
     }
 

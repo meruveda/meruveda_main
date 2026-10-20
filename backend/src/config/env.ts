@@ -245,6 +245,23 @@ export const config = {
   // WhatsApp OTP checkout flow. Default false — the no-OTP quick-login flow
   // is active until OTP_ENABLED=true is set (and WhatsApp is configured).
   otpEnabled: process.env.OTP_ENABLED === 'true',
+  /**
+   * How the checkout treats phone verification.
+   *
+   *   'auto' (default) - an OTP is required when Meta has approved an
+   *                       AUTHENTICATION template, and skipped (with the
+   *                       order flagged unverified) when it has not.
+   *   'on'              - an OTP is always required.
+   *   'off'             - no OTP: the customer checks out with name + number.
+   *
+   * This is the switch that lets the store take orders while a WhatsApp
+   * template is being reviewed. Setting it back to 'auto' restores the OTP
+   * flow with no code change.
+   */
+  otpMode: (() => {
+    const raw = (process.env.OTP_MODE || 'auto').trim().toLowerCase();
+    return raw === 'on' || raw === 'off' ? raw : 'auto';
+  })(),
   // Base URL of this backend — used by the webhook docs helper.
   backendUrl: process.env.BACKEND_URL || '',
 

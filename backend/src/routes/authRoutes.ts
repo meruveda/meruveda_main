@@ -1,8 +1,8 @@
 import { Router } from 'express';
 import { login, register, getMe, forgotPassword, resetPassword, getPreferences, updatePreferences, getCustomerPreferences } from '../controllers/authController';
-import { sendOtp, verifyOtp, resendOtp, quickLogin, otpStatus } from '../controllers/otpController';
+import { sendOtp, verifyOtp, resendOtp, quickLogin, otpStatus, guestCheckout } from '../controllers/otpController';
 import { updateCheckoutProfile } from '../controllers/otpController';
-import { requireAuth } from '../middleware/auth';
+import { requireAuth, requireFullAuth } from '../middleware/auth';
 import {
   createRateLimiter,
   loginLimiter,
@@ -17,6 +17,8 @@ import {
   otpHourlyPerPhoneLimiter,
   otpGlobalDailyLimiter,
   passwordResetLimiter,
+  guestPerNumberLimiter,
+  guestPerIpLimiter,
 } from '../middleware/rateLimit';
 
 const router = Router();
@@ -30,6 +32,14 @@ router.post('/reset-password', passwordResetLimiter, resetPassword as any);
 // Strict rate limit: 10 / 10 min per IP+phone, 30 / 10 min per IP alone.
 const quickLoginLimiter = createRateLimiter({ windowMs: 10 * 60 * 1000, max: 10, prefix: 'quicklogin' });
 router.post('/quick-login', quickLoginLimiter, quickLogin as any);
+
+// Guest checkout - name + number, no OTP. Only live when OTP_MODE=off.
+const guestLimiter = [
+  guestPerNumberLimiter,
+  guestPerIpLimiter,
+  createRateLimiter({ windowMs: 60 * 60_000, max: 20, prefix: 'guest-session' }),
+];
+router.post('/guest', ...guestLimiter, guestCheckout as any);
 
 // WhatsApp OTP login/registration used by the checkout form
 // (disabled when OTP_ENABLED != true — see otpController).

@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { verifyToken, TokenPayload } from '../utils/jwt';
+import { verifyToken, TokenPayload, isGuestScope } from '../utils/jwt';
 
 declare global {
   namespace Express {
@@ -28,6 +28,25 @@ export const requireAuth = (req: Request, res: Response, next: NextFunction) => 
 export const requireAdmin = (req: Request, res: Response, next: NextFunction) => {
   if (req.user?.role !== 'admin') {
     return res.status(403).json({ error: { message: 'Forbidden - Requires admin privileges' } });
+  }
+  next();
+};
+
+/**
+ * Reject a checkout-only guest session.
+ *
+ * A guest session exists so somebody can place an order without proving they
+ * own the number. Everything that reads EXISTING account data - the order
+ * history (it embeds full shipping addresses and phone numbers), the address
+ * book, the cart, the wishlist, the profile and the preferences - is closed
+ * to it. Without this, a guest who typed somebody else's phone number would
+ * be able to read that account.
+ */
+export const requireFullAuth = (req: Request, res: Response, next: NextFunction) => {
+  if (isGuestScope(req.user)) {
+    return res.status(403).json({
+      error: { message: 'This session may only place an order. Please sign in to see your account.' },
+    });
   }
   next();
 };

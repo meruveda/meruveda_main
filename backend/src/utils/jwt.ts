@@ -11,7 +11,20 @@ export interface TokenPayload {
    * as verified so existing sessions keep working. OTP verify sets true.
    */
   phone_verified?: boolean;
+  /**
+   * 'guest' = a checkout-only session.
+   *
+   * A guest session may place an order and read THAT order. It may not read
+   * the account history, the address book, the cart, the wishlist or the
+   * profile - so a guest who types somebody else's phone number can never see
+   * that account's data. Absent (a normal session) means a full session.
+   */
+  scope?: 'guest' | 'full';
 }
+
+/** True when the session is a checkout-only guest session. */
+export const isGuestScope = (payload?: { scope?: string } | null): boolean =>
+  Boolean(payload && payload.scope === 'guest');
 
 export const generateToken = (payload: TokenPayload): string => {
   // The algorithm is pinned on BOTH sides. Without it, `alg: none` and the

@@ -29,6 +29,32 @@ interface AuthContextType {
    * until a real OTP verification.
    */
   quickLogin: (phone: string, name: string) => Promise<void>;
+  /**
+   * Guest checkout: a name and a number, no OTP.
+   *
+   * Used while WhatsApp phone verification is unavailable. The session is
+   * checkout-only: it may place an order and read that order.
+   */
+  guestCheckout: (
+    name: string,
+    phone: string,
+    extra?: { website?: string; renderedAt?: number },
+  ) => Promise<void>;
+  /**
+   * Whether the checkout asks for an OTP.
+   *
+   * 'off' means the store is taking guest checkouts (name + number). The
+   * answer comes from the server, so switching OTP_MODE back to 'auto'
+   * restores the OTP flow with no rebuild.
+   */
+  getOtpStatus: () => Promise<{
+    mode: 'auto' | 'on' | 'off';
+    required: boolean;
+    guestCheckout: boolean;
+    templateAvailable: boolean;
+    templateName: string | null;
+    reason: string | null;
+  }>;
   /** Persist name / email / address collected during checkout. */
   saveProfile: (payload: { name?: string; email?: string; address?: any; phone?: string }) => Promise<void>;
 }
@@ -91,6 +117,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(quickUser);
   }, []);
 
+  const guestCheckout = useCallback(
+    async (name: string, phone: string, extra?: { website?: string; renderedAt?: number }) => {
+      const { user: guestUser } = await authService.guestCheckout(name, phone, extra);
+      setUser(guestUser);
+    },
+    [],
+  );
+
+  const getOtpStatus = useCallback(() => authService.getOtpStatus(), []);
+
   const saveProfile = useCallback(async (payload: { name?: string; email?: string; address?: any; phone?: string }) => {
     await authService.saveProfile(payload);
     // Refresh the in-memory user so later steps see the saved details.
@@ -114,6 +150,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         resendOtp,
         verifyOtp,
         quickLogin,
+    guestCheckout,
+    getOtpStatus,
         saveProfile,
       }}
     >

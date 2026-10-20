@@ -287,3 +287,23 @@ export const trackInvoiceLimiter = createRateLimiter({
   max: 10,
   prefix: 'track-invoice',
 });
+
+/**
+ * Guest checkout (no OTP).
+ *
+ * A number may place a few orders an hour and an IP a few more, so a guest
+ * session cannot be used to flood the store (and to farm invoice numbers).
+ */
+export const guestPerNumberLimiter = createRateLimiter({
+  windowMs: 60 * 60_000,
+  max: 3,
+  prefix: 'guest-phone',
+  keyMode: 'phone',
+});
+
+export const guestPerIpLimiter = createRateLimiter({
+  windowMs: 60 * 60_000,
+  max: 10,
+  prefix: 'guest-ip',
+  keyMode: 'ip',
+});

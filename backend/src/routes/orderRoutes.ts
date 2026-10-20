@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { getOrders, getOrderById, createOrder, updateOrderStatus, getMyOrders, updateOrder, deleteOrder, trackOrder, trackByAwb, invoiceStatus, resendInvoice, downloadInvoice, downloadInvoiceForGuest, pushToShiprocket, retryShiprocketPushes } from '../controllers/ordersController';
-import { requireAuth, requireAdmin } from '../middleware/auth';
+import { requireAuth, requireAdmin, requireFullAuth } from '../middleware/auth';
 import { orderCreateLimiter, trackAwbLimiter, trackInvoiceLimiter } from '../middleware/rateLimit';
 
 const router = Router();
@@ -25,7 +25,7 @@ router.post('/retry-shiprocket-failed', retryShiprocketPushes as any);
 
 router.use(requireAuth as any);
 
-router.get('/my', getMyOrders as any);
+router.get('/my', requireFullAuth as any, getMyOrders as any);
 router.post('/', orderCreateLimiter, createOrder as any);
 
 // Read-only invoice delivery status. Delivery is automatic (COD at placement,

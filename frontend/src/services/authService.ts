@@ -12,6 +12,14 @@ export interface AuthUser {
   phone?: string;
   /** Saved by PUT /auth/profile during checkout; carries the address book. */
   address?: any;
+  /**
+   * 'guest' = a checkout-only session. It may place an order and read that
+   * order; it may not read the account history, the addresses or the
+   * profile.
+   */
+  scope?: 'guest' | 'full';
+  /** False when the number was never proven (a guest checkout). */
+  phone_verified?: boolean;
 }
 
 export interface AuthResponse {
@@ -176,6 +184,68 @@ export const authService = {
       return { user, token, role: user.role };
     } catch (error: any) {
       unwrapError(error);
+    }
+  },
+
+  /**
+   * Guest checkout: a name and a number, no OTP.
+   *
+   * Used while WhatsApp phone verification is unavailable. The session it
+   * returns is a checkout-only guest session: it may place an order and read
+   * that order, and it can never read an existing account's data.
+   */
+  guestCheckout: async (
+    name: string,
+    phone: string,
+    extra?: { website?: string; renderedAt?: number },
+  ): Promise<AuthResponse> => {
+    try {
+      const response = await axiosInstance.post('/auth/guest', { name, phone, ...extra });
+      const { token, user } = response.data;
+      persistSession(token, user, true);
+      return { user, token, role: user.role };
+    } catch (error: any) {
+      unwrapError(error);
+    }
+  },
+
+  /**
+   * Whether the checkout asks for an OTP.
+   *
+   * 'off' means the store is taking guest checkouts (name + number) while a
+   * WhatsApp template is reviewed. The answer comes from the server, so
+   * switching OTP_MODE back to 'auto' restores the OTP flow with no rebuild.
+   */
+  getOtpStatus: async (): Promise<{
+    mode: 'auto' | 'on' | 'off';
+    required: boolean;
+    guestCheckout: boolean;
+    templateAvailable: boolean;
+    templateName: string | null;
+    reason: string | null;
+  }> => {
+    try {
+      const response = await axiosInstance.get('/auth/otp/status');
+      const d = response.data?.data || {};
+      return {
+        mode: d.mode || 'auto',
+        required: Boolean(d.required),
+        guestCheckout: Boolean(d.guestCheckout),
+        templateAvailable: Boolean(d.templateAvailable),
+        templateName: d.templateName || null,
+        reason: d.reason || null,
+      };
+    } catch {
+      // If the status cannot be read, keep the OTP flow: it is the safe
+      // default, and the customer can still check out.
+      return {
+        mode: 'auto',
+        required: true,
+        guestCheckout: false,
+        templateAvailable: false,
+        templateName: null,
+        reason: null,
+      };
     }
   },
 

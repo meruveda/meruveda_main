@@ -36,6 +36,14 @@ interface CountryPhoneFieldProps {
   placeholder?: string;
   /** Rendered under the input, e.g. a hint about the delivery contact. */
   hint?: React.ReactNode;
+  /**
+   * An action that belongs to the number field, e.g. the "Send OTP" button.
+   *
+   * It lives INSIDE the field so the field controls the layout: on a narrow
+   * screen the action drops onto its own full-width row instead of pushing the
+   * row wider than the screen.
+   */
+  action?: React.ReactNode;
 }
 
 /** The countries at the top of the list, then everything else, alphabetical. */
@@ -59,6 +67,7 @@ export function CountryPhoneField({
   invalid,
   placeholder,
   hint,
+  action,
 }: CountryPhoneFieldProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -117,8 +126,10 @@ export function CountryPhoneField({
     : nationalDigits(value, country);
 
   return (
-    <div className="space-y-1.5">
-      <div className="flex gap-2">
+    // min-w-0: as a flex item the field must be allowed to shrink below its
+    // content width, or the row around it overflows the screen.
+    <div className="space-y-1.5 min-w-0 w-full">
+      <div className="flex flex-wrap gap-2 min-w-0">
         {/* Country picker */}
         <div ref={wrapRef} className="relative shrink-0">
           <button
@@ -213,7 +224,8 @@ export function CountryPhoneField({
           )}
         </div>
 
-        {/* National number */}
+        {/* National number. basis + min-w-0: it takes the space that is left
+            and can always shrink to nothing, so the row never overflows. */}
         <input
           id={id}
           type="tel"
@@ -228,10 +240,17 @@ export function CountryPhoneField({
             placeholder ||
             (country.iso === "in" ? "98765 43210" : `national number (${country.digits} digits)`)
           }
-          className={`flex-1 min-w-0 h-[46px] rounded-xl border px-4 text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gold/40 focus:border-gold disabled:bg-gray-100 disabled:text-gray-500 ${
+          className={`flex-1 min-w-0 basis-[130px] h-[46px] rounded-xl border px-4 text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gold/40 focus:border-gold disabled:bg-gray-100 disabled:text-gray-500 ${
             invalid ? "border-red-400" : "border-gray-300"
           }`}
         />
+
+        {/* The action sits inside the field. On a narrow screen it drops onto
+            its own row and goes full width; from `sm` up it sits next to the
+            number. */}
+        {action ? (
+          <div className="w-full sm:w-auto sm:shrink-0 min-w-0">{action}</div>
+        ) : null}
       </div>
 
       {/* The full number, so there is never any doubt about what was entered. */}

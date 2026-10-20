@@ -6,12 +6,12 @@ import {
   deleteAddress,
   setDefaultAddress,
 } from '../controllers/addressController';
-import { requireAuth } from '../middleware/auth';
+import { requireAuth, requireFullAuth } from '../middleware/auth';
 
 const router = Router();
 
 // The address book is always personal data: no route is public.
-router.use(requireAuth as any);
+router.use(requireAuth as any, requireFullAuth as any);
 
 router.get('/', listAddresses as any);
 router.post('/', createAddress as any);

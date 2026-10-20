@@ -43,6 +43,33 @@ export async function findByPhoneVariants(
   return rows[0] ?? null;
 }
 
+/**
+ * Find the account that PROVED the number.
+ *
+ * A number can have more than one row: a guest checkout row (never proven)
+ * and a real account row (proven with an OTP). A login must always land on
+ * the proven account, and only fall back to a guest row when there is no
+ * proven one - otherwise a guest checkout would silently take over a real
+ * customer's account.
+ */
+export async function findVerifiedByPhoneVariants(
+  variants: string[],
+  columns?: string,
+  q: QueryFn = query,
+): Promise<any | null> {
+  if (variants.length === 0) return null;
+  const placeholders = variants.map((_, i) => `$${i + 1}`).join(', ');
+  const rows = await q(
+    `SELECT ${selectList(columns)} FROM users
+      WHERE phone IN (${placeholders})
+        AND phone_verified = true
+      ORDER BY created_at DESC
+      LIMIT 1`,
+    variants,
+  );
+  return rows[0] ?? null;
+}
+
 export async function findByEmail(email: string, columns?: string, q: QueryFn = query): Promise<any | null> {
   const rows = await q(
     `SELECT ${selectList(columns)} FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1`,
