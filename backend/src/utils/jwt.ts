@@ -14,10 +14,13 @@ export interface TokenPayload {
 }
 
 export const generateToken = (payload: TokenPayload): string => {
-  const options: jwt.SignOptions = { expiresIn: config.jwtExpiresIn as any };
+  // The algorithm is pinned on BOTH sides. Without it, `alg: none` and the
+  // RS256/HS256 confusion attack are both open: a token signed with the
+  // public key as an HMAC secret would verify against the same secret.
+  const options: jwt.SignOptions = { expiresIn: config.jwtExpiresIn as any, algorithm: 'HS256' };
   return jwt.sign(payload, config.jwtSecret, options);
 };
 
 export const verifyToken = (token: string): TokenPayload => {
-  return jwt.verify(token, config.jwtSecret) as TokenPayload;
+  return jwt.verify(token, config.jwtSecret, { algorithms: ['HS256'] }) as TokenPayload;
 };

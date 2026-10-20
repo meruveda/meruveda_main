@@ -133,10 +133,14 @@ test('COD order under the free-shipping threshold above 1000 pays no shipping', 
 });
 
 test('Prepaid order carries no COD handling fee', async (t) => {
-  installDbFake(t, { products: [{ id: 'p1', name: 'Ashwagandha' }] });
+  installDbFake(t, { products: [{ id: 'p1', name: 'Ashwagandha', selling_price: 1200 }] });
 
   const order = await orderService.createOrder(
-    basePayload({ payment_method: 'PayU', subtotal: 1200 } as any),
+    basePayload({
+      payment_method: 'PayU',
+      subtotal: 1200,
+      items: [{ product_id: 'p1', name: 'Ashwagandha', price: 1200, quantity: 1 }],
+    } as any),
     'user-1'
   );
 
@@ -260,6 +264,14 @@ test('stock is decremented only while the conditional UPDATE matches', async (t)
 
 test('an unusable coupon aborts the whole order', async (t) => {
   const fake = installDbFake(t, { products: [{ id: 'p1', name: 'Ashwagandha' }] });
+  // The coupon exists but cannot be claimed (expired / over its usage limit).
+  t.mock.method(couponsRepo, 'findByCode', async () => ({
+    id: 'coupon-1',
+    code: 'EXPIRED10',
+    type: 'percentage',
+    value: 10,
+    active: true,
+  }));
   t.mock.method(couponsRepo, 'incrementUsageAtomic', async () => null);
 
   await assert.rejects(
@@ -274,9 +286,73 @@ test('an unusable coupon aborts the whole order', async (t) => {
   assert.equal(fake.inserted.find((i) => i.table === 'orders'), undefined, 'rolled back');
 });
 
+test('a coupon the client made up is rejected before anything is written', async (t) => {
+  const fake = installDbFake(t, { products: [{ id: 'p1', name: 'Ashwagandha' }] });
+  t.mock.method(couponsRepo, 'findByCode', async () => null);
+
+  await assert.rejects(
+    () => orderService.createOrder(basePayload({ couponCode: 'NOT-A-CODE' } as any), 'user-1'),
+    (err: any) => {
+      assert.equal(err.status, 400);
+      assert.equal(err.code, 'INVALID_COUPON');
+      return true;
+    }
+  );
+  assert.equal(fake.inserted.find((i) => i.table === 'orders'), undefined, 'nothing written');
+});
+
+test('the discount is computed on the server, not taken from the client', async (t) => {
+  const fake = installDbFake(t, { products: [{ id: 'p1', name: 'Ashwagandha', selling_price: 1000 }] });
+  t.mock.method(couponsRepo, 'findByCode', async () => ({
+    id: 'coupon-1',
+    code: 'WELCOME10',
+    type: 'percentage',
+    value: 10,
+    active: true,
+  }));
+  t.mock.method(couponsRepo, 'incrementUsageAtomic', async () => ({ id: 'coupon-1', code: 'WELCOME10' }));
+
+  // The client claims a 5000 discount on a 1000 order. The server ignores it
+  // and applies the coupon's real 10%.
+  const order = await orderService.createOrder(
+    basePayload({
+      couponCode: 'WELCOME10',
+      discount: 5000,
+      items: [{ product_id: 'p1', name: 'Ashwagandha', price: 1000, quantity: 1 }],
+    } as any),
+    'user-1',
+  );
+  const orderRow = fake.inserted.find((i) => i.table === 'orders')!.rows[0];
+  assert.equal(Number(orderRow.discount), 100, 'the discount comes from the coupon, not the client');
+  assert.ok(order.id);
+});
+
+test('the line price comes from the catalogue, not from the request', async (t) => {
+  const fake = installDbFake(t, { products: [{ id: 'p1', name: 'Ashwagandha', selling_price: 1000 }] });
+
+  // The client claims the product costs 1.
+  await orderService.createOrder(
+    basePayload({
+      items: [{ product_id: 'p1', name: 'Ashwagandha', price: 1, quantity: 1 }],
+    } as any),
+    'user-1',
+  );
+  const orderRow = fake.inserted.find((i) => i.table === 'orders')!.rows[0];
+  assert.equal(Number(orderRow.subtotal), 1000, 'the subtotal is the catalogue price');
+  const itemRow = fake.inserted.find((i) => i.table === 'order_items')!.rows[0];
+  assert.equal(Number(itemRow.price ?? itemRow.total), 1000, 'the line item keeps the catalogue price');
+});
+
 test('a claimed coupon increments used_count once, inside the order transaction', async (t) => {
   const fake = installDbFake(t, { products: [{ id: 'p1', name: 'Ashwagandha' }] });
   const calls: string[] = [];
+  t.mock.method(couponsRepo, 'findByCode', async () => ({
+    id: 'coupon-1',
+    code: 'WELCOME10',
+    type: 'percentage',
+    value: 10,
+    active: true,
+  }));
   t.mock.method(couponsRepo, 'incrementUsageAtomic', async (code: string) => {
     calls.push(code);
     return { id: 'coupon-1', code };

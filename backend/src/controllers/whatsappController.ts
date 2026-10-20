@@ -112,13 +112,24 @@ export const receiveWebhook = async (req: Request, res: Response, next: NextFunc
   }
 };
 
-/** Human-readable configuration helper for the webhook URL. */
-export const webhookInfo = (_req: Request, res: Response) => {
-  const base = config.backendUrl || `${_req.protocol}://${_req.get('host')}`;
+/**
+ * Human-readable configuration helper for the webhook URL.
+ *
+ * The verify token is NOT returned. This endpoint used to be public and
+ * printed the token, which handed anyone the value Meta signs its callback
+ * with - enough to forge a webhook that looks genuine. It now reports only
+ * whether a token is configured, and it is admin-only.
+ */
+export const webhookInfo = (req: Request, res: Response) => {
+  if (req.user?.role !== 'admin') {
+    return res.status(403).json({ error: { message: 'Forbidden' } });
+  }
+  const base = config.backendUrl || `${req.protocol}://${req.get('host')}`;
   res.json({
     data: {
       callbackUrl: `${base}/api/whatsapp/webhook`,
-      verifyToken: config.whatsappWebhookVerifyToken || 'NOT SET',
+      // Only whether it is set, never the value.
+      verifyTokenConfigured: Boolean(config.whatsappWebhookVerifyToken),
       configured: Boolean(config.whatsappApiToken && config.whatsappPhoneNumberId),
       templates: [
         'order_confirmation',

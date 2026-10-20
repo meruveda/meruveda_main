@@ -1,8 +1,15 @@
 import { query, type QueryFn } from '../db';
 import { insertRow, updateById } from './sql';
 
+/**
+ * The columns a user record is read with by default.
+ *
+ * `password_hash` is deliberately NOT here: a hash in an API response is a
+ * credential leak, and a caller that genuinely needs it (the login path) asks
+ * for it by name.
+ */
 const DEFAULT_COLUMNS =
-  'id, email, phone, password_hash, first_name, last_name, role, active, created_at, updated_at';
+  'id, email, phone, first_name, last_name, role, active, created_at, updated_at';
 
 function selectList(columns?: string): string {
   if (!columns) return DEFAULT_COLUMNS;

@@ -67,8 +67,13 @@ const mapBlogResponse = (item: any) => {
 export const getBlogs = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { status } = req.query;
-    const { rows: data, count } = await blogsRepo.listBlogs(status as string | undefined);
-    res.json({ data: data.map(mapBlogResponse), total: count });
+    // A public caller only ever sees published posts. An admin can ask for
+    // the drafts and archived ones explicitly.
+    const isAdmin = req.user?.role === 'admin';
+    const rows = await blogsRepo.listBlogs(status as string | undefined, {
+      includeUnpublished: isAdmin,
+    });
+    res.json({ data: rows.rows.map(mapBlogResponse), total: rows.count });
   } catch (error) {
     next(error);
   }
@@ -82,6 +87,12 @@ export const getBlogBySlug = async (req: Request, res: Response, next: NextFunct
 
     const data = await blogsRepo.findBlog(slugStr, isUuid);
     if (!data) return res.status(404).json({ error: { message: 'Blog not found' } });
+    // A draft or an archived post is invisible to the public; an admin can
+    // still open it from the panel.
+    const isPublished = String(data.status || '').toLowerCase() === 'published';
+    if (!isPublished && req.user?.role !== 'admin') {
+      return res.status(404).json({ error: { message: 'Blog not found' } });
+    }
     res.json({ data: mapBlogResponse(data) });
   } catch (error) {
     next(error);

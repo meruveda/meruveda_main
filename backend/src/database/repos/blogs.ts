@@ -5,12 +5,19 @@ const USER_EMBED = `CASE WHEN u.id IS NULL THEN NULL ELSE json_build_object(
   'first_name', u.first_name, 'last_name', u.last_name
 ) END AS users`;
 
-export async function listBlogs(status?: string): Promise<{ rows: any[]; count: number }> {
+export async function listBlogs(
+  status?: string,
+  opts: { includeUnpublished?: boolean } = {},
+): Promise<{ rows: any[]; count: number }> {
   const params: any[] = [];
   let where = '';
   if (status) {
     params.push(status);
     where = 'WHERE b.status = $1';
+  } else if (!opts.includeUnpublished) {
+    // A public caller must never see a draft or an archived post. The admin
+    // panel asks for them explicitly by passing a status.
+    where = "WHERE b.status = 'published'";
   }
 
   const countRows = await query<{ count: string }>(

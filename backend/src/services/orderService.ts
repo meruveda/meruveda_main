@@ -120,15 +120,120 @@ export const orderService = {
     const items = orderData.items;
     delete orderData.items;
 
-    // Recalculate subtotal and shipping cost server-side
-    const subtotal = round2(orderData.subtotal);
-    const discount = round2(orderData.discount);
+    // Fetch the catalogue so the money is computed from the DATABASE.
+    let dbProducts: any[] = [];
+    if (items && items.length > 0) {
+      const productIds = items.map((item: any) => item.product_id).filter(Boolean);
+      if (productIds.length > 0) {
+        dbProducts = await productsRepo.getProductsByIds(
+          productIds,
+          'id, name, sku, images, seo_metadata, price, selling_price',
+        );
+      }
+    }
+
+    /**
+     * The line prices come from the DATABASE, not from the request.
+     *
+     * The client used to send the price of every line, so posting
+     * `price: 1` bought a Rs.1000 product for Rs.1. The catalogue price is
+     * the price; the request only says WHICH product and HOW MANY.
+     */
+    const pricedItems = (items || []).map((item: any) => {
+      const dbProduct = dbProducts.find((p: any) => p.id === item.product_id);
+      // The storefront sells at the selling price, so that is the price.
+      const dbPrice = Number(dbProduct?.selling_price ?? dbProduct?.price ?? NaN);
+      // A catalogue entry with no price at all is a data gap, not a free
+      // product: the request price is used for it.
+      const price = Number.isFinite(dbPrice) && dbPrice > 0
+        ? round2(dbPrice)
+        : round2(Number(item.price) || 0);
+      return { ...item, price };
+    });
+
+    // The subtotal is the sum of those database prices.
+    const serverSubtotal = round2(
+      pricedItems.reduce(
+        (sum: number, item: any) => sum + (Number(item.price) || 0) * (Number(item.quantity) || 1),
+        0,
+      ),
+    );
+
+    // Every money figure below is server-computed.
+    const subtotal = serverSubtotal;
     const isCOD = orderData.payment_method === 'Cash On Delivery' || String(orderData.payment_method).toUpperCase() === 'COD';
+
+    /**
+     * The discount is computed on the SERVER from the coupon record.
+     *
+     * The client used to send the discount amount, which meant anyone could
+     * post `discount: 5000` and get the goods for free. Now the amount is
+     * derived from the coupon itself: its type, its value, its cap, its
+     * minimum spend and its expiry. A client that sends a discount without a
+     * coupon code gets no discount at all.
+     */
+    const couponCode = String(orderData.coupon_code ?? orderData.couponCode ?? '').trim();
+    delete orderData.coupon_code;
+    delete orderData.couponCode;
+
+    let discount = 0;
+    let couponIsFreeShipping = false;
+    if (couponCode) {
+      const coupon = await couponsRepo.findByCode(couponCode);
+      if (!coupon) {
+        throw Object.assign(new Error('This coupon code is not valid.'), {
+          status: 400,
+          code: 'INVALID_COUPON',
+        });
+      }
+      if (!coupon.active) {
+        throw Object.assign(new Error('This coupon is no longer active.'), {
+          status: 400,
+          code: 'INACTIVE_COUPON',
+        });
+      }
+      if (coupon.expires_at && new Date(coupon.expires_at).getTime() < Date.now()) {
+        throw Object.assign(new Error('This coupon has expired.'), {
+          status: 400,
+          code: 'EXPIRED_COUPON',
+        });
+      }
+      const minPurchase = Number(coupon.min_purchase || 0);
+      if (minPurchase > 0 && subtotal < minPurchase) {
+        throw Object.assign(
+          new Error(`This coupon needs a minimum order value of Rs.${minPurchase}.`),
+          { status: 400, code: 'COUPON_MINIMUM_NOT_MET' },
+        );
+      }
+
+      const type = String(coupon.type || '').toLowerCase();
+      const value = Number(coupon.value || 0);
+      if (type === 'percentage' || type === 'percent') {
+        discount = round2((subtotal * value) / 100);
+        const maxDiscount = Number(coupon.max_discount || 0);
+        if (maxDiscount > 0 && discount > maxDiscount) discount = round2(maxDiscount);
+      } else if (type === 'fixed' || type === 'flat') {
+        discount = round2(value);
+      } else if (type === 'free_shipping') {
+        // Free shipping is applied to the shipping charge below, not to the
+        // subtotal, so the discount stays 0 here.
+        discount = 0;
+        couponIsFreeShipping = true;
+      }
+      // A discount can never exceed the subtotal.
+      if (discount > subtotal) discount = round2(subtotal);
+      if (discount < 0) discount = 0;
+    }
 
     // Base courier charge, GST-INCLUSIVE — this is the flat "shipping added on
     // top" the reference invoice shows.
     let shippingFee = subtotal >= 1000 ? 0 : 50;
     if (isCOD) shippingFee += 50;
+    // A free-shipping coupon removes the courier charge (the COD handling fee
+    // is not a courier charge, so it stays).
+    if (couponCode && couponIsFreeShipping) {
+      shippingFee = isCOD ? 50 : 0;
+    }
 
     // SHIPPING_IS_TAXABLE=true opts into charging shipping GST on TOP of the
     // base charge, so the total genuinely includes it (default false keeps the
@@ -139,21 +244,10 @@ export const orderService = {
     orderData.shipping_fee = shippingFee;
     if (orderData.shipping_cost !== undefined) delete orderData.shipping_cost;
 
-    // Fetch products to compute GST and get details
-    let dbProducts: any[] = [];
-    if (items && items.length > 0) {
-      const productIds = items.map((item: any) => item.product_id).filter(Boolean);
-      if (productIds.length > 0) {
-        dbProducts = await productsRepo.getProductsByIds(
-          productIds,
-          'id, name, sku, images, seo_metadata',
-        );
-      }
-    }
 
     // One shared calculator for the order row AND the invoice, so `tax` on the
     // order is by construction the same figure the PDF prints.
-    const gstLines = (items || []).map((item: any) => {
+    const gstLines = pricedItems.map((item: any) => {
       const dbProduct = dbProducts.find((p: any) => p.id === item.product_id);
       const meta = dbProduct?.seo_metadata || dbProduct?.seoMetadata || {};
       const raw = meta.gst_rate ?? meta.gstRate ?? meta.gst;
@@ -173,8 +267,15 @@ export const orderService = {
     });
     orderData.tax = totals.gst;
 
-    // Recalculate total
+    // Write the computed money back onto the order row. The values the client
+    // sent are overwritten, never trusted.
+    orderData.subtotal = subtotal;
+    orderData.discount = discount;
     orderData.total = round2(subtotal - discount + shippingFee);
+    // The line items are stored with the server-side prices too.
+    if (items && items.length > 0) {
+      orderData.items = pricedItems;
+    }
     
     // Ensure billing_address is set, fallback to shipping_address to satisfy NOT NULL constraint
     if (!orderData.billing_address) {
@@ -235,10 +336,8 @@ export const orderService = {
     }
 
     // A coupon carried by the checkout payload is claimed here, atomically,
-    // inside the same transaction as the order rows.
-    const couponCode = String(orderData.coupon_code ?? orderData.couponCode ?? '').trim();
-    delete orderData.coupon_code;
-    delete orderData.couponCode;
+    // inside the same transaction as the order rows. The code was read and
+    // the amount was computed above, on the server.
 
     // One transaction for every money-touching write: order row, line items,
     // conditional stock decrement (no oversell), coupon usage, COD tx log.
@@ -247,7 +346,9 @@ export const orderService = {
       const orderRow = await ordersRepo.insertOrder(orderData, q);
 
       if (items && items.length > 0) {
-        const orderItems = items.map((item: any) => {
+        // The stored line uses the SERVER-side price, so the order, the invoice
+        // and the admin panel all quote the same figure.
+        const orderItems = pricedItems.map((item: any) => {
           const dbProduct = dbProducts.find((p: any) => p.id === item.product_id);
           const productName = item.name || item.product_name || dbProduct?.name || "Unknown Product";
 
