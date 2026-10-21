@@ -27,27 +27,13 @@ const authState: any = {
   /** A checkout-only guest session is NOT an account. */
   isGuestSession: false,
   isLoading: false,
-  sendOtp: vi.fn(),
-  resendOtp: vi.fn(),
-  verifyOtp: vi.fn(),
   saveProfile: vi.fn(),
-  guestCheckout: vi.fn(),
   /** The checkout opens the customer session (the profile) on Continue. */
   openSession: vi.fn(async (name: string, phone: string, email: string) => ({
     name,
     phone,
     email,
     phoneVerified: false,
-  })),
-  /**
-   * The checkout asks the server whether it needs an OTP. The default here is
-   * the OTP flow (an OTP is required), which is what the suite asserts.
-   */
-  getOtpConfig: vi.fn(async () => ({
-    otpRequired: true,
-    mode: 'auto' as const,
-    guestCheckout: false,
-    message: null,
   })),
 };
 
@@ -62,7 +48,7 @@ import CheckoutPage from "@/app/checkout/page";
 /* Helpers                                                             */
 /* ------------------------------------------------------------------ */
 
-/** Fill name + number so the Send OTP handler's own validation passes. */
+/** Fill name + number so Continue's own validation passes. */
 function fillContact(name = "Atharva Bhargava", mobile = "9876543210") {
   const inputs = document.querySelectorAll('input[type="text"], input[type="tel"]');
   const nameInput = Array.from(inputs).find(
@@ -113,7 +99,7 @@ function fillAddress() {
 }
 
 const placeOrderButton = () =>
-  screen.getByRole("button", { name: /Place Order|Pay Now|Verify your WhatsApp|Complete address|Enter a valid email|Processing/i });
+  screen.getByRole("button", { name: /Place Order|Pay Now|Complete address|Enter a valid email|Processing/i });
 
 /* ------------------------------------------------------------------ */
 
@@ -122,25 +108,29 @@ beforeEach(() => {
   authState.user = null;
   authState.isAuthenticated = false;
   authState.isLoading = false;
-  authState.sendOtp = vi.fn().mockResolvedValue({ expiresInSeconds: 300 });
-  authState.resendOtp = vi.fn().mockResolvedValue({ expiresInSeconds: 300 });
-  authState.verifyOtp = vi.fn().mockResolvedValue({ token: "t", user: { id: "u1" } });
   authState.saveProfile = vi.fn().mockResolvedValue(undefined);
+  /** A fresh success mock every test - a rejecting one must not leak. */
+  authState.openSession = vi.fn(async (name: string, phone: string, email: string) => ({
+    name,
+    phone,
+    email,
+    phoneVerified: false,
+  }));
 });
 
 afterEach(() => cleanup());
 
-describe("checkout — identity is WhatsApp OTP, never a login form", () => {
-  it("shows Send OTP where Sign up used to be, and no Sign up button at all", async () => {
+describe("checkout — identity is the Continue pill, never a login form or an OTP", () => {
+  it("shows Continue and no Sign up / Login / OTP anywhere", async () => {
     render(<CheckoutPage />);
-    await waitFor(() => screen.getByRole("button", { name: /Send OTP/i }));
+    await waitFor(() => screen.getByRole("button", { name: /^Continue$/i }));
 
-    expect(screen.getByRole("button", { name: /Send OTP/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /^Continue$/i })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /^Sign up$/i })).toBeNull();
-    // No separate login/signup anywhere on the page.
+    expect(screen.queryByRole("button", { name: /Send OTP/i })).toBeNull();
+    expect(screen.queryByPlaceholderText("Enter 6-digit OTP")).toBeNull();
     expect(screen.queryByText(/Login to continue/i)).toBeNull();
     expect(screen.queryByText(/Create an account/i)).toBeNull();
-    expect(screen.queryByText(/Login required/i)).toBeNull();
   });
 
   it("shows the full form (name, number, address, email) on a guest's first order", async () => {
@@ -154,118 +144,100 @@ describe("checkout — identity is WhatsApp OTP, never a login form", () => {
     expect(document.querySelector('input[type="email"]')).toBeTruthy();
   });
 
-  it("keeps Place Order disabled until the OTP is verified", async () => {
+  it("keeps Place Order disabled until Continue is pressed", async () => {
     render(<CheckoutPage />);
-    await waitFor(() => screen.getByRole("button", { name: /Verify your WhatsApp number to continue/i }));
+    await waitFor(() => screen.getByRole("button", { name: /^Continue$/i }));
 
     fillContact();
-  fillContactEmail();
+    fillContactEmail();
     fillAddress();
     const button = placeOrderButton() as HTMLButtonElement;
-    expect(button.disabled).toBe(true);
-    expect(button.textContent || "").toMatch(/Verify your WhatsApp number/i);
+    await waitFor(() => expect(button.disabled).toBe(true));
+    expect(screen.queryByRole("button", { name: /Processing/i })).toBeNull();
   });
 
-  it("reveals the OTP input and a Verify OTP button after Send OTP", async () => {
+  it("Continue opens the session and unlocks Place Order", async () => {
     render(<CheckoutPage />);
-    await waitFor(() => screen.getByRole("button", { name: /Send OTP/i }));
-
-    expect(screen.queryByPlaceholderText("Enter 6-digit OTP")).toBeNull();
-
+    await waitFor(() => screen.getByRole("button", { name: /^Continue$/i }));
     fillContact();
-  fillContactEmail();
-    fireEvent.click(screen.getByRole("button", { name: /Send OTP/i }));
-
-    const otp = await screen.findByPlaceholderText("Enter 6-digit OTP");
-    expect(otp).toBeTruthy();
-    expect((otp as HTMLInputElement).maxLength).toBe(6);
-    expect(screen.getByRole("button", { name: /Verify OTP/i })).toBeTruthy();
-    expect(authState.sendOtp).toHaveBeenCalledWith("919876543210");
-  });
-
-  it("only enables Verify OTP once exactly six digits are typed", async () => {
-    render(<CheckoutPage />);
-    await waitFor(() => screen.getByRole("button", { name: /Send OTP/i }));
-    fillContact();
-  fillContactEmail();
-    fireEvent.click(screen.getByRole("button", { name: /Send OTP/i }));
-    const otp = (await screen.findByPlaceholderText("Enter 6-digit OTP")) as HTMLInputElement;
-
-    const verify = () => screen.getByRole("button", { name: /Verify OTP/i }) as HTMLButtonElement;
-
-    fireEvent.change(otp, { target: { value: "123" } });
-    expect(verify().disabled).toBe(true);
-
-    fireEvent.change(otp, { target: { value: "123456" } });
-    expect(verify().disabled).toBe(false);
-  });
-
-  it("unlocks Place Order after a successful verification", async () => {
-    render(<CheckoutPage />);
-    await waitFor(() => screen.getByRole("button", { name: /Send OTP/i }));
-    fillContact();
-  fillContactEmail();
+    fillContactEmail();
     fillAddress();
-    fireEvent.click(screen.getByRole("button", { name: /Send OTP/i }));
 
-    const otp = (await screen.findByPlaceholderText("Enter 6-digit OTP")) as HTMLInputElement;
-    fireEvent.change(otp, { target: { value: "123456" } });
-    fireEvent.click(screen.getByRole("button", { name: /Verify OTP/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^Continue$/i }));
 
-    await waitFor(() => screen.getByText(/Verified/i));
-    expect(authState.verifyOtp).toHaveBeenCalledWith("919876543210", "123456", "Atharva Bhargava");
-
-    // The OTP block and the Send button are gone once verified.
-    expect(screen.queryByPlaceholderText("Enter 6-digit OTP")).toBeNull();
-    expect(screen.queryByRole("button", { name: /Send OTP/i })).toBeNull();
+    await waitFor(() =>
+      expect(authState.openSession).toHaveBeenCalledWith(
+        "Atharva Bhargava",
+        "919876543210",
+        "atharva@example.com",
+        expect.objectContaining({ website: "" })
+      )
+    );
 
     const button = placeOrderButton() as HTMLButtonElement;
-    expect(button.disabled).toBe(false);
+    await waitFor(() => expect(button.disabled).toBe(false));
     expect(button.textContent || "").toMatch(/Place Order|Pay Now/);
+    expect(screen.getByText(/Contact confirmed/i)).toBeTruthy();
   });
 
-  it("keeps Place Order locked when verification fails", async () => {
-    authState.verifyOtp = vi.fn().mockRejectedValue(new Error("The OTP you entered is incorrect."));
+  it("keeps Place Order locked when Continue fails", async () => {
+    authState.openSession = vi.fn().mockRejectedValue(new Error("We could not confirm your details."));
     render(<CheckoutPage />);
-    await waitFor(() => screen.getByRole("button", { name: /Send OTP/i }));
+    await waitFor(() => screen.getByRole("button", { name: /^Continue$/i }));
     fillContact();
-  fillContactEmail();
+    fillContactEmail();
     fillAddress();
-    fireEvent.click(screen.getByRole("button", { name: /Send OTP/i }));
 
-    const otp = (await screen.findByPlaceholderText("Enter 6-digit OTP")) as HTMLInputElement;
-    fireEvent.change(otp, { target: { value: "000000" } });
-    fireEvent.click(screen.getByRole("button", { name: /Verify OTP/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^Continue$/i }));
 
-    await waitFor(() => screen.getByText(/incorrect/i));
+    await waitFor(() => screen.getByText(/could not confirm/i));
     expect((placeOrderButton() as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("a valid existing session skips the OTP entirely", async () => {
+  it("editing the name after Continue re-locks the contact", async () => {
+    render(<CheckoutPage />);
+    await waitFor(() => screen.getByRole("button", { name: /^Continue$/i }));
+    fillContact();
+    fillContactEmail();
+    fillAddress();
+    const pill = screen.getByRole("button", { name: /Continue|Contact confirmed/i });
+    fireEvent.click(pill);
+    await waitFor(() => expect(pill.getAttribute("data-contact-confirmed")).toBe("yes"));
+
+    const nameInput = Array.from(document.querySelectorAll('input[type="text"]')).find(
+      (i) => (i as HTMLInputElement).placeholder === "Enter your full name"
+    ) as HTMLInputElement;
+    fireEvent.change(nameInput, { target: { value: "Atharva B" } });
+
+    await waitFor(() => expect(pill.getAttribute("data-contact-confirmed")).toBe("no"));
+  });
+
+  it("a valid existing session still shows no OTP", async () => {
     authState.user = { id: "u1", firstName: "Atharva", lastName: "Bhargava", phone: "9876543210", email: "a@b.com" };
     authState.isAuthenticated = true;
 
     render(<CheckoutPage />);
-    await waitFor(() => screen.getByText(/Verified/i));
+    // A signed-in session whose number matches is confirmed automatically, so
+    // the pill reads "Contact confirmed" - there is still no OTP anywhere.
+    await waitFor(() => screen.getByText(/Contact confirmed/i));
 
     expect(screen.queryByRole("button", { name: /Send OTP/i })).toBeNull();
     expect(screen.queryByPlaceholderText("Enter 6-digit OTP")).toBeNull();
-    expect(authState.sendOtp).not.toHaveBeenCalled();
-
-    fillAddress();
-    expect((placeOrderButton() as HTMLButtonElement).disabled).toBe(false);
+    // The name is prefilled from the session.
+    expect((screen.getByPlaceholderText("Enter your full name") as HTMLInputElement).value).toBe("Atharva Bhargava");
   });
 
-  it("does not place an order before verification, even on a full valid form", async () => {
+  it("never asks for an OTP, even after a delay (the config cannot flip it)", async () => {
     render(<CheckoutPage />);
-    await waitFor(() => screen.getByRole("button", { name: /Send OTP/i }));
-    fillContact();
-  fillContactEmail();
-    fillAddress();
+    await waitFor(() => screen.getByRole("button", { name: /^Continue$/i }));
 
-    const button = placeOrderButton() as HTMLButtonElement;
-    fireEvent.click(button);
-    expect(button.disabled).toBe(true);
-    expect(screen.queryByRole("button", { name: /Processing/i })).toBeNull();
+    // Give any late config fetch time to run — nothing may appear.
+    await new Promise((r) => setTimeout(r, 150));
+
+    expect(screen.queryByRole("button", { name: /Send OTP/i })).toBeNull();
+    expect(screen.queryByPlaceholderText("Enter 6-digit OTP")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Verify OTP/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Resend OTP/i })).toBeNull();
+    expect(screen.getByRole("button", { name: /^Continue$/i })).toBeTruthy();
   });
 });

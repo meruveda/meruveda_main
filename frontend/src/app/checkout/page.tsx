@@ -14,7 +14,6 @@ import {
   ChevronDown,
   Plus,
   ShieldCheck,
-  Smartphone,
   CheckCircle2,
   Mail,
   MapPin,
@@ -26,18 +25,11 @@ import axiosInstance from "@/api/axiosInstance";
 import { track as trackEvent } from "@/lib/analytics";
 import { INDIAN_STATES as STATES, isIndianState } from "@/constants/states";
 
-// The WhatsApp OTP is the only way to identify a customer at checkout: the
-// Send OTP button sits where "Sign up" used to be, and there is no separate
-// login or signup step on this page.
-//
-// NEXT_PUBLIC_OTP_ENABLED is no longer read here. It used to switch between
-// this flow and a no-OTP "Sign up" button; with the Sign up button gone the
-// flag has nothing left to switch, and the real gate is the backend's
-// OTP_ENABLED (which 503s /api/auth/otp/* when off). The variable name is
-// still accepted in .env so existing files keep working — it is simply inert.
+// The checkout NEVER asks for an OTP. The contact step is a name, a mobile
+// number and an email, confirmed with the "Continue" pill. There is no
+// Send OTP button, no OTP input and no "verified" gate anywhere on this page,
+// regardless of any config or env flag.
 const SHIPPING_IS_TAXABLE = false; // TODO: PENDING CLIENT CONFIRMATION. Set to true to tax shipping charges.
-
-const OTP_RESEND_SECONDS = 30;
 
 // All Indian states and Union Territories — dropdown for the delivery address.
 // Single source of truth: also drives validation on the saved-address path and
@@ -49,12 +41,6 @@ const PIN_RE = /^\d{6}$/;
 
 import { DEFAULT_COUNTRY, Country, nationalDigits, fullPhoneDigits, isValidNational, isIndianNumber, formatDisplay } from "@/constants/countries";
 import { CountryPhoneField } from "@/components/CountryPhoneField";
-
-// Records a completed OTP verification in this browser so a refresh (or an
-// already-signed-in session) is not mistaken for "never verified". This is the
-// same trust level as React state — it only ever holds a code the backend
-// actually accepted — it just survives a reload.
-const OTP_VERIFIED_KEY = "meruveda_otp_verified_phone";
 
 /**
  * A synthetic identity, never a real inbox.
@@ -296,7 +282,7 @@ function writeStoredAddresses(list: Address[]) {
 
 export default function CheckoutPage() {
   const { cart, cartTotal, removeFromCart, updateQuantity } = useCart();
-  const { user, isAuthenticated, isLoading, sendOtp, resendOtp, verifyOtp, saveProfile, openSession, getOtpConfig } = useAuth();
+  const { user, isAuthenticated, isLoading, saveProfile, openSession } = useAuth();
   const router = useRouter();
 
   // No separate login screen: the checkout form itself is the login.
@@ -313,31 +299,14 @@ export default function CheckoutPage() {
   const [addressForm, setAddressForm] = useState<AddressFormState>(emptyAddressForm());
   const [addressSubmitted, setAddressSubmitted] = useState(false);
 
-  // ---- Contact + OTP (step 1, shown on EVERY order) ----
+  // ---- Contact (step 1, shown on EVERY order) ----
   const [contactName, setContactName] = useState("");
   const [mobile, setMobile] = useState("");
   const [phoneCountry, setPhoneCountry] = useState<Country>(DEFAULT_COUNTRY);
-  const [otpSent, setOtpSent] = useState(false);
-  const [otpCode, setOtpCode] = useState("");
-  const [otpVerified, setOtpVerified] = useState(false);
-  /**
-   * Whether the checkout asks for an OTP.
-   *
-   * 'off' means the store is taking guest checkouts (name + number) while a
-   * WhatsApp template is reviewed. The answer comes from a never-cached public
-   * endpoint, so switching OTP_MODE back to 'auto' restores the OTP flow with
-   * no rebuild. Until it is known, the GUEST form (Continue) is shown: the
-   * checkout never asks for an OTP by default.
-   */
-  const [otpRequired, setOtpRequired] = useState(false);
   /** The honeypot: a field a human never sees and never fills in. */
   const [website, setWebsite] = useState("");
   /** When the form was rendered - a form filled in implausibly fast is a bot. */
   const formRenderedAt = useRef<number>(Date.now());
-  /**
-   * The contact is confirmed: either the OTP was verified, or the customer
-   * pressed "Continue" and the guest session was opened.
-   */
   /**
    * The contact that was confirmed, as a SNAPSHOT of the name and the number.
    *
@@ -352,11 +321,8 @@ export default function CheckoutPage() {
   /** The email of the contact step - it becomes the profile's email. */
   const [contactEmail, setContactEmail] = useState("");
   const [contactEmailError, setContactEmailError] = useState("");
-  const [isSendingOtp, setIsSendingOtp] = useState(false);
-  const [isVerifyingOtp, setIsVerifyingOtp] = useState(false);
-  const [otpMessage, setOtpMessage] = useState("");
-  const [otpError, setOtpError] = useState("");
-  const [otpResendIn, setOtpResendIn] = useState(0);
+  /** The general error of the contact / place-order block. */
+  const [stepError, setStepError] = useState("");
   const [customerEmail, setCustomerEmail] = useState("");
   const [mobileError, setMobileError] = useState("");
   /**
@@ -472,27 +438,6 @@ export default function CheckoutPage() {
     setSelectedAddressId(def ? def.id : loaded[0]?.id || "");
   }, []);
 
-  // Ask the server whether the checkout needs an OTP.
-  //
-  // The answer changes with OTP_MODE (a store-wide switch, not a build), so
-  // it is read at page load from a never-cached public endpoint. Until it
-  // arrives the GUEST form (Continue) is shown: the checkout never asks for
-  // an OTP by default.
-  useEffect(() => {
-    let cancelled = false;
-    getOtpConfig()
-      .then((config) => {
-        if (cancelled) return;
-        setOtpRequired(config.otpRequired);
-      })
-      .catch(() => {
-        /* the default (guest / Continue) stays */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [getOtpConfig]);
-
   // A customer who is already signed in with THIS number is confirmed without
   // pressing anything: there is nothing to prove.
   useEffect(() => {
@@ -528,10 +473,6 @@ export default function CheckoutPage() {
 
   // Prefill the contact + address form from the signed-in customer, but never
   // skip the form itself — the user still sees and confirms every field.
-  //
-  // A valid session DOES skip the OTP step: the number was already proven on a
-  // previous visit, so asking for a code again would be pure friction. The form
-  // still renders every field; only the verification gate is satisfied.
   useEffect(() => {
     if (!user) return;
     const fullName = [user.firstName, user.lastName].filter(Boolean).join(" ");
@@ -545,194 +486,16 @@ export default function CheckoutPage() {
     if (!contactEmail && customerEmail && !isSyntheticEmail(customerEmail)) {
       setContactEmail(customerEmail);
     }
-    if (isAuthenticated) {
-      setOtpVerified(true);
-    }
     // The address form itself takes name/phone from step 1, so nothing to prefill.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, isAuthenticated]);
 
-  // OTP resend cooldown ticker
-  useEffect(() => {
-    if (otpResendIn <= 0) return;
-    const t = setTimeout(() => setOtpResendIn((s) => s - 1), 1000);
-    return () => clearTimeout(t);
-  }, [otpResendIn]);
-
-  // Restore a verification that already succeeded in this browser (page
-  // refresh, or a session established earlier). Without this the section stayed
-  // locked even though the customer had passed OTP verification.
-  useEffect(() => {
-    if (otpVerified) return;
-    try {
-      const verified = localStorage.getItem(OTP_VERIFIED_KEY);
-      if (verified && mobile && verified === fullPhoneDigits(mobile, phoneCountry)) {
-        setOtpVerified(true);
-        setOtpSent(false);
-        setOtpError("");
-      }
-    } catch {
-      /* storage unavailable */
-    }
-  }, [otpVerified, mobile, phoneCountry]);
-
   const normalizeMobile = (value: string) => value.replace(/[^\d+]/g, "");
-
-  // Editing the mobile number invalidates an earlier verification, so the
-  // address section locks again until the new number is verified.
-  const resetVerification = (message = "") => {
-    setOtpVerified(false);
-    setOtpSent(false);
-    setOtpCode("");
-    setOtpError("");
-    setOtpMessage(message);
-    setOtpResendIn(0);
-    try {
-      localStorage.removeItem(OTP_VERIFIED_KEY);
-    } catch {
-      /* storage unavailable */
-    }
-  };
 
   const handleMobileChange = (value: string) => {
     const next = normalizeMobile(value);
     setMobile(next);
     setMobileError("");
-  };
-
-  // Lets a verified customer unlock the number field (fields are locked on success).
-  const handleChangeNumber = () => {
-    resetVerification("Update your number and send a new OTP.");
-  };
-
-  // Turns transport / WhatsApp failures into something the customer can act on.
-  const describeOtpError = (err: any, fallback: string): string => {
-    const raw = err?.message || "";
-    if (!raw || raw === "Network Error" || /timeout|aborted/i.test(raw)) {
-      return "WhatsApp could not be reached right now. Please try again in a moment.";
-    }
-    return raw || fallback;
-  };
-
-  const handleSendOtp = async (e?: React.FormEvent) => {
-    e?.preventDefault();
-    if (otpVerified) return;
-    setOtpError("");    setOtpMessage("");
-
-    const digits = nationalDigits(mobile, phoneCountry);
-    if (!isValidNational(digits, phoneCountry)) {
-      setOtpError(
-        phoneCountry.iso === "in"
-          ? "Please enter a valid 10-digit Indian mobile number."
-          : `Please enter a valid ${phoneCountry.digits}-digit ${phoneCountry.name} number.`
-      );
-      return;
-    }
-    if (!contactName.trim()) {
-      setOtpError("Please enter your name.");
-      return;
-    }
-
-    setIsSendingOtp(true);
-    try {
-      const res = await sendOtp(fullPhoneDigits(mobile, phoneCountry));
-      setOtpSent(true);
-      setOtpResendIn(OTP_RESEND_SECONDS);
-      setOtpMessage(
-        res?.devOtp
-          ? `OTP sent. (Development mode — your code is ${res.devOtp})`
-          : "OTP sent to your WhatsApp number."
-      );
-    } catch (err: any) {
-      setOtpError(describeOtpError(err, "Could not send the OTP. Please try again."));
-    } finally {
-      setIsSendingOtp(false);
-    }
-  };
-
-  const handleResendOtp = async () => {
-    if (otpResendIn > 0) return;
-    setOtpError("");
-    setOtpMessage("");
-    setIsSendingOtp(true);
-    try {
-      const res = await resendOtp(fullPhoneDigits(mobile, phoneCountry));
-      setOtpResendIn(OTP_RESEND_SECONDS);
-      setOtpMessage(
-        res?.devOtp
-          ? `A new OTP was sent. (Development mode — your code is ${res.devOtp})`
-          : "A new OTP has been sent."
-      );
-    } catch (err: any) {
-      setOtpError(describeOtpError(err, "Could not resend the OTP. Please try again."));
-    } finally {
-      setIsSendingOtp(false);
-    }
-  };
-
-  const submitOtp = async () => {
-    setOtpError("");
-    if (otpCode.replace(/\D/g, "").length !== 6) {
-      setOtpError("Please enter the 6-digit OTP.");
-      return;
-    }
-    setIsVerifyingOtp(true);
-    try {
-      // Registers an unknown number, logs an existing one in — every order.
-      const full = fullPhoneDigits(mobile, phoneCountry);
-      await verifyOtp(full, otpCode, contactName);
-      try {
-        localStorage.setItem(OTP_VERIFIED_KEY, full);
-      } catch {
-        /* storage unavailable */
-      }
-      setOtpVerified(true);
-      setOtpMessage("Mobile number verified.");
-      // Keep the guest cart: merge it into the account now that we have a session.
-      if (typeof window !== "undefined") {
-        try {
-          window.dispatchEvent(new CustomEvent("meruveda:auth-changed"));
-        } catch {
-          /* noop */
-        }
-      }
-    } catch (err: any) {
-      setOtpError(describeOtpError(err, "Invalid OTP. Please try again."));
-    } finally {
-      setIsVerifyingOtp(false);
-    }
-  };
-
-  const handleVerifyOtp = async (e: React.FormEvent) => {
-    e.preventDefault();
-    await submitOtp();
-  };
-
-  /**
-   * "Verify Mobile Number" — the CTA shown in the address section. Sends the
-   * OTP when one has not been requested yet, otherwise moves focus to the code
-   * field. It never silently unlocks anything: the code still has to be entered
-   * and accepted by the backend.
-   */
-  const handleVerifyMobileClick = async () => {
-    const digits = nationalDigits(mobile, phoneCountry);
-    if (!isValidNational(digits, phoneCountry)) {
-      setOtpError(
-        phoneCountry.iso === "in"
-          ? "Please enter a valid 10-digit Indian mobile number."
-          : `Please enter a valid ${phoneCountry.digits}-digit ${phoneCountry.name} number.`
-      );
-    } else if (!contactName.trim()) {
-      setOtpError("Please enter your name.");
-    } else if (!otpSent) {
-      await handleSendOtp();
-    }
-
-    document.getElementById("checkout-contact")?.scrollIntoView({ behavior: "smooth", block: "center" });
-    window.setTimeout(() => {
-      const target = document.getElementById("checkout-otp") ? "checkout-otp" : "checkout-mobile";
-      document.getElementById(target)?.focus({ preventScroll: true });
-    }, 500);
   };
 
   if (isLoading) {
@@ -1018,12 +781,9 @@ export default function CheckoutPage() {
 
   // Place Order / Pay Action.
   //
-  // With the OTP flow the WhatsApp code is the identity gate: there is no
-  // login redirect, verifying the number signs the customer in. With guest
-  // checkout the customer presses "Continue" under the number, which confirms
-  // the contact and opens a checkout-only session. The default is GUEST
-  // (Continue); the server can require an OTP via OTP_MODE.
-  const guestMode = !otpRequired;
+  // The customer presses "Continue" under the number, which confirms the
+  // contact and opens a checkout-only session. There is no OTP anywhere on
+  // this page, regardless of any config or env flag.
 
   /** The number as it will be stored, used for the confirmation snapshot. */
   const currentDigits = fullPhoneDigits(mobile, phoneCountry);
@@ -1037,8 +797,8 @@ export default function CheckoutPage() {
   const contactConfirmed =
     confirmedContact !== null && confirmedContact.digits === currentDigits;
 
-  /** The contact is confirmed: the OTP was verified, or "Continue" was pressed. */
-  const contactReady = guestMode ? contactConfirmed : otpVerified;
+  /** The contact is confirmed when "Continue" was pressed. */
+  const contactReady = contactConfirmed;
 
   /**
    * "Continue" - confirm the name, the number and the email, and open the
@@ -1092,7 +852,6 @@ export default function CheckoutPage() {
       // The delivery email follows the contact email.
       if (!customerEmail.trim()) setCustomerEmail(email);
       setConfirmedContact({ name, digits: fullPhoneDigits(mobile, phoneCountry), email });
-      setOtpVerified(true);
     } catch (err: any) {
       setContactError(
         err?.response?.data?.error?.message ||
@@ -1105,27 +864,17 @@ export default function CheckoutPage() {
   };
 
   const handlePlaceOrder = async () => {
-    if (!guestMode && !otpVerified) {
-      setOtpError("Please verify your WhatsApp number before placing the order.");
-      if (typeof window !== "undefined") {
-        document.getElementById("checkout-contact")?.scrollIntoView({ behavior: "smooth", block: "center" });
-      }
+    // A name and a number are the minimum.
+    if (!contactName.trim() || contactName.trim().length < 2) {
+      setStepError("Please enter your full name.");
+      document.getElementById("checkout-contact")?.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
-
-    // Guest checkout: a name and a number are the minimum.
-    if (guestMode) {
-      if (!contactName.trim() || contactName.trim().length < 2) {
-        setOtpError("Please enter your full name.");
-        document.getElementById("checkout-contact")?.scrollIntoView({ behavior: "smooth", block: "center" });
-        return;
-      }
-      const digits = nationalDigits(mobile, phoneCountry);
-      if (!isValidNational(digits, phoneCountry)) {
-        setOtpError("Please enter a valid mobile number.");
-        document.getElementById("checkout-mobile")?.scrollIntoView({ behavior: "smooth", block: "center" });
-        return;
-      }
+    const digits = nationalDigits(mobile, phoneCountry);
+    if (!isValidNational(digits, phoneCountry)) {
+      setStepError("Please enter a valid mobile number.");
+      document.getElementById("checkout-mobile")?.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
     }
 
     if (!addressValid || !effectiveAddress) {
@@ -1154,10 +903,10 @@ export default function CheckoutPage() {
     setIsPlacingOrder(true);
     const selectedAddr = effectiveAddress;
 
-    // Guest checkout: the contact was already confirmed by "Continue", which
-    // opened the checkout-only session. Nothing to do here.
-    if (guestMode && !contactConfirmed) {
-      setOtpError("Please confirm your contact details first.");
+    // The contact was already confirmed by "Continue", which opened the
+    // checkout-only session. Nothing to do here.
+    if (!contactConfirmed) {
+      setStepError("Please confirm your contact details first.");
       document.getElementById("checkout-contact")?.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
@@ -1296,9 +1045,9 @@ export default function CheckoutPage() {
               Contact Details
             </h2>
 
-            {/* This form owns submission: the Send button is type="submit", so Enter in a
-                text field sends the code. */}
-            <form onSubmit={handleSendOtp} className="space-y-4">
+            {/* The contact form. Enter in a text field does nothing - the
+                customer presses the Continue pill below. */}
+            <form onSubmit={(e) => e.preventDefault()} className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 min-w-0">
                 <div className="min-w-0">
                   <label className={labelClass}>Full Name</label>
@@ -1325,31 +1074,13 @@ export default function CheckoutPage() {
                     country={phoneCountry}
                     onCountryChange={(c) => {
                       setPhoneCountry(c);
-                      resetVerification("Country changed - please verify the number again.");
+                      // A different country means a different number: the
+                      // confirmation no longer matches.
+                      setConfirmedContact(null);
                     }}
                     value={mobile}
                     onValueChange={handleMobileChange}
-                    disabled={otpVerified}
                     invalid={!!mobileError}
-                    /* The WhatsApp OTP entry point. This button replaced "Sign up":
-                       there is no separate login or signup on this page. The
-                       backend 503s /api/auth/otp/* unless OTP_ENABLED=true.
-                       In guest mode (OTP_MODE=off) there is no code to send,
-                       so the button is not rendered at all. It lives inside the
-                       field so the field can drop it onto its own row on a
-                       narrow screen instead of pushing the row off-screen. */
-                    action={
-                      !otpVerified && !guestMode ? (
-                        <button
-                          type="submit"
-                          disabled={isSendingOtp || (otpResendIn > 0 && otpSent)}
-                          className="w-full sm:w-auto bg-deep-purple text-white px-4 py-2.5 text-xs font-bold rounded-lg hover:bg-deep-purple/90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
-                        >
-                          {isSendingOtp ? <Loader2 size={14} className="animate-spin" /> : <Smartphone size={14} />}
-                          {otpSent ? "Resend" : "Send OTP"}
-                        </button>
-                      ) : null
-                    }
                   />
                   {mobileError && <p className={errorClass}>{mobileError}</p>}
                 </div>
@@ -1389,47 +1120,45 @@ export default function CheckoutPage() {
                 )}
               </div>
 
-              {guestMode && (
-                <div className="space-y-2">
-                  <button
-                    type="button"
-                    onClick={handleConfirmContact}
-                    disabled={isConfirmingContact}
-                    data-contact-confirmed={contactConfirmed ? 'yes' : 'no'}
-                    className={`w-full rounded-full py-3.5 text-sm font-bold transition-all flex items-center justify-center gap-2 shadow-sm disabled:opacity-60 ${
-                      contactConfirmed
-                        ? "bg-green-50 text-green-700 border border-green-200"
-                        : "bg-deep-purple text-white hover:bg-deep-purple/90"
-                    }`}
-                  >
-                    {isConfirmingContact ? (
-                      <>
-                        <Loader2 size={16} className="animate-spin" />
-                        Confirming...
-                      </>
-                    ) : contactConfirmed ? (
-                      <>
-                        <CheckCircle2 size={16} />
-                        Contact confirmed
-                      </>
-                    ) : (
-                      "Continue"
-                    )}
-                  </button>
-                  {contactConfirmed ? (
-                    <p className="text-[11px] text-gray-500 text-center">
-                      {contactName.trim()} · {formatDisplay(mobile, phoneCountry)}
-                    </p>
+              <div className="space-y-2">
+                <button
+                  type="button"
+                  onClick={handleConfirmContact}
+                  disabled={isConfirmingContact}
+                  data-contact-confirmed={contactConfirmed ? 'yes' : 'no'}
+                  className={`w-full rounded-full py-3.5 text-sm font-bold transition-all flex items-center justify-center gap-2 shadow-sm disabled:opacity-60 ${
+                    contactConfirmed
+                      ? "bg-green-50 text-green-700 border border-green-200"
+                      : "bg-deep-purple text-white hover:bg-deep-purple/90"
+                  }`}
+                >
+                  {isConfirmingContact ? (
+                    <>
+                      <Loader2 size={16} className="animate-spin" />
+                      Confirming...
+                    </>
+                  ) : contactConfirmed ? (
+                    <>
+                      <CheckCircle2 size={16} />
+                      Contact confirmed
+                    </>
                   ) : (
-                    <p className="text-[11px] text-gray-500 text-center">
-                      Order updates aur invoice isi WhatsApp number par aayenge
-                    </p>
+                    "Continue"
                   )}
-                  {contactError && (
-                    <p className="text-[11px] text-red-500 font-medium text-center">{contactError}</p>
-                  )}
-                </div>
-              )}
+                </button>
+                {contactConfirmed ? (
+                  <p className="text-[11px] text-gray-500 text-center">
+                    {contactName.trim()} · {formatDisplay(mobile, phoneCountry)}
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-gray-500 text-center">
+                    Order updates aur invoice isi WhatsApp number par aayenge
+                  </p>
+                )}
+                {contactError && (
+                  <p className="text-[11px] text-red-500 font-medium text-center">{contactError}</p>
+                )}
+              </div>
 
               {/* The honeypot. A human never sees this field and never fills
                   it in; a bot fills everything it finds. It is off-screen and
@@ -1447,58 +1176,7 @@ export default function CheckoutPage() {
                 />
               </div>
 
-              {otpSent && !otpVerified && !guestMode && (
-                <div className="border border-gold/30 bg-gold/5 rounded-xl p-4 space-y-3">
-                  <div className="flex flex-col sm:flex-row sm:items-end gap-3">
-                    <div className="flex-1">
-                      <input
-                        id="checkout-otp"
-                        type="text"
-                        inputMode="numeric"
-                        autoComplete="one-time-code"
-                        maxLength={6}
-                        autoFocus
-                        value={otpCode}
-                        onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ""))}
-                        onKeyDown={(e) => {
-                          // The outer form submits "Send OTP" — Enter here must verify instead.
-                          if (e.key === "Enter") {
-                            e.preventDefault();
-                            submitOtp();
-                          }
-                        }}
-                        className={`${inputClass} font-mono text-center tracking-[0.4em] placeholder:tracking-normal placeholder:font-sans`}
-                        placeholder="Enter 6-digit OTP"
-                        aria-label="Enter 6-digit OTP"
-                      />
-                    </div>
-                    <button
-                      type="button"
-                      onClick={handleVerifyOtp}
-                      disabled={isVerifyingOtp || otpCode.length !== 6}
-                      className="shrink-0 bg-gold text-deep-purple px-6 py-2 text-xs font-bold rounded-lg hover:bg-gold-light disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                    >
-                      {isVerifyingOtp ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
-                      Verify OTP
-                    </button>
-                  </div>
-                  <div className="flex items-center justify-between gap-3 text-[11px]">
-                    <span className="text-gray-500">
-                      {otpMessage || "We sent a code to your WhatsApp."}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={handleResendOtp}
-                      disabled={otpResendIn > 0 || isSendingOtp}
-                      className="shrink-0 text-gold font-bold disabled:text-gray-400 disabled:cursor-not-allowed"
-                    >
-                      {otpResendIn > 0 ? `Resend OTP in ${otpResendIn}s` : "Resend OTP"}
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {otpError && <p className="text-[11px] text-red-500 font-medium">{otpError}</p>}
+              {stepError && <p className="text-[11px] text-red-500 font-medium">{stepError}</p>}
 
               {/* An order that ships inside India needs an Indian number the
                   parcel can be delivered to. It is required whenever the
@@ -1531,22 +1209,6 @@ export default function CheckoutPage() {
                     className={`${inputClass} ${deliveryContactError ? "border-red-400" : ""}`}
                   />
                   {deliveryContactError && <p className={errorClass}>{deliveryContactError}</p>}
-                </div>
-              )}
-
-              {otpVerified && !guestMode && (
-                <div className="flex flex-wrap items-center justify-between gap-2 border border-green-200 bg-green-50 rounded-xl px-4 py-3">
-                  <span className="flex items-center gap-2 text-xs font-bold text-green-700">
-                    <CheckCircle2 size={15} /> Verified ✓
-                    <span className="font-medium text-green-600">{mobile}</span>
-                  </span>
-                  <button
-                    type="button"
-                    onClick={handleChangeNumber}
-                    className="text-[11px] font-bold text-gold hover:text-gold-light underline underline-offset-2"
-                  >
-                    Change number
-                  </button>
                 </div>
               )}
             </form>
@@ -2060,9 +1722,7 @@ export default function CheckoutPage() {
               const blockedReason = !isServiceable
                 ? "This pincode is not serviceable yet."
                 : !contactReady
-                  ? guestMode
-                    ? "Confirm your contact details to continue"
-                    : "Verify your WhatsApp number to continue"
+                  ? "Confirm your contact details to continue"
                   : !deliveryAddressValid
                     ? "Select a delivery address"
                     : !emailValid
@@ -2080,8 +1740,6 @@ export default function CheckoutPage() {
                         <Loader2 size={18} className="animate-spin" />
                         Processing...
                       </>
-                    ) : !contactReady && !guestMode ? (
-                      "Verify your WhatsApp number to continue"
                     ) : !deliveryAddressValid ? (
                       "Complete address to continue"
                     ) : !emailValid ? (
@@ -2102,17 +1760,7 @@ export default function CheckoutPage() {
               );
             })()}
 
-            {!otpVerified && !addressValid && !guestMode && (
-              <p className="text-[11px] text-gray-400 text-center mt-2">
-                Send and verify the WhatsApp OTP above to continue.
-              </p>
-            )}
-            {guestMode && !addressValid && (
-              <p className="text-[11px] text-gray-400 text-center mt-2">
-                Choose a saved address or complete every required address field.
-              </p>
-            )}
-            {(!guestMode ? otpVerified : true) && !addressValid && (
+            {!addressValid && (
               <p className="text-[11px] text-gray-400 text-center mt-2">
                 {!deliveryAddressValid
                   ? "Choose a saved address or complete every required address field."
