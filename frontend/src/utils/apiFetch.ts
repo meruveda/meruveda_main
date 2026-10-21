@@ -44,6 +44,19 @@ export class ApiUnavailableError extends Error {
 }
 
 /**
+ * True while Next.js is BUILDING the app.
+ *
+ * During the build the backend service is usually not reachable (the new
+ * frontend is compiled before the new backend is live), so a throw here would
+ * fail the whole deployment for a condition that is expected. At build time the
+ * caller renders a friendly placeholder instead; at RUNTIME the error is
+ * thrown, which is what makes the App Router keep serving the last good ISR
+ * page.
+ */
+export const isBuildPhase = (): boolean =>
+  process.env.NEXT_PHASE === 'phase-production-build';
+
+/**
  * GET a JSON endpoint with retries, and fail LOUDLY.
  *
  * The response body is returned as parsed JSON. A non-2xx response is a

@@ -1,18 +1,28 @@
 import { notFound } from 'next/navigation';
 import ProductDetailClient from './ProductDetailClient';
 import { API_BASE_URL } from '@/utils/apiUrl';
-import { apiGetJson } from '@/utils/apiFetch';
+import { apiGetJson, isBuildPhase } from '@/utils/apiFetch';
 
 export const revalidate = 300; // ISR: public pages are revalidated every 5 minutes
 
   async function getProduct(id: string) {
     // Retried, and on total failure the error is THROWN so the App Router
-    // keeps serving the last good ISR page for this product.
-    const json = await apiGetJson<any>(`${API_BASE_URL}/products/${id}`, {
-      next: { revalidate: 300 },
-      label: 'Product/detail',
-    });
-    return json?.data ?? null;
+    // keeps serving the last good ISR page for this product. The BUILD is the
+    // exception: the backend is often not reachable while the frontend is
+    // compiled, and that must not fail the deployment.
+    try {
+      const json = await apiGetJson<any>(`${API_BASE_URL}/products/${id}`, {
+        next: { revalidate: 300 },
+        label: 'Product/detail',
+      });
+      return json?.data ?? null;
+    } catch (error) {
+      if (isBuildPhase()) {
+        console.warn('[Product/detail] the catalogue service was not reachable during the build.');
+        return null;
+      }
+      throw error;
+    }
   }
 
 export async function generateMetadata({ params }: { params: Promise<{ id: string }> }) {

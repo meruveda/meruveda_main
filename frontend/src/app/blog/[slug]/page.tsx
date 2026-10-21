@@ -3,17 +3,27 @@ import Link from "next/link";
 import MediaImage from "@/components/MediaImage";
 import { ChevronRight, Calendar, Clock, ArrowLeft } from "lucide-react";
 import { API_BASE_URL } from "@/utils/apiUrl";
-import { apiGetJson } from "@/utils/apiFetch";
+import { apiGetJson, isBuildPhase } from "@/utils/apiFetch";
 import { notFound } from "next/navigation";
 
   async function getPost(slug: string) {
     // Retried, and on total failure the error is THROWN so the App Router
-    // keeps serving the last good ISR page for this post.
-    const json = await apiGetJson<any>(`${API_BASE_URL}/blogs/${slug}`, {
-      next: { revalidate: 300 },
-      label: 'Blog/post',
-    });
-    return json?.data || json;
+    // keeps serving the last good ISR page for this post. The BUILD is the
+    // exception: the backend is often not reachable while the frontend is
+    // compiled, and that must not fail the deployment.
+    try {
+      const json = await apiGetJson<any>(`${API_BASE_URL}/blogs/${slug}`, {
+        next: { revalidate: 300 },
+        label: 'Blog/post',
+      });
+      return json?.data || json;
+    } catch (error) {
+      if (isBuildPhase()) {
+        console.warn('[Blog/post] the catalogue service was not reachable during the build.');
+        return null;
+      }
+      throw error;
+    }
   }
 
 export default async function BlogPostPage({ params }: { params: Promise<{ slug: string }> }) {

@@ -1,7 +1,8 @@
 export const revalidate = 300; // ISR: public pages are revalidated every 5 minutes
 import ProductGrid from "@/components/ProductGrid";
 import { API_BASE_URL } from "@/utils/apiUrl";
-import { apiGetJson } from "@/utils/apiFetch";
+import { apiGetJson, isBuildPhase } from "@/utils/apiFetch";
+import { CatalogueLoading } from "@/components/CatalogueLoading";
 
 export const metadata = {
   title: "All Products | MeruVeda",
@@ -18,7 +19,21 @@ async function getProducts() {
   // the last good ISR page, while a render that catches the error and shows a
   // message REPLACES the good page with that message. A cold backend must
   // never empty the catalogue.
-  const json = await apiGetJson<any>(targetUrl, { next: { revalidate: 300 }, label: 'Products' });
+  //
+  // The one exception is the BUILD: the new frontend is compiled before the
+  // new backend is live, so the backend is often unreachable while the build
+  // runs. Failing the deployment for that would be wrong, so the build renders
+  // a friendly placeholder and the first real request revalidates the page.
+  let json: any;
+  try {
+    json = await apiGetJson<any>(targetUrl, { next: { revalidate: 300 }, label: 'Products' });
+  } catch (error) {
+    if (isBuildPhase()) {
+      console.warn('[Products] the catalogue service was not reachable during the build.');
+      return { products: [], unavailable: true };
+    }
+    throw error;
+  }
   const products = (json?.data || []).map((p: any) => {
     let img = '/images/product_oil.png';
     if (p.images && Array.isArray(p.images) && p.images.length > 0 && typeof p.images[0] === 'string' && p.images[0].trim() !== '') {
@@ -52,12 +67,12 @@ async function getProducts() {
 }
 
 export default async function ProductsPage() {
-  const { products } = await getProducts();
+  const { products, unavailable } = await getProducts();
 
   return (
     <div className="container mx-auto px-6 py-12 md:py-24">
       <h1 className="text-4xl md:text-5xl font-playfair font-bold text-deep-purple mb-12 text-center">All Products</h1>
-      <ProductGrid products={products} />
+      {unavailable ? <CatalogueLoading /> : <ProductGrid products={products} />}
     </div>
   );
 }

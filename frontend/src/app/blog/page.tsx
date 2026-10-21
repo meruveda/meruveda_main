@@ -2,16 +2,24 @@ export const revalidate = 300; // ISR: public pages are revalidated every 5 minu
 import MediaImage from "@/components/MediaImage";
 import Link from "next/link";
 import { API_BASE_URL } from "@/utils/apiUrl";
-import { apiGetJson } from "@/utils/apiFetch";
+import { apiGetJson, isBuildPhase } from "@/utils/apiFetch";
 
   async function getBlogPosts() {
     // Retried, and on total failure the error is THROWN so the App Router
-    // keeps serving the last good ISR page.
-    const json = await apiGetJson<any>(`${API_BASE_URL}/blogs?status=published`, {
-      next: { revalidate: 300 },
-      label: 'Blog/list',
-    });
-    return json?.data || [];
+    // keeps serving the last good ISR page. The BUILD is the exception.
+    try {
+      const json = await apiGetJson<any>(`${API_BASE_URL}/blogs?status=published`, {
+        next: { revalidate: 300 },
+        label: 'Blog/list',
+      });
+      return json?.data || [];
+    } catch (error) {
+      if (isBuildPhase()) {
+        console.warn('[Blog/list] the catalogue service was not reachable during the build.');
+        return [];
+      }
+      throw error;
+    }
   }
 
 export default async function BlogPage() {

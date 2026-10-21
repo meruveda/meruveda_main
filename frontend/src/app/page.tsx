@@ -7,7 +7,7 @@ import { reviews } from "@/data/reviews";
 import HeroCarousel from "@/components/HeroCarousel";
 import WhyChooseUs from "@/components/WhyChooseUs";
 import { API_BASE_URL } from "@/utils/apiUrl";
-import { apiGetJson } from "@/utils/apiFetch";
+import { apiGetJson, isBuildPhase } from "@/utils/apiFetch";
 
 export const metadata = {
   title: "MERUVEDA | Authentic Ayurvedic Products",
@@ -103,11 +103,29 @@ interface Review {
 }
 
 export default async function Home() {
+  // At BUILD time the backend is usually not reachable yet (the new frontend is
+  // compiled before the new backend is live), so the build must not fail for
+  // that. At RUNTIME the error is thrown, which makes the App Router keep
+  // serving the last good ISR page instead of replacing the home page with an
+  // empty hero.
+  const buildPhase = isBuildPhase();
+  const settle = async <T,>(label: string, run: () => Promise<T>, fallback: T): Promise<T> => {
+    try {
+      return await run();
+    } catch (error) {
+      if (buildPhase) {
+        console.warn(`[Home] ${label} was not reachable during the build.`);
+        return fallback;
+      }
+      throw error;
+    }
+  };
+
   const [products, banners, featuredReviews, blogPosts] = await Promise.all([
-    getFeaturedProducts(),
-    getBanners(),
+    settle('products', getFeaturedProducts, [] as Awaited<ReturnType<typeof getFeaturedProducts>>),
+    settle('banners', getBanners, [] as Awaited<ReturnType<typeof getBanners>>),
     Promise.resolve(getHomepageReviews()),
-    getBlogPosts(),
+    settle('blogs', getBlogPosts, [] as Awaited<ReturnType<typeof getBlogPosts>>),
   ]);
 
   const reviews = featuredReviews;
