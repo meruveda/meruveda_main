@@ -81,7 +81,7 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       body.email = String(req.body.email).trim().toLowerCase();
     }
 
-    const data = await orderService.createOrder(body, req.user?.id);
+    const data = await orderService.createOrder(body, session?.userId);
 
     // Every order is invoiced the moment it is created â€” COD and prepaid alike,
     // paid or not. A tax invoice documents the sale, and the sale happens when
