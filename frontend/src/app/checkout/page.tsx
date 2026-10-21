@@ -1021,14 +1021,13 @@ export default function CheckoutPage() {
   const currentDigits = fullPhoneDigits(mobile, phoneCountry);
 
   /**
-   * The contact is confirmed when it still matches the snapshot taken when
-   * "Continue" was pressed. Editing the name or the number therefore
-   * un-confirms it by itself, with no extra bookkeeping to keep in sync.
+   * The contact is confirmed when the NUMBER still matches the snapshot taken
+   * when "Continue" was pressed. The number is what the session belongs to, so
+   * it is the one thing that decides; a name edit resets the snapshot
+   * explicitly (see the name field), while a stray re-render cannot clear it.
    */
   const contactConfirmed =
-    confirmedContact !== null &&
-    confirmedContact.digits === currentDigits &&
-    confirmedContact.name === contactName.trim();
+    confirmedContact !== null && confirmedContact.digits === currentDigits;
 
   /** The contact is confirmed: the OTP was verified, or "Continue" was pressed. */
   const contactReady = guestMode ? contactConfirmed : otpVerified;
@@ -1284,6 +1283,10 @@ export default function CheckoutPage() {
                     onChange={(e) => {
                       setContactName(e.target.value);
                       setContactError("");
+                      // Typing a different name un-confirms the contact.
+                      if (confirmedContact && e.target.value.trim() !== confirmedContact.name) {
+                        setConfirmedContact(null);
+                      }
                     }}
                     className={inputClass}
                     placeholder="Enter your full name"
