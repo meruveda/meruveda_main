@@ -160,14 +160,19 @@ async function main() {
   await pageA.waitForTimeout(800);
   await shot(pageA, 'a2-checkout-address');
 
-  const codRadio = pageA.getByText('Cash on Delivery', { exact: false }).first();
-  if (await codRadio.count()) await codRadio.click();
-  await pageA.waitForTimeout(600);
+  // Cash on delivery.
+  const codCard = pageA.getByText('Cash on Delivery', { exact: false }).first();
+  if (await codCard.count()) {
+    await codCard.click();
+    await pageA.waitForTimeout(800);
+  }
 
-  const placeOrder = pageA.getByRole('button', { name: /place order/i }).first();
+  // The order button is labelled "Place Order" or "Pay Now".
+  const placeOrder = pageA.getByRole('button', { name: /place order|pay now/i }).first();
+  check('a. the order button is ready', (await placeOrder.count()) > 0);
   if (await placeOrder.count()) {
     await placeOrder.click();
-    await pageA.waitForTimeout(9000);
+    await pageA.waitForTimeout(12000);
   }
   const orderUrl = pageA.url();
   check('a. the COD order is placed', /\/checkout\/success\//.test(orderUrl), orderUrl);
