@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ShoppingCart, User, ChevronDown, Package, Star, MessageSquare, Heart, Settings, LogOut, Menu, X, MapPin, Truck, LayoutDashboard } from "lucide-react";
+import { ShoppingCart, User, ChevronDown, Package, Star, MessageSquare, Heart, Settings, LogOut, Menu, X, MapPin, LayoutDashboard } from "lucide-react";
 import { useCart } from "@/context/CartContext";
 import { useAuth } from "@/context/AuthContext";
 import { useAccountPages } from "@/context/StoreConfigContext";
@@ -15,10 +15,10 @@ export default function Header() {
   /**
    * Are the storefront account pages switched on?
    *
-   * While they are off there is no /login and no /signup, so the account icon
-   * is shown only when the customer has a SESSION - the profile that is
-   * created automatically at the checkout contact step. "Track order" is
-   * always there: it works for everybody.
+   * While they are off there is no /login and no /signup. The profile icon is
+   * shown to EVERY visitor - it opens /account, where the checkout-created
+   * profile lives. "Track order" is not part of the navbar any more: it is in
+   * the footer, on the order success page and in the order history.
    */
   const accountPages = useAccountPages();
   const router = useRouter();
@@ -71,9 +71,6 @@ export default function Header() {
         <Link href="/about" className="hover:text-gold-antique transition-colors">About Us</Link>
         <Link href="/blog" className="hover:text-gold-antique transition-colors">Journal</Link>
         <Link href="/contact" className="hover:text-gold-antique transition-colors">Contact</Link>
-        {/* The account pages can be switched off; tracking an order never can
-            - it works for a guest with an order number and a phone number. */}
-        <Link href="/track" className="hover:text-gold-antique transition-colors">Track Order</Link>
       </nav>
 
       {/* Right Actions */}
@@ -96,12 +93,14 @@ export default function Header() {
         </Link>
 
         {/**
-         * The account area.
+         * The profile icon - ALWAYS visible, for every visitor, sitting right
+         * beside the cart. It opens /account: the profile area that the
+         * checkout creates automatically.
          *
-         * It is shown when the customer has a session (the profile created at
-         * the checkout) or when the account pages are switched on and the
-         * customer is signed in. A visitor with neither gets NO icon and NO
-         * login link - there is nothing for them to log into.
+         * A visitor with no session gets the plain icon and an empty state
+         * that explains how a profile is created; there is no /login to send
+         * them to. With a session (or a sign-in, while the account pages are
+         * on) the icon carries the name and opens the dropdown menu.
          */}
         {(hasSession || (accountPages && isAuthenticated && user)) ? (
           <div className="relative shrink-0" ref={dropdownRef}>
@@ -181,13 +180,6 @@ export default function Header() {
                 >
                   <MapPin size={15} /> Addresses
                 </Link>
-                <Link
-                  href="/track"
-                  onClick={() => setDropdownOpen(false)}
-                  className="flex items-center gap-3 px-4 py-2.5 text-sm text-gray-700 hover:bg-bg-ivory hover:text-plum-deep transition-colors"
-                >
-                  <Truck size={15} /> Track Order
-                </Link>
                 {user?.role === 'admin' ? (
                   <a
                     href={process.env.NEXT_PUBLIC_ADMIN_URL || "/admin"}
@@ -208,16 +200,12 @@ export default function Header() {
               </div>
             )}
           </div>
-        ) : null}
-
-        {/* The sign-in icon, while the account pages exist. With them off there
-            is nothing to sign into, so the icon is not shown at all. */}
-        {accountPages && !hasSession && !isAuthenticated && (
+        ) : (
           <Link
-            href="/login"
+            href="/account"
             aria-label="My Profile"
             title="My Profile"
-            className="flex items-center text-bg-ivory hover:text-gold-antique transition-colors"
+            className="flex shrink-0 items-center text-bg-ivory hover:text-gold-antique transition-colors"
           >
             <User size={20} strokeWidth={1.5} />
           </Link>
@@ -272,34 +260,24 @@ export default function Header() {
             >
               Contact
             </Link>
-            {/* Tracking an order works for every guest - order number and
-                phone number, no account. */}
+            {/* The profile is always there: it opens /account. A visitor
+                without a session sees how one is created. */}
             <Link
-              href="/track"
+              href="/account"
               onClick={() => setMobileMenuOpen(false)}
               className="hover:text-gold-antique transition-colors pb-2 border-b border-gold/10"
             >
-              Track Order
+              My Profile
             </Link>
-            {/* The account links exist when there is a session (the profile
-                created at the checkout) or when the account pages are on. */}
+            {/* The orders exist only when there is something to show. */}
             {(hasSession || (accountPages && isAuthenticated)) && (
-              <>
-                <Link
-                  href="/account/profile"
-                  onClick={() => setMobileMenuOpen(false)}
-                  className="hover:text-gold-antique transition-colors pb-2 border-b border-gold/10"
-                >
-                  My Profile
-                </Link>
-                <Link
-                  href="/account/orders"
-                  onClick={() => setMobileMenuOpen(false)}
-                  className="hover:text-gold-antique transition-colors pb-2 border-b border-gold/10"
-                >
-                  My Orders
-                </Link>
-              </>
+              <Link
+                href="/account/orders"
+                onClick={() => setMobileMenuOpen(false)}
+                className="hover:text-gold-antique transition-colors pb-2 border-b border-gold/10"
+              >
+                My Orders
+              </Link>
             )}
           </nav>
         </div>

@@ -27,6 +27,14 @@ interface AuthContextType {
   /** True when this browser has a customer session (a profile exists). */
   hasSession: boolean;
   /**
+   * True once the backend has answered "is there a session in this browser?".
+   *
+   * Until then `hasSession` is false only because the answer has not arrived
+   * yet, so the profile area waits for it instead of flashing its empty state
+   * at a customer who does have one.
+   */
+  sessionChecked: boolean;
+  /**
    * True when the session is the checkout-created customer session.
    *
    * The cart and the wishlist stay in localStorage for such a session: they
@@ -133,6 +141,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
    * can only ask "is there a session, and whose profile is it?".
    */
   const [customerSession, setCustomerSession] = useState<CustomerProfile | null>(null);
+  const [sessionChecked, setSessionChecked] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [returnUrl, setReturnUrl] = useState<string | null>(null);
 
@@ -158,7 +167,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       .then((profile) => {
         if (!cancelled) setCustomerSession(profile);
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => {
+        // Also when there is no session at all: the answer arrived.
+        if (!cancelled) setSessionChecked(true);
+      });
     return () => {
       cancelled = true;
     };
@@ -269,6 +282,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         isGuestSession,
         customerSession,
         hasSession: !!customerSession,
+        sessionChecked,
         isCustomerSession: user?.scope === 'customer',
         openSession,
         closeSession,
