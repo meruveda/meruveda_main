@@ -1,23 +1,41 @@
 import { type NextRequest, NextResponse } from 'next/server'
 
 /**
- * Middleware — the request-level gate of the storefront.
+ * Middleware — lightweight JWT cookie check.
+ * The storefront auth is a client-side mock auth system.
+ * This middleware checks for the mock auth token cookie on protected paths.
  *
- * It no longer guards /account: the profile area shows its own empty state to
- * a visitor without a session (see app/account/ProfileEmptyState). Nothing on
- * the storefront is behind a login while the password pages are switched off,
- * so every request passes through and the check stays here as the single
- * place a path-based rule would be written.
+ * When the real backend is integrated, replace the cookie check
+ * with a server-side JWT verification call.
  */
-export async function proxy(_request: NextRequest) {
+export async function proxy(request: NextRequest) {
+  const { pathname, searchParams } = request.nextUrl;
 
-  // /account is NOT gated here any more.
+  const authToken =
+    request.cookies.get('meruveda_auth_token')?.value ||
+    // Fallback: check Authorization header (for future API use)
+    request.headers.get('Authorization')?.replace('Bearer ', '');
+
+  // Protect /account routes.
   //
-  // The profile is created at the checkout, so a visitor without a session
-  // has nothing to redirect to - there is no /login while the password pages
-  // are switched off. They see the profile area's own empty state ("Place an
-  // order to create your profile"), once, with no loop. The account layout
-  // decides that: it needs the backend's answer about the session cookie.
+  // The password pages are switched off, so there is no /login to send a
+  // visitor to: the profile is created at the checkout. A visitor with no
+  // session is sent ONCE to the shop with a small explanation
+  // ("Place an order to create your profile"). The account layout verifies
+  // the session with the backend and repeats the redirect when the cookie is
+  // stale, so there is never a loop and never a /login.
+  if (pathname.startsWith('/account')) {
+    const hasSession =
+      request.cookies.get('mv_customer_session')?.value ||
+      request.cookies.get('meruveda_auth_token')?.value;
+    if (!hasSession) {
+      const url = request.nextUrl.clone();
+      url.pathname = '/';
+      url.search = '';
+      url.searchParams.set('profile', 'required');
+      return NextResponse.redirect(url);
+    }
+  }
 
   // /checkout is intentionally public: guests may browse and check out, and
   // identity is collected by the OTP form on the page itself.

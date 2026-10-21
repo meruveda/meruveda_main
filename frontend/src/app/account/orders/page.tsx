@@ -78,19 +78,6 @@ export default function OrdersPage() {
       <SectionHeader
         title="My Orders"
         subtitle="Track shipments, view invoices or buy again."
-        action={
-          /**
-           * Tracking lives at /track for everybody - with an order number and
-           * a phone number it works without a profile at all, and it is the
-           * same page the footer and the order success page link to.
-           */
-          <Link
-            href="/track"
-            className="flex items-center gap-1.5 px-4 py-2 border border-gray-200 rounded-xl text-xs font-bold text-gray-700 hover:bg-ivory hover:border-gold transition-colors shrink-0"
-          >
-            <Truck size={14} /> Track an order
-          </Link>
-        }
       />
 
       {/* Search + filters */}

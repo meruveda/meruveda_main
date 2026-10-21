@@ -5,7 +5,6 @@ import { displayEmail } from "@/types/account";
 import { useRouter, usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import ProfileEmptyState from "./ProfileEmptyState";
 import {
   LayoutDashboard,
   User,
@@ -22,7 +21,6 @@ import {
   LifeBuoy,
 } from "lucide-react";
 
-
 const MENU = [
   { name: "Overview", href: "/account", icon: LayoutDashboard, exact: true },
   { name: "My Profile", href: "/account/profile", icon: User },
@@ -37,33 +35,84 @@ const MENU = [
 ];
 
 /**
- * The area without a session.
+ * The guard against a redirect loop.
  *
- * There is no redirect and there is no /login to redirect to: the visitor
- * gets the empty state ("Place an order to create your profile" + Shop Now)
- * in place of the account, once, and the URL stays exactly where they put it.
- * Nothing here can loop, because nothing here navigates.
+ * The account pages send a visitor who is not signed in to /login. If the
+ * session is in a state where the login page sends them straight back (for
+ * example a guest checkout session, which has a user but is not a real
+ * account), the browser bounces between the two pages.
+ *
+ * Every redirect is therefore counted, per target, in a short window. Once the
+ * limit is reached the page stops redirecting and asks the visitor to sign in,
+ * so the loop is always broken.
  */
+const REDIRECT_KEY = "mv_auth_redirects";
+const REDIRECT_LIMIT = 2;
+const REDIRECT_WINDOW_MS = 10000;
+
+function countRedirect(path: string): number {
+  if (typeof window === "undefined") return 0;
+  try {
+    const raw = window.sessionStorage.getItem(REDIRECT_KEY);
+    const now = Date.now();
+    const state = raw ? (JSON.parse(raw) as { path: string; count: number; at: number }) : null;
+    if (!state || state.path !== path || now - state.at > REDIRECT_WINDOW_MS) {
+      window.sessionStorage.setItem(REDIRECT_KEY, JSON.stringify({ path, count: 1, at: now }));
+      return 1;
+    }
+    const count = state.count + 1;
+    window.sessionStorage.setItem(REDIRECT_KEY, JSON.stringify({ path, count, at: now }));
+    return count;
+  } catch {
+    return 1;
+  }
+}
+
+function clearRedirects() {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.removeItem(REDIRECT_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
 export default function AccountClientLayout({ children }: { children: React.ReactNode }) {
-  const { user, isAuthenticated, hasSession, sessionChecked, isLoading, logout, closeSession } = useAuth();
+  const { user, isAuthenticated, hasSession, isLoading, logout, closeSession } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [redirectBlocked, setRedirectBlocked] = useState(false);
 
   /**
    * The customer has a session (the profile created at the checkout) or is
-   * signed in: the area is open. Otherwise the empty state takes its place -
-   * after the backend has actually answered, so a session that is still being
-   * restored is never mistaken for "no session".
+   * signed in: the area is open.
+   *
+   * Without one there is nothing to show - and no /login to send them to,
+   * because the account pages are switched off. The server already sent them
+   * to the shop; this is the belt-and-braces guard that stops any loop.
    */
   const allowed = hasSession || isAuthenticated;
-  const waiting = isLoading || !sessionChecked;
+
+  useEffect(() => {
+    if (isLoading || allowed) {
+      // A session: the counter is not needed any more.
+      if (allowed) clearRedirects();
+      return;
+    }
+    if (countRedirect(pathname) > REDIRECT_LIMIT) {
+      // The loop is broken: stay here and explain.
+      setRedirectBlocked(true);
+      return;
+    }
+    router.push(`/?profile=required`);
+  }, [isLoading, allowed, router, pathname]);
 
   useEffect(() => {
     setMobileOpen(false);
   }, [pathname]);
 
-  if (waiting) {
+  if (isLoading || (!user && !hasSession)) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-ivory">
         <div className="text-center">
@@ -75,24 +124,41 @@ export default function AccountClientLayout({ children }: { children: React.Reac
   }
 
   /**
-   * No session and no sign-in: the plain explanation instead of the account.
+   * The redirect guard stopped the loop. The visitor has no session, so the
+   * page says so plainly and offers the way in - instead of bouncing forever.
    */
-  if (!allowed) {
-    return <ProfileEmptyState />;
+  if (redirectBlocked) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-ivory px-6">
+        <div className="card max-w-md w-full p-8 text-center">
+          <h1 className="font-playfair font-bold text-deep-purple text-2xl mb-3">
+            Place an order to create your profile
+          </h1>
+          <p className="text-gray-600 mb-6">
+            Your profile is created automatically when you check out - your name, your mobile
+            number and your email address. Place an order and your order history will be
+            waiting for you here.
+          </p>
+          <div className="flex flex-col sm:flex-row gap-3 justify-center">
+            <Link href="/products" className="btn btn-primary inline-flex items-center justify-center">
+              Continue shopping
+            </Link>
+            <button
+              type="button"
+              onClick={() => {
+                clearRedirects();
+                setRedirectBlocked(false);
+                router.refresh();
+              }}
+              className="btn btn-outline inline-flex items-center justify-center"
+            >
+              Try again
+            </button>
+          </div>
+        </div>
+      </div>
+    );
   }
-
-  /**
-   * Logging out closes the session - the httpOnly cookie is cleared by the
-   * backend. The orders stay in the database: they are simply not reachable
-   * from this browser any more. A password sign-in (while the account pages
-   * are on) uses the normal logout instead.
-   */
-  const handleLogout = () => {
-    if (hasSession) void closeSession();
-    else logout();
-    router.push("/");
-  };
-
 
   const isActive = (href: string, exact?: boolean) => {
     if (exact) return pathname === href;
@@ -143,7 +209,10 @@ export default function AccountClientLayout({ children }: { children: React.Reac
               );
             })}
             <button
-              onClick={handleLogout}
+              onClick={() => {
+                logout();
+                router.push("/");
+              }}
               className="flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold text-red-500 hover:bg-red-50 w-full transition-all text-left mt-4 border-t border-gray-100 pt-4"
             >
               <LogOut size={17} className="text-red-400" />
@@ -186,7 +255,10 @@ export default function AccountClientLayout({ children }: { children: React.Reac
                   );
                 })}
                 <button
-                  onClick={handleLogout}
+                  onClick={() => {
+                    logout();
+                    router.push("/");
+                  }}
                   className="flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-semibold text-red-500 hover:bg-red-50 text-left"
                 >
                   <LogOut size={16} /> Logout

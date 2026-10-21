@@ -2,14 +2,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 
 /**
- * The profile icon in the header.
+ * The account icon in the header.
  *
- * It is ALWAYS there - for a visitor with no session, for the profile created
- * at the checkout and for a real sign-in - and it opens /account, where a
- * visitor without a session is told how a profile is created. There is no
- * /login and no /signup anywhere. "Track order" is not part of the navbar
- * any more: it lives in the footer, on the order success page and in the
- * order history.
+ * The storefront has no /login while the account pages are switched off, so
+ * the icon is shown only when the customer has a SESSION - the profile that
+ * is created automatically at the checkout contact step. A visitor with
+ * neither gets no icon and no login link, and "Track order" is always there.
  */
 
 const mockCart = { cartCount: 0 };
@@ -17,7 +15,6 @@ const authState: any = {
   user: null,
   isAuthenticated: false,
   hasSession: false,
-  sessionChecked: true,
   customerSession: null,
   logout: vi.fn(),
   closeSession: vi.fn(),
@@ -43,15 +40,10 @@ function linkTexts(): string[] {
   return Array.from(document.querySelectorAll("a")).map((a) => (a.textContent || "").trim());
 }
 
-function openMobileMenu() {
-  fireEvent.click(screen.getByLabelText("Toggle Navigation Menu"));
-}
-
 function resetAuth() {
   authState.user = null;
   authState.isAuthenticated = false;
   authState.hasSession = false;
-  authState.sessionChecked = true;
   authState.customerSession = null;
 }
 
@@ -62,41 +54,32 @@ describe("the header for a visitor with no session", () => {
   });
   afterEach(cleanup);
 
-  it("shows the profile icon for every visitor, opening the profile area", () => {
+  it("shows no profile icon and no account links", () => {
     renderHeader(false);
 
-    const profile = screen.queryByLabelText("My Profile");
-    expect(profile).not.toBeNull();
-    expect(profile?.getAttribute("href")).toBe("/account");
+    // The profile icon is the only link with the "My Profile" label.
+    expect(screen.queryByLabelText("My Profile")).toBeNull();
+    const texts = linkTexts();
+    expect(texts).not.toContain("My Profile");
+    expect(texts).not.toContain("My Orders");
+    expect(texts).not.toContain("Login");
+    expect(texts).not.toContain("Sign up");
+    expect(texts.some((t) => /my account/i.test(t))).toBe(false);
   });
 
-  it("keeps the profile icon in the mobile menu too", () => {
+  it("still offers the cart and a way to track an order", () => {
     renderHeader(false);
 
-    openMobileMenu();
-    expect(linkTexts()).toContain("My Profile");
-  });
-
-  it("keeps the cart - a guest still shops", () => {
-    renderHeader(false);
+    const texts = linkTexts();
+    expect(texts.some((t) => /track order/i.test(t))).toBe(true);
+    // The cart is still there - a guest still shops.
     expect(document.querySelector('a[href="/checkout"]')).not.toBeNull();
   });
 
-  it("shows no login link - there is nothing to log into", () => {
+  it("shows no login link either - there is nothing to log into", () => {
     renderHeader(false);
     expect(document.querySelector('a[href="/login"]')).toBeNull();
     expect(document.querySelector('a[href="/signup"]')).toBeNull();
-    expect(linkTexts()).not.toContain("Login");
-    expect(linkTexts()).not.toContain("Sign up");
-  });
-
-  it("has no 'Track order' in the navbar at all", () => {
-    renderHeader(false);
-
-    expect(linkTexts().some((t) => /track order/i.test(t))).toBe(false);
-
-    openMobileMenu();
-    expect(linkTexts().some((t) => /track order/i.test(t))).toBe(false);
   });
 });
 
@@ -128,18 +111,16 @@ describe("the header for a customer with a session", () => {
 
     const profile = screen.queryByLabelText("My Profile");
     expect(profile).not.toBeNull();
-    expect(profile?.getAttribute("href")).toBe("/account");
 
-    openMobileMenu();
+    fireEvent.click(screen.getByLabelText("Toggle Navigation Menu"));
     const texts = linkTexts();
     expect(texts).toContain("My Profile");
     expect(texts).toContain("My Orders");
   });
 
-  it("never shows a login link and never 'Track order'", () => {
+  it("never shows a login link", () => {
     renderHeader(false);
     expect(document.querySelector('a[href="/login"]')).toBeNull();
-    expect(linkTexts().some((t) => /track order/i.test(t))).toBe(false);
   });
 });
 
@@ -150,17 +131,16 @@ describe("the header when the account pages are switched on", () => {
   });
   afterEach(cleanup);
 
-  it("still opens the profile area, never the login page", () => {
+  it("brings the sign-in icon back for a visitor with no session", () => {
     renderHeader(true);
 
     const profile = screen.queryByLabelText("My Profile");
     expect(profile).not.toBeNull();
-    expect(profile?.getAttribute("href")).toBe("/account");
-    expect(document.querySelector('a[href="/login"]')).toBeNull();
+    expect(profile?.getAttribute("href")).toBe("/login");
   });
 
-  it("keeps 'Track order' out of the navbar", () => {
+  it("keeps the track order link", () => {
     renderHeader(true);
-    expect(linkTexts().some((t) => /track order/i.test(t))).toBe(false);
+    expect(linkTexts().some((t) => /track order/i.test(t))).toBe(true);
   });
 });
