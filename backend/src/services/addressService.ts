@@ -39,6 +39,25 @@ export class AddressBookUnavailable extends Error {
   readonly status = 503;
 }
 
+/**
+ * Whose address book is being addressed.
+ *
+ * `sessionId` is set for a checkout session. While the number is unverified
+ * the book contains ONLY the addresses that session created - the address
+ * book of the account that happened to own the same number stays hidden.
+ * Once the number is verified (`verified`), the whole account is visible.
+ */
+export interface AddressScope {
+  userId: string;
+  sessionId?: string | null;
+  verified?: boolean;
+}
+
+/** True when the rows must be scoped to the session rather than the account. */
+function sessionScoped(scope: AddressScope): boolean {
+  return Boolean(scope.sessionId) && !scope.verified;
+}
+
 async function assertAvailable(): Promise<void> {
   if (await hasTable(TABLE)) return;
   throw new AddressBookUnavailable('The address book is unavailable right now.');
@@ -112,6 +131,26 @@ async function listFor(userId: string): Promise<UserAddress[]> {
   return (await addressesRepo.listForUser(userId)) as UserAddress[];
 }
 
+/** The address book of a scope: the session's own rows, or the account's. */
+async function listForScope(scope: AddressScope): Promise<UserAddress[]> {
+  await assertAvailable();
+  if (sessionScoped(scope)) {
+    return (await addressesRepo.listForSession(
+      scope.sessionId as string,
+      scope.userId,
+      false,
+    )) as UserAddress[];
+  }
+  if (scope.sessionId) {
+    return (await addressesRepo.listForSession(
+      scope.sessionId,
+      scope.userId,
+      Boolean(scope.verified),
+    )) as UserAddress[];
+  }
+  return listFor(scope.userId);
+}
+
 /**
  * Clear the default flag across the book, optionally sparing one row.
  * Non-fatal: the subsequent write still lands with the correct flag.
@@ -124,13 +163,24 @@ async function clearDefaults(userId: string, exceptId?: string): Promise<void> {
   }
 }
 
+async function clearDefaultsForScope(scope: AddressScope, exceptId?: string): Promise<void> {
+  if (!sessionScoped(scope)) return clearDefaults(scope.userId, exceptId);
+  try {
+    await addressesRepo.clearDefaultsForSession(scope.sessionId as string, exceptId);
+  } catch (error: any) {
+    console.error('[addresses] could not clear existing defaults:', error?.message || error);
+  }
+}
+
 export const addressService = {
-  async list(userId: string): Promise<UserAddress[]> {
-    return listFor(userId);
+  async list(scope: AddressScope | string): Promise<UserAddress[]> {
+    const s = typeof scope === 'string' ? ({ userId: scope } as AddressScope) : scope;
+    return listForScope(s);
   },
 
-  async get(userId: string, id: string): Promise<UserAddress | null> {
-    const all = await listFor(userId);
+  async get(scope: AddressScope | string, id: string): Promise<UserAddress | null> {
+    const s = typeof scope === 'string' ? ({ userId: scope } as AddressScope) : scope;
+    const all = await listForScope(s);
     return all.find((a) => a.id === id) || null;
   },
 
@@ -141,57 +191,77 @@ export const addressService = {
    * duplicate. The comparison is on the canonical fingerprint, so re-ordering to
    * "  bengaluru " does not slip past it.
    */
-  async create(userId: string, input: any): Promise<{ address: UserAddress; created: boolean }> {
+  async create(scope: AddressScope | string, input: any): Promise<{ address: UserAddress; created: boolean }> {
+    const s = typeof scope === 'string' ? ({ userId: scope } as AddressScope) : scope;
     const row = normalize(input);
-    const existing = await listFor(userId);
+    const existing = await listForScope(s);
     const match = existing.find((a) => fingerprint(a) === fingerprint(row));
     if (match) return { address: match, created: false };
 
     // First address is the default; otherwise honour the request.
     const isDefault = row.is_default || existing.length === 0;
-    if (isDefault) await clearDefaults(userId);
+    if (isDefault) await clearDefaultsForScope(s);
 
-    const data = await addressesRepo.insertAddress({ ...row, is_default: isDefault, user_id: userId });
+    const data = await addressesRepo.insertAddress({
+      ...row,
+      is_default: isDefault,
+      user_id: s.userId,
+      ...(s.sessionId ? { session_id: s.sessionId } : {}),
+    });
     return { address: data as UserAddress, created: true };
   },
 
-  async update(userId: string, id: string, input: any): Promise<UserAddress | null> {
+  async update(scope: AddressScope | string, id: string, input: any): Promise<UserAddress | null> {
+    const s = typeof scope === 'string' ? ({ userId: scope } as AddressScope) : scope;
     await assertAvailable();
-    const current = await this.get(userId, id);
+    const current = await this.get(s, id);
     if (!current) return null;
 
     const row = normalize({ ...current, ...input });
-    if (row.is_default) await clearDefaults(userId, id);
+    if (row.is_default) await clearDefaultsForScope(s, id);
 
-    const data = await addressesRepo.updateAddress(userId, id, {
-      ...row,
-      updated_at: new Date().toISOString(),
-    });
+    const patch = { ...row, updated_at: new Date().toISOString() };
+    const data = sessionScoped(s)
+      ? await addressesRepo.updateAddressForSession(s.sessionId as string, id, patch)
+      : await addressesRepo.updateAddress(s.userId, id, patch);
     if (!data) throw new Error('Address not found');
     return data as UserAddress;
   },
 
-  async remove(userId: string, id: string): Promise<boolean> {
+  async remove(scope: AddressScope | string, id: string): Promise<boolean> {
+    const s = typeof scope === 'string' ? ({ userId: scope } as AddressScope) : scope;
     await assertAvailable();
-    await addressesRepo.deleteAddress(userId, id);
+    if (sessionScoped(s)) {
+      await addressesRepo.deleteAddressForSession(s.sessionId as string, id);
+    } else {
+      await addressesRepo.deleteAddress(s.userId, id);
+    }
 
     // Never leave a customer with no default address.
-    const rest = await listFor(userId);
+    const rest = await listForScope(s);
     if (rest.length && !rest.some((a) => a.is_default)) {
-      await addressesRepo.setDefault(userId, rest[0].id);
+      if (sessionScoped(s)) {
+        await addressesRepo.setDefaultForSession(s.sessionId as string, rest[0].id);
+      } else {
+        await addressesRepo.setDefault(s.userId, rest[0].id);
+      }
     }
     return true;
   },
 
-  async setDefault(userId: string, id: string): Promise<UserAddress | null> {
+  async setDefault(scope: AddressScope | string, id: string): Promise<UserAddress | null> {
+    const s = typeof scope === 'string' ? ({ userId: scope } as AddressScope) : scope;
     await assertAvailable();
-    const current = await this.get(userId, id);
+    const current = await this.get(s, id);
     if (!current) return null;
-    await clearDefaults(userId);
-    const data = await addressesRepo.setDefault(userId, id);
+    await clearDefaultsForScope(s);
+    const data = sessionScoped(s)
+      ? await addressesRepo.setDefaultForSession(s.sessionId as string, id)
+      : await addressesRepo.setDefault(s.userId, id);
     if (!data) throw new Error('Address not found');
     return data as UserAddress;
   },
+
 
 
   /**

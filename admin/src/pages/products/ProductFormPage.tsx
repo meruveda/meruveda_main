@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
+import { apiErrorMessage } from '../../utils/errorMessage'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { ArrowLeft, Save, Sparkles, ImagePlus, X, Link2, Upload } from 'lucide-react'
 import { productService } from '../../services/productService'
@@ -196,7 +197,10 @@ export const ProductFormPage: React.FC = () => {
               return { id: uploaded.id || img.id, url: uploaded.url || uploaded.public_url, alt: name };
             } catch (err) {
               console.error('Failed to upload image', err);
-              throw new Error('Failed to upload one or more images');
+              // Keep the server's own reason: "That image is too large..." or
+              // "That file could not be read as an image..." is exactly what the
+              // operator needs to see.
+              throw new Error(apiErrorMessage(err, 'Failed to upload one or more images'));
             }
           }
           return { id: img.id, url: img.url, alt: name };
@@ -253,7 +257,7 @@ export const ProductFormPage: React.FC = () => {
       }
       navigate('/products')
     } catch (err: any) {
-      toast.error(err.message || 'Operation failed')
+      toast.error(apiErrorMessage(err, 'Operation failed'))
     } finally {
       setIsLoading(false)
     }

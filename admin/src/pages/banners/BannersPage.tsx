@@ -8,6 +8,7 @@ import { mediaService } from '../../services/mediaService';
 import { Modal, ConfirmDialog } from '../../components/ui/Modal';
 import toast from 'react-hot-toast';
 import { MediaLibrarySelectModal } from '../../components/ui/MediaLibrarySelectModal';
+import { apiErrorMessage } from '../../utils/errorMessage';
 
 // ─── Image Upload Zone ────────────────────────────────────────────────────────
 interface ImageUploadZoneProps {
@@ -36,7 +37,7 @@ const ImageUploadZone: React.FC<ImageUploadZoneProps> = ({ value, onChange, isUp
       onChange(url);
       toast.success('Image uploaded successfully!');
     } catch (err: any) {
-      toast.error(err?.message || 'Image upload failed.');
+      toast.error(apiErrorMessage(err, 'Image upload failed.'));
     } finally {
       setIsUploading(false);
     }

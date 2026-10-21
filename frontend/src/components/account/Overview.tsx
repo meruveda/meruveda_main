@@ -20,37 +20,48 @@ import { EmptyState, StatusBadge } from "./ui";
 
 /* Profile header card — avatar, name, contact, member-since + Edit action. */
 export function ProfileHeaderCard({ onEdit }: { onEdit: () => void }) {
-  const { user } = useAuth();
-  if (!user) return null;
-  const createdRaw = (user as unknown as Record<string, unknown>).created_at as string | undefined;
+  const { user, customerSession } = useAuth();
+  // The customer session holds the profile that was created at the checkout.
+  const name =
+    customerSession?.name || [user?.firstName, user?.lastName].filter(Boolean).join(" ") || "";
+  const email = customerSession?.email || user?.email || "";
+  const phone = customerSession?.phone || user?.phone || "";
+  const verified = customerSession ? customerSession.phoneVerified : user?.phone_verified !== false;
+  const createdRaw = (user as unknown as Record<string, unknown> | null)?.created_at as string | undefined;
   const since = memberSinceLabel(createdRaw);
+  if (!user && !customerSession) return null;
   return (
     <section className="bg-white p-6 md:p-7 rounded-2xl border border-gray-100 shadow-sm flex items-center gap-5 flex-wrap" aria-label="Profile summary">
-      {user.avatar ? (
+      {user?.avatar ? (
         // eslint-disable-next-line @next/next/no-img-element
-        <img src={user.avatar} alt={`${user.firstName} ${user.lastName}`} className="w-20 h-20 rounded-full object-cover border-2 border-gold/40" />
+        <img src={user.avatar} alt={name} className="w-20 h-20 rounded-full object-cover border-2 border-gold/40" />
       ) : (
         <div className="w-20 h-20 rounded-full bg-gold flex items-center justify-center text-deep-purple text-2xl font-bold shrink-0" aria-hidden>
-          {(user.firstName?.[0] || "U").toUpperCase()}{(user.lastName?.[0] || "").toUpperCase()}
+          {(name?.[0] || "U").toUpperCase()}
         </div>
       )}
       <div className="flex-1 min-w-[200px]">
         <h2 className="text-2xl font-playfair font-bold text-deep-purple leading-tight">
-          {user.firstName} {user.lastName}
+          {name}
         </h2>
-        <p className="text-sm text-gray-500 truncate mt-0.5">{displayEmail(user.email) || "No email on file"}</p>
-        {user.phone && <p className="text-sm text-gray-500">+91 {normalizePhone10(user.phone)}</p>}
-        <p className="text-xs text-gray-400 mt-1.5 flex items-center gap-1.5">
+        <p className="text-sm text-gray-500 truncate mt-0.5">{displayEmail(email) || "No email on file"}</p>
+        {phone && <p className="text-sm text-gray-500">{phone}</p>}
+        <p className="text-xs text-gray-400 mt-1.5 flex items-center gap-1.5 flex-wrap">
           <ShieldCheck size={13} className="text-sage" />
-          {since ? `Member since ${since}` : "Verified MeruVeda customer"}
+          {since ? `Member since ${since}` : "Profile created at checkout"}
+          {verified ? null : (
+            <span className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5">
+              Phone not verified
+            </span>
+          )}
         </p>
       </div>
-      <button
-        onClick={onEdit}
+      <Link
+        href="/account/profile"
         className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-bold bg-deep-purple text-white hover:bg-deep-purple/90 transition-colors"
       >
         <Pencil size={15} /> Edit Profile
-      </button>
+      </Link>
     </section>
   );
 }

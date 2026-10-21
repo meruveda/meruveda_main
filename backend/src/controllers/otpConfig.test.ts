@@ -57,3 +57,34 @@ test('OTP_MODE=auto requires the OTP', async () => {
     (config as any).otpMode = before;
   }
 });
+
+/**
+ * The account-pages switch.
+ *
+ * The storefront reads `accountPages` from this same endpoint, so the flag can
+ * be flipped on the backend without a rebuild of the frontend.
+ */
+test('ACCOUNT_PAGES_ENABLED=false tells the storefront that the account pages are off', async () => {
+  const before = config.accountPagesEnabled;
+  try {
+    (config as any).accountPagesEnabled = false;
+    const res = fakeRes();
+    await otpConfig({} as any, res, () => undefined);
+    assert.equal(res.body.data.accountPages, false);
+    assert.match(String(res.headers['Cache-Control'] || ''), /no-store/);
+  } finally {
+    (config as any).accountPagesEnabled = before;
+  }
+});
+
+test('ACCOUNT_PAGES_ENABLED=true tells the storefront that the account pages are live', async () => {
+  const before = config.accountPagesEnabled;
+  try {
+    (config as any).accountPagesEnabled = true;
+    const res = fakeRes();
+    await otpConfig({} as any, res, () => undefined);
+    assert.equal(res.body.data.accountPages, true);
+  } finally {
+    (config as any).accountPagesEnabled = before;
+  }
+});

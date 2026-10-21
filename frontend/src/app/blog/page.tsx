@@ -2,7 +2,7 @@ export const revalidate = 300; // ISR: public pages are revalidated every 5 minu
 import MediaImage from "@/components/MediaImage";
 import Link from "next/link";
 import { API_BASE_URL } from "@/utils/apiUrl";
-import { apiGetJson, isBuildPhase } from "@/utils/apiFetch";
+import { apiGetJson, shouldThrowOnFetchFailure } from "@/utils/apiFetch";
 
   async function getBlogPosts() {
     // Retried, and on total failure the error is THROWN so the App Router
@@ -14,8 +14,8 @@ import { apiGetJson, isBuildPhase } from "@/utils/apiFetch";
       });
       return json?.data || [];
     } catch (error) {
-      if (isBuildPhase()) {
-        console.warn('[Blog/list] the catalogue service was not reachable during the build.');
+      if (!shouldThrowOnFetchFailure()) {
+        console.warn('[Blog/list] the catalogue service was not reachable.');
         return [];
       }
       throw error;

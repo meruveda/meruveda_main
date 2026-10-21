@@ -101,6 +101,7 @@ app.get('/api/health/deep', authorize, async (_req, res) => {
 });
 
 import authRoutes from './routes/authRoutes';
+import accountRoutes from './routes/accountRoutes';
 import healthRoutes from './routes/healthRoutes';
 import productRoutes from './routes/productRoutes';
 import orderRoutes from './routes/orderRoutes';
@@ -131,6 +132,7 @@ import path from 'path';
 
 // Routes
 app.use('/api/auth', authRoutes);
+app.use('/api/account', accountRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/orders', orderRoutes);
 app.use('/api/cart', cartRoutes);
@@ -160,10 +162,15 @@ app.use('/api/images', imageRoutes);
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   console.error(redactSecrets(err?.stack || err?.message || err));
   const status = err.status || 500;
+  // The stack is NEVER sent to a client in production, whatever NODE_ENV says.
+  // NODE_ENV is a secret in the deployed environment and it has been observed
+  // set to a non-production value, which leaked raw stack traces (including
+  // library internals) to the browser. The stack is for the server log only.
+  const isProduction = process.env.NODE_ENV === 'production' || process.env.VERCEL === '1';
   res.status(status).json({
     error: {
       message: redactSecrets(err.message || 'Internal Server Error'),
-      ...(process.env.NODE_ENV === 'development' && { stack: redactSecrets(err.stack) })
+      ...(!isProduction && { stack: redactSecrets(err.stack) })
     }
   });
 });

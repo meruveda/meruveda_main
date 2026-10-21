@@ -14,9 +14,11 @@ import {
   ArrowRight,
   Download,
   ShoppingBag,
+  Truck,
 } from "lucide-react";
 import axiosInstance from "@/api/axiosInstance";
 import { useCart } from "@/context/CartContext";
+import { useAccountPages } from "@/context/StoreConfigContext";
 import { track, claimPurchaseOnce } from "@/lib/analytics";
 
 interface OrderDetails {
@@ -63,6 +65,8 @@ export default function CheckoutSuccessPage({ params }: { params: Promise<{ orde
   const { user, isLoading: authLoading } = useAuth();
   const router = useRouter();
   const { clearCart } = useCart();
+/** The order history lives in the account area, which can be switched off. */
+const accountPages = useAccountPages();
   const [order, setOrder] = useState<OrderDetails | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -185,9 +189,15 @@ export default function CheckoutSuccessPage({ params }: { params: Promise<{ orde
         <Package size={48} className="text-gray-300 mb-4" />
         <h2 className="text-xl font-bold text-deep-purple mb-2">Order Not Found</h2>
         <p className="text-gray-500 text-sm mb-6">{error || "We couldn't find this order."}</p>
-        <Link href="/account/orders" className="bg-deep-purple text-white px-6 py-3 rounded-xl font-bold text-sm">
-          View All Orders
-        </Link>
+        {accountPages ? (
+          <Link href="/account/orders" className="bg-deep-purple text-white px-6 py-3 rounded-xl font-bold text-sm">
+            View All Orders
+          </Link>
+        ) : (
+          <Link href="/track" className="bg-deep-purple text-white px-6 py-3 rounded-xl font-bold text-sm">
+            Track Your Order
+          </Link>
+        )}
       </div>
     );
   }
@@ -356,11 +366,23 @@ export default function CheckoutSuccessPage({ params }: { params: Promise<{ orde
             )}
             {isDownloadingInvoice ? "Preparing..." : "Download Invoice"}
           </button>
+          {/* The order history lives in the account area, which can be
+              switched off - so the link is only shown when it exists. */}
+          {accountPages && (
+            <Link
+              href="/account/orders"
+              className="bg-deep-purple text-white hover:bg-deep-purple/90 px-8 py-4 rounded-xl font-bold transition-all text-sm flex items-center justify-center gap-2 shadow-sm"
+            >
+              <Package size={16} /> View Order History
+            </Link>
+          )}
+          {/* Tracking always works: a guest tracks with the order number and
+              the phone number, no account needed. */}
           <Link
-            href="/account/orders"
-            className="bg-deep-purple text-white hover:bg-deep-purple/90 px-8 py-4 rounded-xl font-bold transition-all text-sm flex items-center justify-center gap-2 shadow-sm"
+            href="/track"
+            className="border-2 border-gold text-gold hover:bg-gold/10 px-8 py-4 rounded-xl font-bold transition-all text-sm flex items-center justify-center gap-2"
           >
-            <Package size={16} /> View Order History
+            <Truck size={16} /> Track Your Order
           </Link>
           <Link
             href="/products"

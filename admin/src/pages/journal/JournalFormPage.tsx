@@ -3,6 +3,7 @@ import { useParams, useNavigate, Link } from 'react-router-dom'
 import { ArrowLeft, UploadCloud, X, Image as ImageIcon } from 'lucide-react'
 import { blogService } from '../../services/blogService'
 import { mediaService } from '../../services/mediaService'
+import { apiErrorMessage } from '../../utils/errorMessage'
 import { useAuth } from '../../context/AuthContext'
 import toast from 'react-hot-toast'
 import { RichTextEditor } from '../../components/RichTextEditor'
@@ -69,8 +70,12 @@ export const JournalFormPage: React.FC = () => {
       const url = (uploaded as any).url || (uploaded as any).fileUrl || ''
       setFeaturedImage(url)
       toast.success('Image uploaded!')
-    } catch {
-      toast.error('Image upload failed. The URL will be set from preview only.')
+    } catch (err: any) {
+      // The upload failed: the local preview is a base64 data URL, which must
+      // never be saved as the article image (the storefront cannot load it).
+      // It is cleared and the reason from the server is shown.
+      setFeaturedImage('')
+      toast.error(apiErrorMessage(err, 'Image upload failed.'))
     } finally {
       setIsUploading(false)
     }
@@ -133,7 +138,7 @@ export const JournalFormPage: React.FC = () => {
       }
       navigate('/journal')
     } catch (err) {
-      toast.error('Operation failed')
+      toast.error(apiErrorMessage(err, 'Operation failed'))
     } finally {
       setIsLoading(false)
     }

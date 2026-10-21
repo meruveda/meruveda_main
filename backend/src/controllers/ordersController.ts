@@ -10,6 +10,7 @@ import { config, invoiceWhatsapp } from '../config/env';
 import { timingSafeEqualStr } from '../utils/timingSafe';
 import { shiprocketTrackingService } from '../services/shiprocket/tracking.service';
 import { shiprocketWebhookService } from '../services/shiprocket/webhook.service';
+import { hasColumn } from '../services/schemaGuard';
 import { runSweepIfDue, refreshOrderState } from '../services/sweepService';
 import { deleteInvoiceClaim, downloadInvoicePdf, readInvoiceState } from '../services/invoiceStore';
 import { generateInvoicePdf, getOrderForInvoice } from '../services/invoiceService';
@@ -56,6 +57,30 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
     // guest checkout) and should be followed up.
     const body = { ...req.body };
     body.phone_verified = req.user?.phone_verified === true;
+
+    /**
+     * The checkout session is recorded ON the order, so the order history of
+     * a session can be scoped to the orders that session created. A verified
+     * session also carries the customer id, so the history fills in by
+     * itself.
+     */
+    const session = req.customerSession;
+    if (session) {
+      if (await hasColumn('orders', 'session_id')) {
+        body.session_id = session.id.startsWith('user:') ? null : session.id;
+      }
+      if (session.userId) {
+        body.user_id = session.userId;
+      }
+      // The email the customer gave at the checkout: it is where the order
+      // confirmation and the invoice go.
+      if (session.email && (await hasColumn('orders', 'email'))) {
+        body.email = session.email;
+      }
+    } else if (req.body?.email && (await hasColumn('orders', 'email'))) {
+      body.email = String(req.body.email).trim().toLowerCase();
+    }
+
     const data = await orderService.createOrder(body, req.user?.id);
 
     // Every order is invoiced the moment it is created â€” COD and prepaid alike,
@@ -629,6 +654,18 @@ export const getMyOrders = async (req: Request, res: Response, next: NextFunctio
     if (!userId) {
       return res.status(401).json({ error: { message: 'Unauthorized' } });
     }
+
+    /**
+     * A checkout session (opened at the contact step) sees ONLY the orders it
+     * created itself. It is never given the account's older history - that is
+     * the security rule.
+     */
+    const session = req.customerSession;
+    if (session) {
+      const data = await ordersRepo.getOrdersForSession(session.id, session.userId, session.verifiedAccount);
+      return res.json({ data });
+    }
+
     // Unverified quick-login sessions may place orders but must not browse
     // order history (which embeds full shipping addresses + phone numbers).
     if (req.user?.phone_verified === false) {

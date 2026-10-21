@@ -214,7 +214,9 @@
         "shiprocket_push_error": "text",
         "shiprocket_pushed_at": "timestamp with time zone",
         "shiprocket_push_started_at": "timestamp with time zone",
-        "invoice_number": "text"
+        "invoice_number": "text",
+        "session_id": "uuid",
+        "email": "text"
       }
     },
     "otps": {
@@ -352,7 +354,8 @@
         "country": "text",
         "is_default": "boolean",
         "created_at": "timestamp with time zone",
-        "updated_at": "timestamp with time zone"
+        "updated_at": "timestamp with time zone",
+        "session_id": "uuid"
       }
     },
     "users": {
@@ -371,7 +374,8 @@
         "reset_password_expires": "timestamp with time zone",
         "address": "jsonb",
         "last_login_at": "timestamp with time zone",
-        "phone_verified": "boolean"
+        "phone_verified": "boolean",
+        "source": "text"
       }
     },
     "whatsapp_message_log": {

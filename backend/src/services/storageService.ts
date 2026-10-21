@@ -5,7 +5,23 @@ import * as mediaRepo from '../database/repos/media';
 import { deleteObjects, mediaBucket, publicUrlFor, putObject, r2Configured } from './r2';
 
 const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
-const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5 MB
+
+/**
+ * The largest upload the function will accept.
+ *
+ * It is BELOW the platform's own request-body limit (4.5 MB for a Vercel
+ * serverless function), and deliberately so: a file between 4.5 MB and 5 MB
+ * used to pass this check and then be rejected by the platform with an
+ * unhelpful 413 FUNCTION_PAYLOAD_TOO_LARGE that the admin could not act on.
+ * Now the limit is enforced here, with a message that says what to do.
+ */
+export const MAX_FILE_SIZE = 4 * 1024 * 1024; // 4 MB - under the platform limit
+
+/**
+ * The platform's hard request-body limit. A file above this never reaches the
+ * function, so the limit above is set under it on purpose.
+ */
+export const PLATFORM_BODY_LIMIT = 4.5 * 1024 * 1024;
 
 /** The historic bucket names are now key prefixes inside the single media bucket. */
 export const MEDIA_FOLDERS = ['general-media', 'banners', 'journal'] as const;
@@ -30,12 +46,23 @@ export const storageService = {
     if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
       const error = new Error('Invalid file type. Only JPG, JPEG, PNG, and WEBP are allowed.');
       (error as any).status = 400;
+      (error as any).code = 'INVALID_FILE_TYPE';
       throw error;
     }
 
     if (file.size > MAX_FILE_SIZE) {
-      const error = new Error('File is too large. Maximum size is 5MB.');
+      const error = new Error(
+        `That image is ${(file.size / (1024 * 1024)).toFixed(1)} MB. The maximum is 4 MB - please resize or compress it and try again.`,
+      );
+      (error as any).status = 413;
+      (error as any).code = 'FILE_TOO_LARGE';
+      throw error;
+    }
+
+    if (!file.size || file.size === 0) {
+      const error = new Error('That file is empty. Please choose an image and try again.');
       (error as any).status = 400;
+      (error as any).code = 'EMPTY_FILE';
       throw error;
     }
   },
@@ -67,13 +94,57 @@ export const storageService = {
     const baseName = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
     const baseKey = `${safeFolder}/${baseName}.webp`;
 
-    const full = await sharp(file.buffer).rotate().webp({ quality: 82 }).toBuffer();
+    /**
+     * Decode the image ONCE, up front.
+     *
+     * A file that is not really an image (a renamed .txt, a truncated upload,
+     * an unsupported format) used to blow up inside sharp and surface as a
+     * bare 500 with a raw stack trace. It is now a clear 400: "this file could
+     * not be read as an image".
+     */
+    let metadata: sharp.Metadata;
+    try {
+      metadata = await sharp(file.buffer, { failOn: 'error' }).metadata();
+    } catch (err: any) {
+      console.error('[storage] the uploaded file could not be read as an image:', err?.message || err);
+      const error = new Error(
+        'That file could not be read as an image. Please upload a valid JPG, PNG or WEBP file.',
+      );
+      (error as any).status = 400;
+      (error as any).code = 'UNREADABLE_IMAGE';
+      throw error;
+    }
+    // sharp does not always throw for a file it does not recognise - it just
+    // reports no format. A file with no format (or one that is not an image
+    // we accept) is rejected here, which is what stops a renamed .txt from
+    // reaching the converter and blowing up as a 500.
+    const format = String(metadata?.format || '').toLowerCase();
+    if (!metadata?.width || !metadata?.height || !['jpeg', 'jpg', 'png', 'webp'].includes(format)) {
+      const error = new Error(
+        'That file could not be read as an image. Please upload a valid JPG, PNG or WEBP file.',
+      );
+      (error as any).status = 400;
+      (error as any).code = 'UNREADABLE_IMAGE';
+      throw error;
+    }
+
+    let full: Buffer;
+    try {
+      full = await sharp(file.buffer).rotate().webp({ quality: 82 }).toBuffer();
+    } catch (err: any) {
+      console.error('[storage] the image could not be converted to webp:', err?.message || err);
+      const error = new Error(
+        'That image could not be processed. Please try a different JPG, PNG or WEBP file.',
+      );
+      (error as any).status = 400;
+      (error as any).code = 'UNPROCESSABLE_IMAGE';
+      throw error;
+    }
     await putObject(mediaBucket(), baseKey, full, {
       contentType: 'image/webp',
       cacheControl: IMMUTABLE,
     });
 
-    const metadata = await sharp(file.buffer).metadata();
     const variants: string[] = [];
     for (const width of VARIANTS) {
       if (metadata.width && metadata.width <= width) continue;

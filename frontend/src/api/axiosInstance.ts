@@ -7,6 +7,16 @@ const axiosInstance = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
+  /**
+   * The customer session (the profile created at the checkout contact step)
+   * lives in an httpOnly cookie. In production the API is on the SAME origin
+   * (the platform rewrite forwards /api/* to the backend), so the browser
+   * attaches the cookie on its own. In local development the API is on
+   * another port, and without this the cookie would never be sent - the
+   * session would exist but every request would look like a visitor with no
+   * session.
+   */
+  withCredentials: true,
 });
 
 axiosInstance.interceptors.request.use(
@@ -74,6 +84,12 @@ axiosInstance.interceptors.response.use(
       return Promise.reject(error);
     }
     if (error.response && error.response.status === 401) {
+      // A checkout-only GUEST session must never be wiped by a 401: the
+      // visitor is not logged in and does not want to be, and reloading the
+      // page would throw away the checkout they are in the middle of.
+      if (isGuestToken()) {
+        return Promise.reject(error);
+      }
       const isAuthRequest = error.config && (
         error.config.url.includes('/auth/login') ||
         error.config.url.includes('/auth/register') ||

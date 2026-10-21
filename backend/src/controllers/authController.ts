@@ -27,6 +27,15 @@ import {
 import { verifyToken } from '../utils/jwt';
 
 /**
+ * The answer a customer gets when the account pages are switched off.
+ *
+ * The storefront tells them what to do instead (check out as a guest with a
+ * name and a phone number) instead of a bare error.
+ */
+export const ACCOUNT_PAGES_DISABLED_MESSAGE =
+  'Account sign-in is temporarily unavailable. You can order as a guest - just your name and phone number at checkout.';
+
+/**
  * Registration is public, so `role` in the body can never be trusted on its own:
  * any visitor could otherwise POST { role: 'admin' } and escalate. The role field is
  * only honoured when the caller also presents a JWT that belongs to a real admin
@@ -53,6 +62,17 @@ export const register = async (req: Request, res: Response, next: NextFunction) 
 
     const trustedAdminCaller = requestedRoleIsAdminTrusted(req);
     const requestedRole = trustedAdminCaller && (role === 'admin' || role === 'customer') ? role : 'customer';
+
+    /**
+     * The storefront sign-up page is switched off (ACCOUNT_PAGES_ENABLED is
+     * false). A customer account cannot be created from the storefront; the
+     * admin app may still add one (its "Add user" flow carries an admin JWT).
+     */
+    if (!config.accountPagesEnabled && !trustedAdminCaller) {
+      return res.status(404).json({
+        error: { message: ACCOUNT_PAGES_DISABLED_MESSAGE, code: 'ACCOUNT_PAGES_DISABLED' },
+      });
+    }
 
     const cleanEmail = typeof email === 'string' ? email.trim() : '';
     if (cleanEmail && !isValidEmail(cleanEmail)) {
@@ -165,6 +185,18 @@ export const login = async (req: Request, res: Response, next: NextFunction) => 
       return res.status(401).json({ error: { message: 'Invalid credentials' } });
     }
 
+    /**
+     * The storefront account pages are switched off (ACCOUNT_PAGES_ENABLED is
+     * false): the only way a customer identifies themselves is the checkout
+     * contact step. The ADMIN app is a separate app with its own sign-in
+     * page, and it keeps working - only a customer account is refused.
+     */
+    if (!config.accountPagesEnabled && user.role !== 'admin') {
+      return res.status(404).json({
+        error: { message: ACCOUNT_PAGES_DISABLED_MESSAGE, code: 'ACCOUNT_PAGES_DISABLED' },
+      });
+    }
+
     if (!user.active) {
       return res.status(401).json({ error: { message: 'Account is disabled' } });
     }
@@ -226,6 +258,13 @@ export const getMe = async (req: Request, res: Response, next: NextFunction) => 
 
 export const forgotPassword = async (req: Request, res: Response, next: NextFunction) => {
   try {
+    // The storefront "forgot password" page is switched off with the rest of
+    // the account pages (ACCOUNT_PAGES_ENABLED is false).
+    if (!config.accountPagesEnabled) {
+      return res.status(404).json({
+        error: { message: ACCOUNT_PAGES_DISABLED_MESSAGE, code: 'ACCOUNT_PAGES_DISABLED' },
+      });
+    }
     const GENERIC_OK = 'If an account exists, password reset instructions have been sent to its registered email address.';
     const { email, phone, identifier } = req.body;
 
@@ -285,6 +324,13 @@ export const forgotPassword = async (req: Request, res: Response, next: NextFunc
 
 export const resetPassword = async (req: Request, res: Response, next: NextFunction) => {
   try {
+    // The storefront "reset password" page is switched off with the rest of
+    // the account pages (ACCOUNT_PAGES_ENABLED is false).
+    if (!config.accountPagesEnabled) {
+      return res.status(404).json({
+        error: { message: ACCOUNT_PAGES_DISABLED_MESSAGE, code: 'ACCOUNT_PAGES_DISABLED' },
+      });
+    }
     const { token, newPassword } = req.body;
     if (!token || !newPassword) {
       return res.status(400).json({ error: { message: 'Token and new password are required' } });

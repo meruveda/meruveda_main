@@ -1,7 +1,7 @@
 import { notFound } from 'next/navigation';
 import ProductDetailClient from './ProductDetailClient';
 import { API_BASE_URL } from '@/utils/apiUrl';
-import { apiGetJson, isBuildPhase } from '@/utils/apiFetch';
+import { apiGetJson, shouldThrowOnFetchFailure } from '@/utils/apiFetch';
 
 export const revalidate = 300; // ISR: public pages are revalidated every 5 minutes
 
@@ -17,8 +17,8 @@ export const revalidate = 300; // ISR: public pages are revalidated every 5 minu
       });
       return json?.data ?? null;
     } catch (error) {
-      if (isBuildPhase()) {
-        console.warn('[Product/detail] the catalogue service was not reachable during the build.');
+      if (!shouldThrowOnFetchFailure()) {
+        console.warn('[Product/detail] the catalogue service was not reachable.');
         return null;
       }
       throw error;

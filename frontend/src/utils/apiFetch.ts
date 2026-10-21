@@ -19,7 +19,14 @@
 
 const DEFAULT_ATTEMPTS = 3;
 const DEFAULT_TOTAL_TIMEOUT_MS = 8000;
-const BACKOFF_MS = [300, 800];
+/**
+ * The gap between attempts.
+ *
+ * Long enough to survive a server restart (in development the backend is
+ * restarted by nodemon whenever a file changes, and it is down for a couple of
+ * seconds), short enough to stay inside the eight second budget.
+ */
+const BACKOFF_MS = [800, 2000];
 
 export interface ApiFetchOptions {
   /** How many attempts in total. */
@@ -55,6 +62,21 @@ export class ApiUnavailableError extends Error {
  */
 export const isBuildPhase = (): boolean =>
   process.env.NEXT_PHASE === 'phase-production-build';
+
+/**
+ * True only when a failed fetch must become a thrown error.
+ *
+ * That is PRODUCTION RUNTIME, and only there:
+ *   - in production a render that throws keeps serving the last good ISR
+ *     page, which is exactly what protects a customer from a cold backend;
+ *   - during the BUILD the backend is usually not up yet, and failing the
+ *     deployment for that would be wrong;
+ *   - in development there is no ISR cache to protect, and a developer
+ *     without the backend running should still see the page (with a friendly
+ *     "please refresh" state) rather than an error screen.
+ */
+export const shouldThrowOnFetchFailure = (): boolean =>
+  !isBuildPhase() && process.env.NODE_ENV === 'production';
 
 /**
  * GET a JSON endpoint with retries, and fail LOUDLY.

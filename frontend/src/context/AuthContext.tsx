@@ -1,7 +1,7 @@
 "use client";
 
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { authService, AuthUser, SignupData } from '@/services/authService';
+import { authService, AuthUser, SignupData, CustomerProfile } from '@/services/authService';
 
 // ------------------------------------------------------------------
 // Types
@@ -16,6 +16,33 @@ interface AuthContextType {
    * never counts as `isAuthenticated`.
    */
   isGuestSession: boolean;
+  /**
+   * The customer session created at the checkout contact step.
+   *
+   * This is what opens the profile area (/account, the order history, the
+   * addresses). It exists as soon as the customer presses "Continue" at the
+   * checkout - no password, no OTP.
+   */
+  customerSession: CustomerProfile | null;
+  /** True when this browser has a customer session (a profile exists). */
+  hasSession: boolean;
+  /**
+   * True when the session is the checkout-created customer session.
+   *
+   * The cart and the wishlist stay in localStorage for such a session: they
+   * are personal to the browser, and the backend's cart and wishlist belong
+   * to a real account.
+   */
+  isCustomerSession: boolean;
+  /** Open (or re-open) the customer session - the checkout "Continue" button. */
+  openSession: (
+    name: string,
+    phone: string,
+    email: string,
+    extra?: { website?: string; renderedAt?: number },
+  ) => Promise<CustomerProfile>;
+  /** Close the customer session. The orders stay in the database. */
+  closeSession: () => Promise<void>;
   isLoading: boolean;
   /** URL to redirect to after a successful login */
   returnUrl: string | null;
@@ -98,16 +125,68 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
    * guest token hits endpoints that refuse it and the storefront breaks.
    */
   const isGuestSession = user?.scope === 'guest';
+  /**
+   * The customer session (the profile created at the checkout).
+   *
+   * It is restored on every page load by asking the backend, because the
+   * session itself lives in an httpOnly cookie: the page cannot read it, it
+   * can only ask "is there a session, and whose profile is it?".
+   */
+  const [customerSession, setCustomerSession] = useState<CustomerProfile | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [returnUrl, setReturnUrl] = useState<string | null>(null);
 
-  // Restore session on mount
+  // Restore the session on mount
   useEffect(() => {
     const restored = authService.getCurrentUser();
     if (restored) {
       setUser(restored);
     }
     setIsLoading(false);
+  }, []);
+
+  /**
+   * Ask the backend whether this browser has a customer session.
+   *
+   * It is asked once per page load, and the answer is what decides whether
+   * the account icon is shown at all.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    authService
+      .getSession()
+      .then((profile) => {
+        if (!cancelled) setCustomerSession(profile);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /**
+   * Open the customer session - the checkout "Continue" button.
+   *
+   * The profile is created automatically when the number is new, and the
+   * session sees only what this browser created.
+   */
+  const openSession = useCallback(
+    async (name: string, phone: string, email: string, extra?: { website?: string; renderedAt?: number }) => {
+      const { profile } = await authService.openSession(name, phone, email, extra);
+      setCustomerSession(profile);
+      const restored = authService.getCurrentUser();
+      if (restored) setUser(restored);
+      return profile;
+    },
+    [],
+  );
+
+  /** Close the session. The orders stay in the database. */
+  const closeSession = useCallback(async () => {
+    await authService.closeSession();
+    setCustomerSession(null);
+    setUser(null);
+    setReturnUrl(null);
   }, []);
 
   const login = useCallback(async (identifier: string, password: string, rememberMe = false) => {
@@ -167,8 +246,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     <AuthContext.Provider
       value={{
         user,
+        /**
+         * A customer counts as signed in when there is a session: a full
+         * login, or the profile created at the checkout contact step.
+         */
         isAuthenticated: !!user && !isGuestSession,
-    isGuestSession,
+        isGuestSession,
+        customerSession,
+        hasSession: !!customerSession,
+        isCustomerSession: user?.scope === 'customer',
+        openSession,
+        closeSession,
         isLoading,
         returnUrl,
         setReturnUrl,
@@ -180,9 +268,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         resendOtp,
         verifyOtp,
         quickLogin,
-    guestCheckout,
-    getOtpStatus,
-    getOtpConfig,
+        guestCheckout,
+        getOtpStatus,
+        getOtpConfig,
         saveProfile,
       }}
     >

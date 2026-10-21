@@ -80,7 +80,10 @@ function customerPhone(order: any): string {
   return order?.delivery_phone || order?.shipping_address?.phone || order?.billing_address?.phone || '';
 }
 function customerEmail(order: any): string {
-  return order?.users?.email || order?.user_email || '';
+  // The email the customer gave at the checkout comes first: it is the
+  // address they expect the confirmation and the invoice at. The account's
+  // email is the fallback for the older orders.
+  return order?.email || order?.users?.email || order?.user_email || '';
 }
 function customerFirstName(order: any): string {
   const full = order?.shipping_address?.fullName || order?.billing_address?.fullName || '';
@@ -379,7 +382,14 @@ export async function sendInvoiceDispatch(orderId: string): Promise<InvoiceDispa
   const runEmailChannel = async (): Promise<ChannelStatus> => {
     const toEmail = customerEmail(order);
     if (!toEmail) return 'disabled';
-    if (!isEmailConfigured()) return 'disabled';
+    if (!isEmailConfigured()) {
+      // Loud, but never fatal: the order is placed and the invoice is issued.
+      console.warn(
+        `[Invoice] no email provider is configured (RESEND_API_KEY missing) - order ${order.order_number} ` +
+          'will NOT be emailed. The customer still gets the invoice on WhatsApp and can download it.',
+      );
+      return 'disabled';
+    }
 
     const existing = await readInvoiceState(orderId);
     if (existing?.channels?.email?.status === 'sent') return 'skipped';

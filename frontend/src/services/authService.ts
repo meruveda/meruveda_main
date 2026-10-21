@@ -16,10 +16,26 @@ export interface AuthUser {
    * 'guest' = a checkout-only session. It may place an order and read that
    * order; it may not read the account history, the addresses or the
    * profile.
+   *
+   * 'customer' = the session created at the checkout contact step. It sees
+   * the profile, the addresses and the order history it created itself.
    */
-  scope?: 'guest' | 'full';
+  scope?: 'guest' | 'full' | 'customer';
   /** False when the number was never proven (a guest checkout). */
   phone_verified?: boolean;
+}
+
+/**
+ * The customer profile created at the checkout contact step.
+ *
+ * This is the profile of THIS session - never the profile of an account that
+ * happened to own the same phone number.
+ */
+export interface CustomerProfile {
+  name: string;
+  phone: string;
+  email: string;
+  phoneVerified: boolean;
 }
 
 export interface AuthResponse {
@@ -61,6 +77,83 @@ function unwrapError(error: any): never {
 }
 
 export const authService = {
+  /**
+   * Open the customer session - the "Continue" button of the checkout.
+   *
+   * The profile is created automatically when the number is new, and the
+   * session is scoped to what this browser created. The answer never says
+   * whether the number already existed.
+   */
+  openSession: async (
+    name: string,
+    phone: string,
+    email: string,
+    extra?: { website?: string; renderedAt?: number },
+  ): Promise<{ profile: CustomerProfile; token: string }> => {
+    try {
+      const response = await axiosInstance.post('/account/session', {
+        name,
+        phone,
+        email,
+        ...extra,
+      });
+      const data = response.data?.data || {};
+      const profile = data.profile as CustomerProfile;
+      const token = data.token as string;
+      if (token) {
+        persistSession(
+          token,
+          {
+            id: profile?.phone || phone,
+            email: profile?.email || email,
+            firstName: String(profile?.name || '').split(/\s+/)[0] || '',
+            lastName: String(profile?.name || '').split(/\s+/).slice(1).join(' '),
+            role: 'customer',
+            phone: profile?.phone,
+            scope: 'customer',
+            phone_verified: false,
+          },
+          true,
+        );
+      }
+      return { profile, token };
+    } catch (error: any) {
+      unwrapError(error);
+    }
+  },
+
+  /**
+   * The session of this browser, if there is one.
+   *
+   * The storefront asks on every page load to decide whether to show the
+   * account icon. A missing session is not an error - it answers null.
+   */
+  getSession: async (): Promise<CustomerProfile | null> => {
+    try {
+      const response = await axiosInstance.get('/account/session');
+      return (response.data?.data?.profile || null) as CustomerProfile | null;
+    } catch {
+      return null;
+    }
+  },
+
+  /** Close the session. The orders stay in the database. */
+  closeSession: async (): Promise<void> => {
+    try {
+      await axiosInstance.post('/account/session/logout');
+    } catch {
+      /* the cookie is cleared by the server anyway */
+    }
+    try {
+      localStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(USER_KEY);
+      sessionStorage.removeItem(TOKEN_KEY);
+      sessionStorage.removeItem(USER_KEY);
+      document.cookie = `${TOKEN_KEY}=; path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT; SameSite=Lax`;
+    } catch {
+      /* ignore */
+    }
+  },
   /**
    * Mobile-first login. `identifier` is the 10-digit mobile number (primary)
    * or, for legacy accounts, the email address. The backend auto-detects the

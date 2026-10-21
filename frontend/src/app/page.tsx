@@ -7,7 +7,9 @@ import { reviews } from "@/data/reviews";
 import HeroCarousel from "@/components/HeroCarousel";
 import WhyChooseUs from "@/components/WhyChooseUs";
 import { API_BASE_URL } from "@/utils/apiUrl";
-import { apiGetJson, isBuildPhase } from "@/utils/apiFetch";
+import { apiGetJson, shouldThrowOnFetchFailure } from "@/utils/apiFetch";
+import { CatalogueLoading } from "@/components/CatalogueLoading";
+import ProfileRequiredNotice from "@/components/ProfileRequiredNotice";
 
 export const metadata = {
   title: "MERUVEDA | Authentic Ayurvedic Products",
@@ -103,18 +105,22 @@ interface Review {
 }
 
 export default async function Home() {
-  // At BUILD time the backend is usually not reachable yet (the new frontend is
-  // compiled before the new backend is live), so the build must not fail for
-  // that. At RUNTIME the error is thrown, which makes the App Router keep
-  // serving the last good ISR page instead of replacing the home page with an
-  // empty hero.
-  const buildPhase = isBuildPhase();
+  // The backend is a separate service and can be COLD right after a deploy (or
+  // simply not running in development). The fetch is retried for about eight
+  // seconds; if it still fails:
+  //   - in PRODUCTION the error is thrown, so the App Router keeps serving the
+  //     last good ISR page instead of replacing the home page with an empty
+  //     hero;
+  //   - during the BUILD, and in development, a friendly "please refresh"
+  //     state is rendered instead - a deployment must not fail because the
+  //     backend is not up yet, and a developer without the backend should
+  //     still see the page.
   const settle = async <T,>(label: string, run: () => Promise<T>, fallback: T): Promise<T> => {
     try {
       return await run();
     } catch (error) {
-      if (buildPhase) {
-        console.warn(`[Home] ${label} was not reachable during the build.`);
+      if (!shouldThrowOnFetchFailure()) {
+        console.warn(`[Home] ${label} was not reachable.`);
         return fallback;
       }
       throw error;
@@ -128,11 +134,25 @@ export default async function Home() {
     settle('blogs', getBlogPosts, [] as Awaited<ReturnType<typeof getBlogPosts>>),
   ]);
 
+  // Nothing came back from the catalogue: show the friendly state rather than
+  // an empty page.
+  if (!products.length && !banners.length) {
+    return (
+      <div className="min-h-screen bg-ivory/30 flex items-center justify-center px-6">
+        <CatalogueLoading label="the catalogue" />
+      </div>
+    );
+  }
+
   const reviews = featuredReviews;
   const postsToShow = blogPosts.slice(0, 3);
 
   return (
     <div className="pb-20 relative">
+      {/* The visitor was sent here from the profile area because they have no
+          profile yet. One small, dismissible line - never a loop. */}
+      <ProfileRequiredNotice />
+
       {/* Hero Slideshow Section */}
       <HeroCarousel initialBanners={banners} />
 

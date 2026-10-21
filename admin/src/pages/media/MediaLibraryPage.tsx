@@ -5,6 +5,7 @@ import { MediaFile } from '../../types'
 import { formatFileSize, formatDate } from '@meruveda/shared'
 import { Modal } from '../../components/ui/Modal'
 import toast from 'react-hot-toast'
+import { apiErrorMessage } from '../../utils/errorMessage'
 
 export const MediaLibraryPage: React.FC = () => {
   const [files, setFiles] = useState<MediaFile[]>([])
@@ -45,7 +46,7 @@ export const MediaLibraryPage: React.FC = () => {
       toast.success('File uploaded successfully!')
       fetchFiles()
     } catch (err) {
-      toast.error('Upload failed')
+      toast.error(apiErrorMessage(err, 'Upload failed'))
     } finally {
       setIsLoading(false)
     }

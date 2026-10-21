@@ -6,12 +6,14 @@ import {
   deleteAddress,
   setDefaultAddress,
 } from '../controllers/addressController';
-import { requireAuth, requireFullAuth } from '../middleware/auth';
+import { requireAuth, requireCustomerSession } from '../middleware/auth';
 
 const router = Router();
 
-// The address book is always personal data: no route is public.
-router.use(requireAuth as any, requireFullAuth as any);
+// The address book is always personal data: no route is public. A checkout
+// session gets its own book (the rows it created); a real account gets its
+// own.
+router.use(requireAuth as any, requireCustomerSession as any);
 
 router.get('/', listAddresses as any);
 router.post('/', createAddress as any);

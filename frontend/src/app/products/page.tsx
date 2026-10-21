@@ -1,7 +1,7 @@
 export const revalidate = 300; // ISR: public pages are revalidated every 5 minutes
 import ProductGrid from "@/components/ProductGrid";
 import { API_BASE_URL } from "@/utils/apiUrl";
-import { apiGetJson, isBuildPhase } from "@/utils/apiFetch";
+import { apiGetJson, shouldThrowOnFetchFailure } from "@/utils/apiFetch";
 import { CatalogueLoading } from "@/components/CatalogueLoading";
 
 export const metadata = {
@@ -28,8 +28,8 @@ async function getProducts() {
   try {
     json = await apiGetJson<any>(targetUrl, { next: { revalidate: 300 }, label: 'Products' });
   } catch (error) {
-    if (isBuildPhase()) {
-      console.warn('[Products] the catalogue service was not reachable during the build.');
+    if (!shouldThrowOnFetchFailure()) {
+      console.warn('[Products] the catalogue service was not reachable.');
       return { products: [], unavailable: true };
     }
     throw error;

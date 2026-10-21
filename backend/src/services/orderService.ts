@@ -1066,7 +1066,7 @@ async function executeShiprocketPush(order: any) {
     billing_pincode: billing.zipCode || shipping.zipCode || '',
     billing_state: billing.state || shipping.state || '',
     billing_country: 'India',
-    billing_email: order.user_email || 'customer@meruveda.com',
+    billing_email: order.email || order.user_email || 'customer@meruveda.com',
     // shipping_is_billing=true, so Shiprocket needs one valid Indian number.
     // Billing may be a foreign cardholder phone; the delivery phone wins.
     billing_phone: shippingPhone10,
@@ -1079,7 +1079,7 @@ async function executeShiprocketPush(order: any) {
     shipping_pincode: shipping.zipCode || '',
     shipping_country: 'India',
     shipping_state: shipping.state || '',
-    shipping_email: order.user_email || 'customer@meruveda.com',
+    shipping_email: order.email || order.user_email || 'customer@meruveda.com',
     shipping_phone: shippingPhone10,
     order_items: shiprocketItems,
     payment_method: isCOD ? 'COD' : 'Prepaid',

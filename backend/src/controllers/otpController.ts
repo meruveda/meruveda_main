@@ -7,6 +7,7 @@ import { normalizePhone, isWhatsappConfigured } from '../services/whatsappServic
 import { canonicalPhone, isPlaceholderEmail, isValidEmail, isValidPhone10 } from '../utils/phone';
 import { otpAvailability } from '../services/whatsappTemplateResolver';
 import * as guestCheckoutService from '../services/guestCheckoutService';
+import * as customerSessionsRepo from '../database/repos/customerSessions';
 import { config } from '../config/env';
 import { hasColumn } from '../services/schemaGuard';
 
@@ -129,10 +130,17 @@ export const otpStatus = async (_req: Request, res: Response) => {
  * read at request time (never baked into a build) so a store-wide switch -
  * OTP_MODE=off while a WhatsApp template is reviewed - takes effect on the
  * next page load, with no rebuild.
+ *
+ * `{ accountPages: boolean }` is the same kind of switch for the account
+ * pages: while it is false the storefront sends /login, /signup and
+ * /account/* back to the home page and only the checkout contact step
+ * identifies a customer. It is read from the same request-time config, so
+ * ACCOUNT_PAGES_ENABLED=true brings the pages back without a rebuild.
  */
 export const otpConfig = async (_req: Request, res: Response) => {
   // Never cached: the mode can change at any moment.
   res.set('Cache-Control', 'no-store, max-age=0');
+  const accountPages = config.accountPagesEnabled;
   try {
     if (config.otpMode === 'off') {
       return res.json({
@@ -140,6 +148,7 @@ export const otpConfig = async (_req: Request, res: Response) => {
           otpRequired: false,
           mode: 'off',
           guestCheckout: true,
+          accountPages,
           message: 'Order updates and your invoice will come to this WhatsApp number.',
         },
       });
@@ -150,6 +159,7 @@ export const otpConfig = async (_req: Request, res: Response) => {
         otpRequired: availability.required,
         mode: availability.mode,
         guestCheckout: false,
+        accountPages,
         message: null,
       },
     });
@@ -157,7 +167,13 @@ export const otpConfig = async (_req: Request, res: Response) => {
     console.error('[OTP] config probe failed:', error?.message || error);
     // The safe default is to require the OTP.
     res.json({
-      data: { otpRequired: true, mode: 'auto', guestCheckout: false, message: null },
+      data: {
+        otpRequired: true,
+        mode: 'auto',
+        guestCheckout: false,
+        accountPages,
+        message: null,
+      },
     });
   }
 };
@@ -230,6 +246,46 @@ export const updateCheckoutProfile = async (req: Request, res: Response, next: N
   try {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ error: { message: 'Unauthorized' } });
+
+    /**
+     * A checkout session keeps its own profile: the name and the email it was
+     * opened with. The session's rows are updated, and so is the customer row
+     * when the session has one.
+     */
+    const session = (req as any).customerSession;
+    if (session && session.id && !session.id.startsWith('user:')) {
+      const patch: Record<string, any> = {};
+      const name = req.body?.name ?? (req.body?.firstName ? `${req.body.firstName} ${req.body.lastName || ''}`.trim() : undefined);
+      if (name) {
+        const cleanName = String(name).trim().replace(/\s+/g, ' ');
+        if (cleanName.length >= 2) patch.name = cleanName;
+      }
+      if (req.body?.email) {
+        const cleanEmail = String(req.body.email).trim().toLowerCase();
+        if (!isValidEmail(cleanEmail) || isPlaceholderEmail(cleanEmail)) {
+          return res.status(400).json({ error: { message: 'Please enter a valid email address' } });
+        }
+        patch.email = cleanEmail;
+      }
+      if (Object.keys(patch).length > 0) {
+        await customerSessionsRepo.updateSession(session.id, patch).catch((err: any) =>
+          console.error('[Session] could not update the session profile:', err?.message || err),
+        );
+      }
+      return res.json({
+        message: 'Profile updated.',
+        user: {
+          id: session.id,
+          email: patch.email ?? session.email ?? '',
+          firstName: String(patch.name ?? session.name ?? '').split(/\s+/)[0] || '',
+          lastName: String(patch.name ?? session.name ?? '').split(/\s+/).slice(1).join(' '),
+          phone: session.phone || '',
+          role: 'customer',
+          scope: 'customer',
+          phone_verified: false,
+        },
+      });
+    }
 
     const { name, firstName, lastName, email, address, phone } = req.body;
     const patch: any = { updated_at: new Date().toISOString() };

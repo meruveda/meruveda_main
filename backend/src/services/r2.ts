@@ -20,8 +20,20 @@ import { Readable } from 'node:stream';
 
 let client: S3Client | null = null;
 
+/**
+ * A test seam: swap the S3 client.
+ *
+ * The media upload has to be testable without the network and without writing
+ * a single object, so the client can be replaced with a mock.
+ */
+let testClient: S3Client | null = null;
+
+export function __setR2ClientForTests(next: S3Client | null): void {
+  testClient = next;
+}
+
 export function r2Configured(): boolean {
-  if (client) return true;
+  if (client || testClient) return true;
   return Boolean(
     process.env.R2_ACCOUNT_ID &&
       process.env.R2_ACCESS_KEY_ID &&
@@ -42,6 +54,7 @@ export function r2Endpoint(): string {
 }
 
 export function getR2Client(): S3Client {
+  if (testClient) return testClient;
   if (!client) {
     if (!r2Configured()) {
       throw Object.assign(
@@ -60,11 +73,6 @@ export function getR2Client(): S3Client {
     });
   }
   return client;
-}
-
-/** Test seam. */
-export function __setR2ClientForTests(next: S3Client | null): void {
-  client = next;
 }
 
 export function publicBaseUrl(): string {

@@ -262,6 +262,19 @@ export const config = {
     const raw = (process.env.OTP_MODE || 'auto').trim().toLowerCase();
     return raw === 'on' || raw === 'off' ? raw : 'auto';
   })(),
+  /**
+   * The storefront account pages (login, signup, forgot/reset password and
+   * everything under /account).
+   *
+   * While this is false the ONLY way a customer identifies themselves is the
+   * checkout contact step (name + number + Continue). The pages are not
+   * deleted - they are switched off, so setting
+   * ACCOUNT_PAGES_ENABLED=true brings every one of them back unchanged.
+   *
+   * The admin app is NOT affected: the admin signs in on /admin/login, which
+   * is a separate app with its own session.
+   */
+  accountPagesEnabled: (process.env.ACCOUNT_PAGES_ENABLED || '').trim().toLowerCase() === 'true',
   // Base URL of this backend — used by the webhook docs helper.
   backendUrl: process.env.BACKEND_URL || '',
 

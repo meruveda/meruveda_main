@@ -32,6 +32,13 @@ const authState: any = {
   verifyOtp: vi.fn(),
   saveProfile: vi.fn(),
   guestCheckout: vi.fn(),
+  /** The checkout opens the customer session (the profile) on Continue. */
+  openSession: vi.fn(async (name: string, phone: string, email: string) => ({
+    name,
+    phone,
+    email,
+    phoneVerified: false,
+  })),
   /**
    * The checkout asks the server whether it needs an OTP. The default here is
    * the OTP flow (an OTP is required), which is what the suite asserts.
@@ -67,6 +74,17 @@ function fillContact(name = "Atharva Bhargava", mobile = "9876543210") {
   fireEvent.change(mobileInput, { target: { value: mobile } });
 }
 
+/**
+ * The email of the CONTACT step.
+ *
+ * The profile is created from it when the customer presses "Continue", so it
+ * is part of the contact step and not only of the address step.
+ */
+function fillContactEmail(email = "atharva@example.com") {
+  const field = document.getElementById("checkout-contact-email") as HTMLInputElement | null;
+  if (field) fireEvent.change(field, { target: { value: email } });
+}
+
 /** Fill a complete delivery address so `addressValid` is true. */
 function fillAddress() {
   const set = (placeholder: string, value: string) => {
@@ -86,8 +104,12 @@ function fillAddress() {
   fireEvent.change(stateBox, { target: { value: "Madhya Pradesh" } });
   fireEvent.keyDown(stateBox, { key: "Enter" });
 
-  const email = document.querySelector('input[type="email"]') as HTMLInputElement | null;
-  if (email) fireEvent.change(email, { target: { value: "atharva@example.com" } });
+  // There are two email fields now: the one in the CONTACT step (the profile)
+  // and the one in the delivery step. Both are filled.
+  const emails = Array.from(document.querySelectorAll('input[type="email"]')) as HTMLInputElement[];
+  for (const email of emails) {
+    fireEvent.change(email, { target: { value: "atharva@example.com" } });
+  }
 }
 
 const placeOrderButton = () =>
@@ -137,6 +159,7 @@ describe("checkout — identity is WhatsApp OTP, never a login form", () => {
     await waitFor(() => screen.getByRole("button", { name: /Verify your WhatsApp number to continue/i }));
 
     fillContact();
+  fillContactEmail();
     fillAddress();
     const button = placeOrderButton() as HTMLButtonElement;
     expect(button.disabled).toBe(true);
@@ -150,6 +173,7 @@ describe("checkout — identity is WhatsApp OTP, never a login form", () => {
     expect(screen.queryByPlaceholderText("Enter 6-digit OTP")).toBeNull();
 
     fillContact();
+  fillContactEmail();
     fireEvent.click(screen.getByRole("button", { name: /Send OTP/i }));
 
     const otp = await screen.findByPlaceholderText("Enter 6-digit OTP");
@@ -163,6 +187,7 @@ describe("checkout — identity is WhatsApp OTP, never a login form", () => {
     render(<CheckoutPage />);
     await waitFor(() => screen.getByRole("button", { name: /Send OTP/i }));
     fillContact();
+  fillContactEmail();
     fireEvent.click(screen.getByRole("button", { name: /Send OTP/i }));
     const otp = (await screen.findByPlaceholderText("Enter 6-digit OTP")) as HTMLInputElement;
 
@@ -179,6 +204,7 @@ describe("checkout — identity is WhatsApp OTP, never a login form", () => {
     render(<CheckoutPage />);
     await waitFor(() => screen.getByRole("button", { name: /Send OTP/i }));
     fillContact();
+  fillContactEmail();
     fillAddress();
     fireEvent.click(screen.getByRole("button", { name: /Send OTP/i }));
 
@@ -203,6 +229,7 @@ describe("checkout — identity is WhatsApp OTP, never a login form", () => {
     render(<CheckoutPage />);
     await waitFor(() => screen.getByRole("button", { name: /Send OTP/i }));
     fillContact();
+  fillContactEmail();
     fillAddress();
     fireEvent.click(screen.getByRole("button", { name: /Send OTP/i }));
 
@@ -233,6 +260,7 @@ describe("checkout — identity is WhatsApp OTP, never a login form", () => {
     render(<CheckoutPage />);
     await waitFor(() => screen.getByRole("button", { name: /Send OTP/i }));
     fillContact();
+  fillContactEmail();
     fillAddress();
 
     const button = placeOrderButton() as HTMLButtonElement;

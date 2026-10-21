@@ -35,7 +35,13 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
   const [cart, setCart] = useState<CartItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [toast, setToast] = useState<{ show: boolean, productName: string, productImage?: string } | null>(null);
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, isCustomerSession } = useAuth();
+  /**
+   * The cart lives in localStorage for a guest AND for a checkout session:
+   * the backend's cart belongs to a real account, and a session token must
+   * never make the cart fail.
+   */
+  const useDbCart = isAuthenticated && !isCustomerSession;
 
   const fetchCartVersionRef = useRef(0);
 
@@ -45,7 +51,7 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
 
   const fetchCart = async () => {
     const currentFetchVersion = ++fetchCartVersionRef.current;
-    if (isAuthenticated) {
+    if (useDbCart) {
       try {
         // A guest cart must survive OTP verification: push everything that was
         // collected while browsing into the account cart, then clear it so the
@@ -108,11 +114,11 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     fetchCart();
-  }, [isAuthenticated]);
+  }, [useDbCart]);
 
   const updateLocalCart = (newCart: CartItem[]) => {
     setCart(newCart);
-    if (!isAuthenticated) {
+    if (!useDbCart) {
       localStorage.setItem('meruveda_cart', JSON.stringify(newCart));
     }
   };
@@ -154,7 +160,7 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
     setToast({ show: true, productName: newItem.name, productImage: newItem.image });
     const timer = setTimeout(() => setToast(null), 3000);
 
-    if (isAuthenticated) {
+    if (useDbCart) {
       try {
         await axiosInstance.post('/cart', { product_id: newItem.id, quantity: qty });
         fetchCart(); // Reconcile in background
@@ -214,7 +220,7 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
       /* analytics must never break shopping */
     }
 
-    if (isAuthenticated) {
+    if (useDbCart) {
       try {
         const item = originalCart.find(c => c.id === id) as any;
         if (item && item.cartItemId) {
@@ -241,7 +247,7 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
     // Optimistic Update
     setCart(cart.map(item => item.id === id ? { ...item, quantity } : item));
 
-    if (isAuthenticated) {
+    if (useDbCart) {
       try {
         const item = originalCart.find(c => c.id === id) as any;
         if (item && item.cartItemId) {
@@ -263,7 +269,7 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
     invalidateInFlightFetches();
     setCart([]);
 
-    if (isAuthenticated) {
+    if (useDbCart) {
       try {
         await axiosInstance.delete('/cart');
         fetchCart();

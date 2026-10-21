@@ -315,6 +315,54 @@ export async function getMyOrders(userId: string): Promise<any[]> {
 }
 
 /**
+ * The orders of a checkout session.
+ *
+ * An unverified session sees ONLY the orders it created itself - the rows
+ * whose session_id is its own. That is the security rule: a session opened
+ * with a number that already belonged to somebody else must not be able to
+ * read that account's history.
+ *
+ * A VERIFIED session (the number was proven by WhatsApp, or the customer
+ * signed in) sees the whole account: its own orders and the account's
+ * earlier ones.
+ */
+export async function getOrdersForSession(
+  sessionId: string,
+  userId: string | null,
+  verifiedAccount: boolean,
+): Promise<any[]> {
+  const rows = verifiedAccount && userId
+    ? await query(
+        `SELECT o.*, ${USER_EMBED}
+           FROM orders o
+           LEFT JOIN users u ON u.id = o.user_id
+          WHERE o.session_id = $1 OR o.user_id = $2
+          ORDER BY o.created_at DESC`,
+        [sessionId, userId],
+      )
+    : await query(
+        `SELECT o.*, ${USER_EMBED}
+           FROM orders o
+           LEFT JOIN users u ON u.id = o.user_id
+          WHERE o.session_id = $1
+          ORDER BY o.created_at DESC`,
+        [sessionId],
+      );
+
+  if (rows.length > 0) {
+    const ids = rows.map((r) => r.id);
+    const items = await orderItemsWithProducts(ids);
+    const history = await trackingHistory(ids);
+    for (const row of rows) {
+      row.order_items = items.get(row.id) || [];
+      row.order_tracking_history = history.get(row.id) || [];
+    }
+  }
+
+  return rows;
+}
+
+/**
  * `*, order_items(*, products(id, name, sku, seo_metadata)), users(email, first_name, last_name, phone)`
  * — exactly the shape the invoice renderer expects.
  */

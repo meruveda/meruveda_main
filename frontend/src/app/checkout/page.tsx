@@ -296,7 +296,7 @@ function writeStoredAddresses(list: Address[]) {
 
 export default function CheckoutPage() {
   const { cart, cartTotal, removeFromCart, updateQuantity } = useCart();
-  const { user, isAuthenticated, isLoading, sendOtp, resendOtp, verifyOtp, saveProfile, guestCheckout, getOtpConfig } = useAuth();
+  const { user, isAuthenticated, isLoading, sendOtp, resendOtp, verifyOtp, saveProfile, openSession, getOtpConfig } = useAuth();
   const router = useRouter();
 
   // No separate login screen: the checkout form itself is the login.
@@ -346,9 +346,12 @@ export default function CheckoutPage() {
    * number, the snapshot no longer matches and the pill goes back to
    * "Continue" by itself.
    */
-  const [confirmedContact, setConfirmedContact] = useState<{ name: string; digits: string } | null>(null);
+  const [confirmedContact, setConfirmedContact] = useState<{ name: string; digits: string; email: string } | null>(null);
   const [isConfirmingContact, setIsConfirmingContact] = useState(false);
   const [contactError, setContactError] = useState("");
+  /** The email of the contact step - it becomes the profile's email. */
+  const [contactEmail, setContactEmail] = useState("");
+  const [contactEmailError, setContactEmailError] = useState("");
   const [isSendingOtp, setIsSendingOtp] = useState(false);
   const [isVerifyingOtp, setIsVerifyingOtp] = useState(false);
   const [otpMessage, setOtpMessage] = useState("");
@@ -498,7 +501,7 @@ export default function CheckoutPage() {
     const signedIn = user.phone.replace(/\D/g, '');
     const entered = fullPhoneDigits(mobile, phoneCountry);
     if (signedIn && entered && signedIn.slice(-10) === entered.slice(-10)) {
-      setConfirmedContact({ name: contactName.trim() || 'Customer', digits: entered });
+      setConfirmedContact({ name: contactName.trim() || 'Customer', digits: entered, email: contactEmail.trim().toLowerCase() });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.phone, mobile, phoneCountry]);
@@ -537,6 +540,11 @@ export default function CheckoutPage() {
     if (!mobile && user.phone) setMobile(user.phone);
     if (!customerEmail && user.email && !isSyntheticEmail(user.email)) {
       setCustomerEmail(user.email);
+    }
+    // The contact step's email is the one the profile is created from, so it
+    // starts from the email we already know.
+    if (!contactEmail && customerEmail && !isSyntheticEmail(customerEmail)) {
+      setContactEmail(customerEmail);
     }
     if (isAuthenticated) {
       setOtpVerified(true);
@@ -1033,14 +1041,18 @@ export default function CheckoutPage() {
   const contactReady = guestMode ? contactConfirmed : otpVerified;
 
   /**
-   * "Continue" - confirm the name and the number and open a guest session.
+   * "Continue" - confirm the name, the number and the email, and open the
+   * customer session.
    *
-   * A customer who is already signed in with THIS number is confirmed without
-   * pressing anything.
+   * The session IS the customer profile: the backend creates the profile when
+   * the number is new, and opens a long-lived session in this browser. The
+   * session is scoped to what this browser created - it never exposes another
+   * customer's data, even when the number already belongs to one.
    */
   const handleConfirmContact = async () => {
     if (isConfirmingContact) return;
     setContactError("");
+    setContactEmailError("");
 
     const name = contactName.trim();
     if (name.length < 2) {
@@ -1059,13 +1071,27 @@ export default function CheckoutPage() {
       return;
     }
 
+    const email = contactEmail.trim().toLowerCase();
+    if (!email) {
+      setContactEmailError("Please enter your email address.");
+      document.getElementById("checkout-contact-email")?.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (!EMAIL_RE.test(email)) {
+      setContactEmailError("Enter a valid email address.");
+      document.getElementById("checkout-contact-email")?.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+
     setIsConfirmingContact(true);
     try {
-      await guestCheckout(name, fullPhoneDigits(mobile, phoneCountry), {
+      await openSession(name, fullPhoneDigits(mobile, phoneCountry), email, {
         website,
         renderedAt: formRenderedAt.current,
       });
-      setConfirmedContact({ name, digits: fullPhoneDigits(mobile, phoneCountry) });
+      // The delivery email follows the contact email.
+      if (!customerEmail.trim()) setCustomerEmail(email);
+      setConfirmedContact({ name, digits: fullPhoneDigits(mobile, phoneCountry), email });
       setOtpVerified(true);
     } catch (err: any) {
       setContactError(
@@ -1329,9 +1355,40 @@ export default function CheckoutPage() {
                 </div>
               </div>
 
-              {/* Guest checkout: confirm the name and the number.
-                  In the OTP flow this section keeps the "Send OTP" button and
-                  the code box, and nothing here changes. */}
+              {/* The email is part of the CONTACT step: the profile is created
+                  from it when the customer presses Continue, and it is where
+                  the order confirmation and the invoice go. */}
+              <div className="min-w-0">
+                <label className={labelClass} htmlFor="checkout-contact-email">
+                  Email Address
+                </label>
+                <div className="relative">
+                  <Mail size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                  <input
+                    id="checkout-contact-email"
+                    type="email"
+                    required
+                    autoComplete="email"
+                    value={contactEmail}
+                    onChange={(e) => {
+                      setContactEmail(e.target.value);
+                      setContactError("");
+                      if (
+                        confirmedContact &&
+                        e.target.value.trim().toLowerCase() !== confirmedContact.email
+                      ) {
+                        setConfirmedContact(null);
+                      }
+                    }}
+                    className={`${inputClass} pl-9`}
+                    placeholder="you@example.com"
+                  />
+                </div>
+                {contactEmailError && (
+                  <p className="text-[11px] text-red-500 font-medium mt-1">{contactEmailError}</p>
+                )}
+              </div>
+
               {guestMode && (
                 <div className="space-y-2">
                   <button

@@ -3,7 +3,7 @@ import Link from "next/link";
 import MediaImage from "@/components/MediaImage";
 import { ChevronRight, Calendar, Clock, ArrowLeft } from "lucide-react";
 import { API_BASE_URL } from "@/utils/apiUrl";
-import { apiGetJson, isBuildPhase } from "@/utils/apiFetch";
+import { apiGetJson, shouldThrowOnFetchFailure } from "@/utils/apiFetch";
 import { notFound } from "next/navigation";
 
   async function getPost(slug: string) {
@@ -18,8 +18,8 @@ import { notFound } from "next/navigation";
       });
       return json?.data || json;
     } catch (error) {
-      if (isBuildPhase()) {
-        console.warn('[Blog/post] the catalogue service was not reachable during the build.');
+      if (!shouldThrowOnFetchFailure()) {
+        console.warn('[Blog/post] the catalogue service was not reachable.');
         return null;
       }
       throw error;

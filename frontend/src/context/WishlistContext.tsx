@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import axiosInstance from '../api/axiosInstance';
 import { useAuth } from './AuthContext';
+import { useAccountPages } from './StoreConfigContext';
 
 export type WishlistItem = {
   id: string;
@@ -29,10 +30,18 @@ const WishlistContext = createContext<WishlistContextType | undefined>(undefined
 export function WishlistProvider({ children }: { children: React.ReactNode }) {
   const [wishlist, setWishlist] = useState<WishlistItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, isCustomerSession } = useAuth();
+  /** The wishlist stays in localStorage for a guest AND for a session. */
+  const useDbWishlist = isAuthenticated && !isCustomerSession;
+  /**
+   * While the account pages are switched off there is no /login to send a
+   * guest to, so the wishlist behaves like the cart: it lives in localStorage
+   * until the customer signs in.
+   */
+  const accountPages = useAccountPages();
 
   const fetchWishlist = async () => {
-    if (isAuthenticated) {
+    if (useDbWishlist) {
       try {
         const response = await axiosInstance.get('/wishlist');
         const dbWishlist = response.data.data.map((item: any) => ({
@@ -61,17 +70,17 @@ export function WishlistProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     fetchWishlist();
-  }, [isAuthenticated]);
+  }, [useDbWishlist]);
 
   const updateLocalWishlist = (newList: WishlistItem[]) => {
     setWishlist(newList);
-    if (!isAuthenticated) {
+    if (!useDbWishlist) {
       localStorage.setItem('meruveda_wishlist', JSON.stringify(newList));
     }
   };
 
   const addToWishlist = async (newItem: WishlistItem) => {
-    if (isAuthenticated) {
+    if (useDbWishlist) {
       try {
         await axiosInstance.post('/wishlist/toggle', { product_id: newItem.id });
         await fetchWishlist();
@@ -86,7 +95,7 @@ export function WishlistProvider({ children }: { children: React.ReactNode }) {
   };
 
   const removeFromWishlist = async (id: string) => {
-    if (isAuthenticated) {
+    if (useDbWishlist) {
       try {
         const item = wishlist.find(w => w.id === id) as any;
         if (item && item.wishlistItemId) {
@@ -118,7 +127,13 @@ export function WishlistProvider({ children }: { children: React.ReactNode }) {
     isAuthenticated: boolean,
     onRedirect: () => void
   ) => {
-    if (!isAuthenticated) {
+    if (!useDbWishlist) {
+      // With the account pages switched off there is nowhere to sign in, so
+      // the wishlist is simply kept in localStorage (exactly like the cart).
+      if (!accountPages) {
+        await toggleWishlist(item);
+        return;
+      }
       onRedirect();
       return;
     }

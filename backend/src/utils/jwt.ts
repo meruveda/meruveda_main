@@ -19,12 +19,23 @@ export interface TokenPayload {
    * profile - so a guest who types somebody else's phone number can never see
    * that account's data. Absent (a normal session) means a full session.
    */
-  scope?: 'guest' | 'full';
+  scope?: 'guest' | 'full' | 'customer';
+  /**
+   * The customer session id.
+   *
+   * A 'customer' session is opened at the checkout contact step and is scoped
+   * to what it created: it sees only its own orders, addresses and profile.
+   */
+  sid?: string;
 }
 
 /** True when the session is a checkout-only guest session. */
 export const isGuestScope = (payload?: { scope?: string } | null): boolean =>
   Boolean(payload && payload.scope === 'guest');
+
+/** True when the session is a checkout-created customer session. */
+export const isCustomerScope = (payload?: { scope?: string } | null): boolean =>
+  Boolean(payload && payload.scope === 'customer');
 
 export const generateToken = (payload: TokenPayload): string => {
   // The algorithm is pinned on BOTH sides. Without it, `alg: none` and the
