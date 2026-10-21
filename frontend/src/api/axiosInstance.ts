@@ -83,6 +83,18 @@ axiosInstance.interceptors.response.use(
     if (code === 'GUEST_SCOPE') {
       return Promise.reject(error);
     }
+    /**
+     * "Is there a session?" is a question, not a failure.
+     *
+     * The storefront asks the backend on every page load whether this browser
+     * has a customer session. A visitor without one gets a 401 with the code
+     * NO_SESSION - and that must NOT be treated as an expired session: the
+     * interceptor would wipe the (empty) session and RELOAD the page, which
+     * is an endless reload loop.
+     */
+    if (code === 'NO_SESSION' || code === 'SESSION_EXPIRED') {
+      return Promise.reject(error);
+    }
     if (error.response && error.response.status === 401) {
       // A checkout-only GUEST session must never be wiped by a 401: the
       // visitor is not logged in and does not want to be, and reloading the
@@ -93,7 +105,8 @@ axiosInstance.interceptors.response.use(
       const isAuthRequest = error.config && (
         error.config.url.includes('/auth/login') ||
         error.config.url.includes('/auth/register') ||
-        error.config.url.includes('/auth/forgot-password')
+        error.config.url.includes('/auth/forgot-password') ||
+        error.config.url.includes('/account/session')
       );
       if (!isAuthRequest && typeof window !== 'undefined') {
         localStorage.removeItem('meruveda_auth_token');

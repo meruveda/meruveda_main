@@ -77,7 +77,15 @@ export const getSession = async (req: Request, res: Response, next: NextFunction
      */
     const session = await resolveSessionFromRequest(req as any);
     if (!session) {
-      return res.status(401).json({ error: { message: 'No session', code: 'NO_SESSION' } });
+      /**
+       * "Is there a session?" is a QUESTION, not a failure.
+       *
+       * A visitor without a session gets 200 with a null profile. A 401 here
+       * would look like an expired session to the storefront's HTTP layer,
+       * which would wipe the session and RELOAD the page - an endless reload
+       * loop on every page.
+       */
+      return res.json({ data: { profile: null } });
     }
     res.json({
       data: {

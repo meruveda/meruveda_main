@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
 import { X, User } from "lucide-react";
 
 /**
@@ -12,14 +11,17 @@ import { X, User } from "lucide-react";
  * with this line. It explains where the profile comes from - the checkout
  * contact step - and it can be dismissed. It is never a loop: the notice
  * only reads the query parameter, it never redirects.
+ *
+ * The text is rendered on the SERVER (the home page passes the flag down), so
+ * it is there the moment the page arrives - a visitor never sees the shop
+ * without the explanation.
  */
-export default function ProfileRequiredNotice() {
-  const searchParams = useSearchParams();
-  const [visible, setVisible] = useState(false);
+export default function ProfileRequiredNotice({ show }: { show?: boolean }) {
+  const [visible, setVisible] = useState(Boolean(show));
 
   useEffect(() => {
-    setVisible(searchParams.get("profile") === "required");
-  }, [searchParams]);
+    if (show) setVisible(true);
+  }, [show]);
 
   if (!visible) return null;
 

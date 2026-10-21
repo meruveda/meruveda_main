@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ShoppingCart, User, ChevronDown, Package, Star, MessageSquare, Heart, Settings, LogOut, Menu, X, MapPin, Truck } from "lucide-react";
+import { ShoppingCart, User, ChevronDown, Package, Star, MessageSquare, Heart, Settings, LogOut, Menu, X, MapPin, Truck, LayoutDashboard } from "lucide-react";
 import { useCart } from "@/context/CartContext";
 import { useAuth } from "@/context/AuthContext";
 import { useAccountPages } from "@/context/StoreConfigContext";
@@ -105,11 +105,15 @@ export default function Header() {
          */}
         {(hasSession || (accountPages && isAuthenticated && user)) ? (
           <div className="relative shrink-0" ref={dropdownRef}>
-            <button
-              onClick={() => setDropdownOpen((prev) => !prev)}
-className="flex shrink-0 items-center gap-2 text-bg-ivory hover:text-gold-antique transition-colors"
-              aria-haspopup="true"
-              aria-expanded={dropdownOpen}
+            {/**
+             * The account icon opens the profile area. It is a LINK (not a
+             * button) so it works without JavaScript and so it can be reached
+             * with the keyboard; the chevron next to it opens the menu.
+             */}
+            <Link
+              href="/account"
+              onClick={() => setDropdownOpen(false)}
+              className="flex shrink-0 items-center gap-2 text-bg-ivory hover:text-gold-antique transition-colors"
               aria-label="My Profile"
             >
               {user?.avatar ? (
@@ -131,6 +135,14 @@ className="flex shrink-0 items-center gap-2 text-bg-ivory hover:text-gold-antiqu
               >
                 {fullName}
               </span>
+            </Link>
+            <button
+              onClick={() => setDropdownOpen((prev) => !prev)}
+              className="flex shrink-0 items-center text-bg-ivory hover:text-gold-antique transition-colors -ml-1"
+              aria-haspopup="true"
+              aria-expanded={dropdownOpen}
+              aria-label="Account menu"
+            >
               <ChevronDown size={14} className={`transition-transform ${dropdownOpen ? "rotate-180" : ""}`} />
             </button>
 
@@ -141,6 +153,13 @@ className="flex shrink-0 items-center gap-2 text-bg-ivory hover:text-gold-antiqu
                   <p className="font-bold text-plum-deep text-sm">{fullName}</p>
                   <p className="text-xs text-gray-500 truncate">{displayEmail(user?.email) || user?.phone}</p>
                 </div>
+                <Link
+                  href="/account"
+                  onClick={() => setDropdownOpen(false)}
+                  className="flex items-center gap-3 px-4 py-2.5 text-sm text-gray-700 hover:bg-bg-ivory hover:text-plum-deep transition-colors"
+                >
+                  <LayoutDashboard size={15} /> Dashboard
+                </Link>
                 <Link
                   href="/account/profile"
                   onClick={() => setDropdownOpen(false)}

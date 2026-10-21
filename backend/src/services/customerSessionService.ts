@@ -75,7 +75,7 @@ export async function openCustomerSession(input: CustomerSessionInput): Promise<
     return { ok: false, status: 400, message: 'We could not process that request.', silent: true };
   }
   const renderedAt = Number(input.renderedAt || 0);
-  if (renderedAt > 0 && Date.now() - renderedAt < 3000) {
+  if (renderedAt > 0 && Date.now() - renderedAt < 1200) {
     return { ok: false, status: 400, message: 'We could not process that request.', silent: true };
   }
 

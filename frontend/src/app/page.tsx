@@ -104,7 +104,11 @@ interface Review {
   verified: boolean;
 }
 
-export default async function Home() {
+export default async function Home({
+  searchParams,
+}: {
+  searchParams?: Promise<{ profile?: string }>;
+}) {
   // The backend is a separate service and can be COLD right after a deploy (or
   // simply not running in development). The fetch is retried for about eight
   // seconds; if it still fails:
@@ -115,8 +119,20 @@ export default async function Home() {
   //     state is rendered instead - a deployment must not fail because the
   //     backend is not up yet, and a developer without the backend should
   //     still see the page.
-  const settle = async <T,>(label: string, run: () => Promise<T>, fallback: T): Promise<T> => {
-    try {
+  /**
+   * Was the visitor sent here from the profile area because they have no
+   * profile yet? The flag is read on the server, so the explanation is in
+   * the very first paint.
+   */
+  let profileRequired = false;
+  try {
+    const params = (await searchParams) || {};
+    profileRequired = params.profile === 'required';
+  } catch {
+    profileRequired = false;
+  }
+
+  const settle = async <T,>(label: string, run: () => Promise<T>, fallback: T): Promise<T> => {    try {
       return await run();
     } catch (error) {
       if (!shouldThrowOnFetchFailure()) {
@@ -150,8 +166,9 @@ export default async function Home() {
   return (
     <div className="pb-20 relative">
       {/* The visitor was sent here from the profile area because they have no
-          profile yet. One small, dismissible line - never a loop. */}
-      <ProfileRequiredNotice />
+          profile yet. One small, dismissible line - never a loop. The flag is
+          read on the server, so the line is there with the first paint. */}
+      <ProfileRequiredNotice show={profileRequired} />
 
       {/* Hero Slideshow Section */}
       <HeroCarousel initialBanners={banners} />
