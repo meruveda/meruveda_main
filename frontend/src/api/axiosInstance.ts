@@ -1,6 +1,15 @@
 import axios from 'axios';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || '/api';
+/**
+ * In the browser ALWAYS call the same-origin `/api` path — the platform
+ * rewrite (vercel.json) or the Next dev rewrite forwards it to the backend.
+ * An absolute NEXT_PUBLIC_API_URL baked in at build time turns every call
+ * from www into a cross-origin request to the apex host, and with no CORS
+ * headers the browser blocks it and axios reports a bare "Network Error".
+ * The absolute URL is kept for SSR only (relative paths have no origin).
+ */
+const API_BASE_URL =
+  typeof window === 'undefined' ? (process.env.NEXT_PUBLIC_API_URL || '/api') : '/api';
 
 const axiosInstance = axios.create({
   baseURL: API_BASE_URL,

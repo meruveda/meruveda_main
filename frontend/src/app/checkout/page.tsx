@@ -853,10 +853,14 @@ export default function CheckoutPage() {
       if (!customerEmail.trim()) setCustomerEmail(email);
       setConfirmedContact({ name, digits: fullPhoneDigits(mobile, phoneCountry), email });
     } catch (err: any) {
+      // Axios surfaces a transport failure (offline, blocked request) as a
+      // bare "Network Error" - never show that raw string to a customer.
+      const serverMessage = err?.response?.data?.error?.message;
       setContactError(
-        err?.response?.data?.error?.message ||
-          err?.message ||
-          "We could not confirm your details. Please try again.",
+        serverMessage ||
+          (err?.response
+            ? err.message
+            : "We couldn't connect. Please check your internet and try again."),
       );
     } finally {
       setIsConfirmingContact(false);
@@ -1152,7 +1156,7 @@ export default function CheckoutPage() {
                   </p>
                 ) : (
                   <p className="text-[11px] text-gray-500 text-center">
-                    Order updates aur invoice isi WhatsApp number par aayenge
+                    Order updates and your invoice will be sent to this WhatsApp number.
                   </p>
                 )}
                 {contactError && (

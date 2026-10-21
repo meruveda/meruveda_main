@@ -180,8 +180,10 @@ describe("checkout — identity is the Continue pill, never a login form or an O
     expect(screen.getByText(/Contact confirmed/i)).toBeTruthy();
   });
 
-  it("keeps Place Order locked when Continue fails", async () => {
-    authState.openSession = vi.fn().mockRejectedValue(new Error("We could not confirm your details."));
+  it("keeps Place Order locked when Continue fails and shows a friendly message", async () => {
+    // A transport failure (no response) must never surface axios' raw
+    // "Network Error" - the customer sees the friendly connect message.
+    authState.openSession = vi.fn().mockRejectedValue(new Error("Network Error"));
     render(<CheckoutPage />);
     await waitFor(() => screen.getByRole("button", { name: /^Continue$/i }));
     fillContact();
@@ -190,7 +192,7 @@ describe("checkout — identity is the Continue pill, never a login form or an O
 
     fireEvent.click(screen.getByRole("button", { name: /^Continue$/i }));
 
-    await waitFor(() => screen.getByText(/could not confirm/i));
+    await waitFor(() => screen.getByText(/check your internet and try again/i));
     expect((placeOrderButton() as HTMLButtonElement).disabled).toBe(true);
   });
 
