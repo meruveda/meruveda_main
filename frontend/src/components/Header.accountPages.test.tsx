@@ -4,10 +4,9 @@ import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 /**
  * The account icon in the header.
  *
- * The storefront has no /login while the account pages are switched off, so
- * the icon is shown only when the customer has a SESSION - the profile that
- * is created automatically at the checkout contact step. A visitor with
- * neither gets no icon and no login link, and "Track order" is always there.
+ * The icon is ALWAYS visible (even for a visitor with no session) and points
+ * at /account - the restored account section. There is never a login or sign
+ * up link in the header, and "Track order" is not in the navbar either.
  */
 
 const mockCart = { cartCount: 0 };
@@ -54,13 +53,15 @@ describe("the header for a visitor with no session", () => {
   });
   afterEach(cleanup);
 
-  it("shows no profile icon and no account links", () => {
+  it("shows the profile icon pointing at /account and no login links", () => {
     renderHeader(false);
 
-    // The profile icon is the only link with the "My Profile" label.
-    expect(screen.queryByLabelText("My Profile")).toBeNull();
+    // The profile icon is always visible and leads to the account section.
+    const profile = screen.queryByLabelText("My Profile");
+    expect(profile).not.toBeNull();
+    expect(profile?.getAttribute("href")).toBe("/account");
+
     const texts = linkTexts();
-    expect(texts).not.toContain("My Profile");
     expect(texts).not.toContain("My Orders");
     expect(texts).not.toContain("Login");
     expect(texts).not.toContain("Sign up");
@@ -131,12 +132,13 @@ describe("the header when the account pages are switched on", () => {
   });
   afterEach(cleanup);
 
-  it("brings the sign-in icon back for a visitor with no session", () => {
+  it("keeps the profile icon on /account for a visitor with no session", () => {
     renderHeader(true);
 
     const profile = screen.queryByLabelText("My Profile");
     expect(profile).not.toBeNull();
-    expect(profile?.getAttribute("href")).toBe("/login");
+    expect(profile?.getAttribute("href")).toBe("/account");
+    expect(document.querySelector('a[href="/login"]')).toBeNull();
   });
 
   it("keeps the track order link out of the navbar", () => {
