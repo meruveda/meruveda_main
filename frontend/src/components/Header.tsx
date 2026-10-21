@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ShoppingCart, User, ChevronDown, Package, Star, MessageSquare, Heart, Settings, LogOut, Menu, X, MapPin, Truck, LayoutDashboard } from "lucide-react";
+import { ShoppingCart, User, ChevronDown, Package, Star, MessageSquare, Heart, Settings, LogOut, Menu, X, MapPin, LayoutDashboard } from "lucide-react";
 import { useCart } from "@/context/CartContext";
 import { useAuth } from "@/context/AuthContext";
 import { useAccountPages } from "@/context/StoreConfigContext";
@@ -71,9 +71,6 @@ export default function Header() {
         <Link href="/about" className="hover:text-gold-antique transition-colors">About Us</Link>
         <Link href="/blog" className="hover:text-gold-antique transition-colors">Journal</Link>
         <Link href="/contact" className="hover:text-gold-antique transition-colors">Contact</Link>
-        {/* The account pages can be switched off; tracking an order never can
-            - it works for a guest with an order number and a phone number. */}
-        <Link href="/track" className="hover:text-gold-antique transition-colors">Track Order</Link>
       </nav>
 
       {/* Right Actions */}
@@ -181,13 +178,6 @@ export default function Header() {
                 >
                   <MapPin size={15} /> Addresses
                 </Link>
-                <Link
-                  href="/track"
-                  onClick={() => setDropdownOpen(false)}
-                  className="flex items-center gap-3 px-4 py-2.5 text-sm text-gray-700 hover:bg-bg-ivory hover:text-plum-deep transition-colors"
-                >
-                  <Truck size={15} /> Track Order
-                </Link>
                 {user?.role === 'admin' ? (
                   <a
                     href={process.env.NEXT_PUBLIC_ADMIN_URL || "/admin"}
@@ -271,15 +261,6 @@ export default function Header() {
               className="hover:text-gold-antique transition-colors pb-2 border-b border-gold/10"
             >
               Contact
-            </Link>
-            {/* Tracking an order works for every guest - order number and
-                phone number, no account. */}
-            <Link
-              href="/track"
-              onClick={() => setMobileMenuOpen(false)}
-              className="hover:text-gold-antique transition-colors pb-2 border-b border-gold/10"
-            >
-              Track Order
             </Link>
             {/* The account links exist when there is a session (the profile
                 created at the checkout) or when the account pages are on. */}

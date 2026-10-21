@@ -71,7 +71,7 @@ describe("the header for a visitor with no session", () => {
     renderHeader(false);
 
     const texts = linkTexts();
-    expect(texts.some((t) => /track order/i.test(t))).toBe(true);
+    expect(texts.some((t) => /track order/i.test(t))).toBe(false);
     // The cart is still there - a guest still shops.
     expect(document.querySelector('a[href="/checkout"]')).not.toBeNull();
   });
@@ -139,8 +139,8 @@ describe("the header when the account pages are switched on", () => {
     expect(profile?.getAttribute("href")).toBe("/login");
   });
 
-  it("keeps the track order link", () => {
+  it("keeps the track order link out of the navbar", () => {
     renderHeader(true);
-    expect(linkTexts().some((t) => /track order/i.test(t))).toBe(true);
+    expect(linkTexts().some((t) => /track order/i.test(t))).toBe(false);
   });
 });
