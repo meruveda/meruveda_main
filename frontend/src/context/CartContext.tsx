@@ -158,7 +158,14 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
       try {
         await axiosInstance.post('/cart', { product_id: newItem.id, quantity: qty });
         fetchCart(); // Reconcile in background
-      } catch (e) {
+      } catch (e: any) {
+        // A checkout-only guest token is refused by /cart. That is EXPECTED:
+        // the cart for a guest lives in localStorage. Fall back to it instead
+        // of rolling back and shouting at the customer.
+        if (e?.response?.data?.code === 'GUEST_SCOPE' || e?.response?.status === 401) {
+          localStorage.setItem('meruveda_cart', JSON.stringify(updatedCart));
+          return;
+        }
         console.error("Optimistic add to cart failed, rolling back", e);
         setCart(originalCart);
         clearTimeout(timer);

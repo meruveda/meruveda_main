@@ -1040,9 +1040,18 @@ export async function writeInvoiceIssue(
 /** Record the outcome of a delivery attempt on the channel it belongs to. */
 export async function markInvoiceSent(
   orderId: string,
-  statuses: { whatsapp?: ChannelOutcome | null; email?: ChannelOutcome | null } = {}
+  statuses: { whatsapp?: ChannelOutcome | null; email?: ChannelOutcome | null } = {},
 ): Promise<void> {
   const at = new Date().toISOString();
+  // Was the invoice already marked as sent? The timeline event belongs to the
+  // FIRST delivery, not to every later attempt.
+  let firstSend = true;
+  try {
+    const row = await ordersRepo.getOrderRow(orderId);
+    firstSend = !row?.invoice_sent_at;
+  } catch {
+    firstSend = true;
+  }
   if (statuses.whatsapp) {
     await patchChannel(orderId, 'whatsapp', {
       status: statuses.whatsapp === 'sent' ? 'sent' : 'failed',
@@ -1058,8 +1067,10 @@ export async function markInvoiceSent(
     });
   }
   await mirrorInvoiceColumns(orderId, { sentAt: at });
-  // The delivery is a milestone of its own on the order timeline.
-  await recordTimelineEvent(orderId, 'Invoice sent on WhatsApp', { sent_at: at });
+  // The delivery is a milestone of its own on the order timeline - once.
+  if (firstSend && statuses.whatsapp === 'sent') {
+    await recordTimelineEvent(orderId, 'Invoice sent on WhatsApp', { sent_at: at });
+  }
 }
 
 /**

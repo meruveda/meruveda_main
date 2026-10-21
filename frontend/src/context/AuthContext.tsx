@@ -10,6 +10,12 @@ import { authService, AuthUser, SignupData } from '@/services/authService';
 interface AuthContextType {
   user: AuthUser | null;
   isAuthenticated: boolean;
+  /**
+   * True when the session is a checkout-only guest session: it may place an
+   * order and read that order, and nothing else. It is NOT an account, so it
+   * never counts as `isAuthenticated`.
+   */
+  isGuestSession: boolean;
   isLoading: boolean;
   /** URL to redirect to after a successful login */
   returnUrl: string | null;
@@ -83,6 +89,15 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
+  /**
+   * True when the session is a checkout-only GUEST session.
+   *
+   * A guest session may place an order and read that order. It is NOT an
+   * account: the cart, the wishlist, the order history, the address book and
+   * the header must all treat it exactly like a logged-out visitor, or the
+   * guest token hits endpoints that refuse it and the storefront breaks.
+   */
+  const isGuestSession = user?.scope === 'guest';
   const [isLoading, setIsLoading] = useState(true);
   const [returnUrl, setReturnUrl] = useState<string | null>(null);
 
@@ -152,7 +167,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     <AuthContext.Provider
       value={{
         user,
-        isAuthenticated: !!user,
+        isAuthenticated: !!user && !isGuestSession,
+    isGuestSession,
         isLoading,
         returnUrl,
         setReturnUrl,

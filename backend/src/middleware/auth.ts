@@ -41,11 +41,16 @@ export const requireAdmin = (req: Request, res: Response, next: NextFunction) =>
  * book, the cart, the wishlist, the profile and the preferences - is closed
  * to it. Without this, a guest who typed somebody else's phone number would
  * be able to read that account.
+ *
+ * The answer is 401 with the code GUEST_SCOPE, not an opaque 403: the
+ * storefront recognises the code, keeps the visitor's local cart and shows no
+ * error at all. A 401 would otherwise look like an expired session.
  */
 export const requireFullAuth = (req: Request, res: Response, next: NextFunction) => {
   if (isGuestScope(req.user)) {
-    return res.status(403).json({
+    return res.status(401).json({
       error: { message: 'This session may only place an order. Please sign in to see your account.' },
+      code: 'GUEST_SCOPE',
     });
   }
   next();

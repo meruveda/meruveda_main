@@ -140,7 +140,10 @@ test('a guest session is refused the account data', () => {
     called = true;
   });
   assert.equal(called, false, 'the next handler must NOT run');
-  assert.equal(res.statusCode, 403);
+  // 401 + GUEST_SCOPE, not an opaque 403: the storefront recognises the
+  // code, keeps the local cart and shows no error.
+  assert.equal(res.statusCode, 401);
+  assert.equal(res.body.code, 'GUEST_SCOPE');
   assert.match(res.body.error.message, /only place an order/i);
 });
 

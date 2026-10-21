@@ -24,11 +24,24 @@ const mockCart = {
 const authState: any = {
   user: null,
   isAuthenticated: false,
+  /** A checkout-only guest session is NOT an account. */
+  isGuestSession: false,
   isLoading: false,
   sendOtp: vi.fn(),
   resendOtp: vi.fn(),
   verifyOtp: vi.fn(),
   saveProfile: vi.fn(),
+  guestCheckout: vi.fn(),
+  /**
+   * The checkout asks the server whether it needs an OTP. The default here is
+   * the OTP flow (an OTP is required), which is what the suite asserts.
+   */
+  getOtpConfig: vi.fn(async () => ({
+    otpRequired: true,
+    mode: 'auto' as const,
+    guestCheckout: false,
+    message: null,
+  })),
 };
 
 vi.mock("@/context/CartContext", () => ({ useCart: () => mockCart }));
