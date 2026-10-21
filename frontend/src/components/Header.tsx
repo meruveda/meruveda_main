@@ -2,25 +2,15 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ShoppingCart, User, ChevronDown, Package, Star, MessageSquare, Heart, Settings, LogOut, Menu, X, MapPin, LayoutDashboard } from "lucide-react";
+import { ShoppingCart, User, ChevronDown, Package, Star, MessageSquare, Heart, Settings, LogOut, Menu, X } from "lucide-react";
 import { useCart } from "@/context/CartContext";
 import { useAuth } from "@/context/AuthContext";
-import { useAccountPages } from "@/context/StoreConfigContext";
 import { displayEmail } from "@/types/account";
 import { useState, useRef, useEffect } from "react";
 
 export default function Header() {
   const { cartCount } = useCart();
-  const { user, isAuthenticated, hasSession, logout, closeSession } = useAuth();
-  /**
-   * Are the storefront account pages switched on?
-   *
-   * While they are off there is no /login and no /signup, so the account icon
-   * is shown only when the customer has a SESSION - the profile that is
-   * created automatically at the checkout contact step. "Track order" is
-   * always there: it works for everybody.
-   */
-  const accountPages = useAccountPages();
+  const { user, isAuthenticated, logout } = useAuth();
   const router = useRouter();
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -38,13 +28,7 @@ export default function Header() {
   }, []);
 
   const handleLogout = () => {
-    // A checkout session is closed with the session endpoint; a real login
-    // with the normal logout. The orders stay in the database either way.
-    if (hasSession) {
-      void closeSession();
-    } else {
-      logout();
-    }
+    logout();
     setDropdownOpen(false);
     router.push("/");
   };
@@ -92,28 +76,16 @@ export default function Header() {
           <span className="text-sm font-medium font-ibm-plex-mono">{cartCount}</span>
         </Link>
 
-        {/**
-         * The account area.
-         *
-         * It is shown when the customer has a session (the profile created at
-         * the checkout) or when the account pages are switched on and the
-         * customer is signed in. A visitor with neither gets NO icon and NO
-         * login link - there is nothing for them to log into.
-         */}
-        {(hasSession || (accountPages && isAuthenticated && user)) ? (
+        {/* Auth Area — always visible right next to the cart */}
+        {isAuthenticated && user ? (
           <div className="relative shrink-0" ref={dropdownRef}>
-            {/**
-             * The account icon opens the profile area. It is a LINK (not a
-             * button) so it works without JavaScript and so it can be reached
-             * with the keyboard; the chevron next to it opens the menu.
-             */}
-            <Link
-              href="/account"
-              onClick={() => setDropdownOpen(false)}
-              className="flex shrink-0 items-center gap-2 text-bg-ivory hover:text-gold-antique transition-colors"
-              aria-label="My Profile"
+            <button
+              onClick={() => setDropdownOpen((prev) => !prev)}
+className="flex shrink-0 items-center gap-2 text-bg-ivory hover:text-gold-antique transition-colors"
+              aria-haspopup="true"
+              aria-expanded={dropdownOpen}
             >
-              {user?.avatar ? (
+              {user.avatar ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
                   src={user.avatar}
@@ -122,8 +94,7 @@ export default function Header() {
                 />
               ) : (
                 <div className="w-7 h-7 shrink-0 rounded-full bg-gold flex items-center justify-center text-plum-deep text-xs font-bold">
-                  {(user?.firstName?.[0] || fullName?.[0] || 'U').toUpperCase()}
-                  {(user?.lastName?.[0] || '').toUpperCase()}
+                  {user.firstName?.[0] || 'U'}{user.lastName?.[0] || ''}
                 </div>
               )}
               <span
@@ -132,14 +103,6 @@ export default function Header() {
               >
                 {fullName}
               </span>
-            </Link>
-            <button
-              onClick={() => setDropdownOpen((prev) => !prev)}
-              className="flex shrink-0 items-center text-bg-ivory hover:text-gold-antique transition-colors -ml-1"
-              aria-haspopup="true"
-              aria-expanded={dropdownOpen}
-              aria-label="Account menu"
-            >
               <ChevronDown size={14} className={`transition-transform ${dropdownOpen ? "rotate-180" : ""}`} />
             </button>
 
@@ -147,18 +110,11 @@ export default function Header() {
             {dropdownOpen && (
               <div className="absolute right-0 mt-2 w-52 bg-white rounded-xl shadow-xl border border-gray-100 py-2 z-50 animate-in fade-in slide-in-from-top-2">
                 <div className="px-4 py-3 border-b border-gray-100">
-                  <p className="font-bold text-plum-deep text-sm">{fullName}</p>
-                  <p className="text-xs text-gray-500 truncate">{displayEmail(user?.email) || user?.phone}</p>
+                  <p className="font-bold text-plum-deep text-sm">{user.firstName} {user.lastName}</p>
+                  <p className="text-xs text-gray-500 truncate">{displayEmail(user.email) || user.phone}</p>
                 </div>
                 <Link
                   href="/account"
-                  onClick={() => setDropdownOpen(false)}
-                  className="flex items-center gap-3 px-4 py-2.5 text-sm text-gray-700 hover:bg-bg-ivory hover:text-plum-deep transition-colors"
-                >
-                  <LayoutDashboard size={15} /> Dashboard
-                </Link>
-                <Link
-                  href="/account/profile"
                   onClick={() => setDropdownOpen(false)}
                   className="flex items-center gap-3 px-4 py-2.5 text-sm text-gray-700 hover:bg-bg-ivory hover:text-plum-deep transition-colors"
                 >
@@ -172,13 +128,20 @@ export default function Header() {
                   <Package size={15} /> My Orders
                 </Link>
                 <Link
-                  href="/account/addresses"
+                  href="/account/reviews"
                   onClick={() => setDropdownOpen(false)}
                   className="flex items-center gap-3 px-4 py-2.5 text-sm text-gray-700 hover:bg-bg-ivory hover:text-plum-deep transition-colors"
                 >
-                  <MapPin size={15} /> Addresses
+                  <Star size={15} /> My Reviews
                 </Link>
-                {user?.role === 'admin' ? (
+                <Link
+                  href="/account/support"
+                  onClick={() => setDropdownOpen(false)}
+                  className="flex items-center gap-3 px-4 py-2.5 text-sm text-gray-700 hover:bg-bg-ivory hover:text-plum-deep transition-colors"
+                >
+                  <MessageSquare size={15} /> Help & Support
+                </Link>
+                {user.role === 'admin' ? (
                   <a
                     href={process.env.NEXT_PUBLIC_ADMIN_URL || "/admin"}
                     onClick={() => setDropdownOpen(false)}
@@ -186,7 +149,15 @@ export default function Header() {
                   >
                     <Settings size={15} /> Admin Dashboard
                   </a>
-                ) : null}
+                ) : (
+                  <Link
+                    href="/account/settings"
+                    onClick={() => setDropdownOpen(false)}
+                    className="flex items-center gap-3 px-4 py-2.5 text-sm text-gray-700 hover:bg-bg-ivory hover:text-plum-deep transition-colors"
+                  >
+                    <Settings size={15} /> Settings
+                  </Link>
+                )}
                 <div className="border-t border-gray-100 mt-1 pt-1">
                   <button
                     onClick={handleLogout}
@@ -198,16 +169,15 @@ export default function Header() {
               </div>
             )}
           </div>
-        ) : null}
-
-        {/* The sign-in icon, while the account pages exist. With them off there
-            is nothing to sign into, so the icon is not shown at all. */}
-        {accountPages && !hasSession && !isAuthenticated && (
+        ) : (
+          /* Guest — the profile icon sits next to the cart and opens the
+             profile area, where a visitor without a session is sent back to
+             the shop once (the password pages are switched off). */
           <Link
-            href="/login"
+            href="/account"
             aria-label="My Profile"
             title="My Profile"
-            className="flex items-center text-bg-ivory hover:text-gold-antique transition-colors"
+            className="flex shrink-0 items-center text-bg-ivory hover:text-gold-antique transition-colors"
           >
             <User size={20} strokeWidth={1.5} />
           </Link>
@@ -262,26 +232,20 @@ export default function Header() {
             >
               Contact
             </Link>
-            {/* The account links exist when there is a session (the profile
-                created at the checkout) or when the account pages are on. */}
-            {(hasSession || (accountPages && isAuthenticated)) && (
-              <>
-                <Link
-                  href="/account/profile"
-                  onClick={() => setMobileMenuOpen(false)}
-                  className="hover:text-gold-antique transition-colors pb-2 border-b border-gold/10"
-                >
-                  My Profile
-                </Link>
-                <Link
-                  href="/account/orders"
-                  onClick={() => setMobileMenuOpen(false)}
-                  className="hover:text-gold-antique transition-colors pb-2 border-b border-gold/10"
-                >
-                  My Orders
-                </Link>
-              </>
-            )}
+            <Link
+              href="/account"
+              onClick={() => setMobileMenuOpen(false)}
+              className="hover:text-gold-antique transition-colors pb-2 border-b border-gold/10"
+            >
+              My Profile
+            </Link>
+            <Link
+              href="/account/orders"
+              onClick={() => setMobileMenuOpen(false)}
+              className="hover:text-gold-antique transition-colors pb-2 border-b border-gold/10"
+            >
+              My Orders
+            </Link>
           </nav>
         </div>
       )}
