@@ -236,11 +236,26 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const getOtpConfig = useCallback(() => authService.getOtpConfig(), []);
 
   const saveProfile = useCallback(async (payload: { name?: string; email?: string; address?: any; phone?: string }) => {
+    /**
+     * A checkout session has no password login behind it, so the session's own
+     * profile endpoint is the one that answers. The address book of a session
+     * is written by the checkout's "Save Address" step, which is scoped to the
+     * session as well.
+     */
+    if (customerSession) {
+      await authService.saveSessionProfile({
+        ...(payload.name ? { name: payload.name } : {}),
+        ...(payload.email ? { email: payload.email } : {}),
+      });
+      const refreshed = await authService.getSession();
+      if (refreshed) setCustomerSession(refreshed);
+      return;
+    }
     await authService.saveProfile(payload);
     // Refresh the in-memory user so later steps see the saved details.
     const refreshed = authService.getCurrentUser();
     if (refreshed) setUser(refreshed);
-  }, []);
+  }, [customerSession]);
 
   return (
     <AuthContext.Provider

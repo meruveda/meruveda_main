@@ -31,6 +31,23 @@ export const getOrders = async (req: Request, res: Response, next: NextFunction)
   }
 };
 
+/**
+ * May this request read this order?
+ *
+ * An admin may read any order. The order's own customer may read it. And the
+ * checkout session that CREATED the order may read it - that is the whole
+ * point of the session: the customer sees the order they just placed, even
+ * when the number belonged to somebody else and the order is therefore not
+ * linked to any customer account yet.
+ */
+function mayReadOrder(req: Request, orderRow: any): boolean {
+  if (req.user?.role === 'admin') return true;
+  const session = (req as any).customerSession;
+  if (session && orderRow?.session_id && orderRow.session_id === session.id) return true;
+  if (session?.verifiedAccount && session.userId && orderRow?.user_id === session.userId) return true;
+  return Boolean(orderRow?.user_id) && orderRow.user_id === req.user?.id;
+}
+
 export const getOrderById = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
@@ -38,7 +55,7 @@ export const getOrderById = async (req: Request, res: Response, next: NextFuncti
     keepAlive(runSweepIfDue({ limit: 15 }));
     const data = await orderService.getOrderById(id as string);
     // Ownership check: shoppers may only fetch their own orders; admins any.
-    if (req.user?.role !== 'admin' && (data as any)?.user_id !== req.user?.id) {
+    if (!mayReadOrder(req, data)) {
       return res.status(403).json({ error: { message: 'Forbidden' } });
     }
     res.json({ data });
@@ -81,7 +98,7 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       body.email = String(req.body.email).trim().toLowerCase();
     }
 
-    const data = await orderService.createOrder(body, session?.userId);
+    const data = await orderService.createOrder(body, session?.userId ?? undefined);
 
     // Every order is invoiced the moment it is created â€” COD and prepaid alike,
     // paid or not. A tax invoice documents the sale, and the sale happens when
@@ -302,8 +319,9 @@ export const downloadInvoice = async (req: Request, res: Response, next: NextFun
     if (!orderRow) {
       return res.status(404).json({ error: { message: 'Order not found' } });
     }
-    // The order's own customer, or any admin. Nothing else can read it.
-    if (req.user?.role !== 'admin' && orderRow.user_id !== req.user?.id) {
+    // The order's own customer, the session that created it, or any admin.
+    // Nothing else can read it.
+    if (!mayReadOrder(req, orderRow)) {
       return res.status(403).json({ error: { message: 'Forbidden' } });
     }
 
@@ -480,7 +498,7 @@ export const invoiceStatus = async (req: Request, res: Response, next: NextFunct
     if (!orderRow) {
       return res.status(404).json({ error: { message: 'Order not found' } });
     }
-    if (req.user?.role !== 'admin' && orderRow.user_id !== req.user?.id) {
+    if (!mayReadOrder(req, orderRow)) {
       return res.status(403).json({ error: { message: 'Forbidden' } });
     }
 

@@ -393,6 +393,22 @@ export const authService = {
       unwrapError(error);
     }
   },
+
+  /**
+   * Persist the name and the email of a CHECKOUT SESSION.
+   *
+   * A session has no password login behind it, so the profile endpoint of the
+   * session is the one that answers (PUT /api/account/profile). The address
+   * book of a session is written by the checkout's own "Save Address" step,
+   * which is scoped to the session as well.
+   */
+  saveSessionProfile: async (payload: { name?: string; email?: string }): Promise<void> => {
+    try {
+      await axiosInstance.put('/account/profile', payload);
+    } catch (error: any) {
+      unwrapError(error);
+    }
+  },
   resetPassword: async (token: string, newPassword: string): Promise<void> => {
     try {
       await axiosInstance.post('/auth/reset-password', { token, newPassword });

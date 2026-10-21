@@ -83,10 +83,17 @@ async function continueWithContact(page, name, phone, email) {
   await page.getByPlaceholder('Enter your full name').first().fill(name);
   await page.locator('#checkout-mobile').first().fill(phone);
   await page.locator('#checkout-contact-email').first().fill(email);
-  await page.waitForTimeout(1500);
-  await page.getByRole('button', { name: /^Continue$/ }).first().click();
+  await page.waitForTimeout(300);
+  /**
+   * The endpoint refuses a form that was submitted implausibly fast (less
+   * than three seconds after the page rendered) - a human cannot fill a name,
+   * a number and an email that fast. The test waits, like a person would.
+   */
   await page.waitForTimeout(3500);
+  await page.getByRole('button', { name: /^Continue$/ }).first().click();
+  await page.waitForTimeout(4000);
 }
+
 
 /** Fill the address step. */
 async function fillAddress(page) {
@@ -229,7 +236,7 @@ async function main() {
   await pageA.goto(`${BASE}/account/orders`, { waitUntil: 'domcontentloaded' });
   await pageA.waitForTimeout(4000);
   const ordersBody = (await pageA.textContent('body')) || '';
-  check('a. the order history shows the order', /MV-|order/i.test(ordersBody) && ordersBody.includes('₹'), 'orders listed');
+  check('a. the order history shows the order', /MV-\\d+/i.test(ordersBody), 'orders listed');
   await shot(pageA, 'a5-account-orders');
 
   /* ---------------------------------------------------------------- */
