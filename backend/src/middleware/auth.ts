@@ -28,6 +28,42 @@ export const requireAuth = (req: Request, res: Response, next: NextFunction) => 
   }
 };
 
+/**
+ * Attach the customer session to the request, when there is one.
+ *
+ * Never rejects: a request without a session (a plain login, an admin, an
+ * anonymous visitor) simply continues. It is what lets the ORDER endpoint
+ * record the session that placed it, and the invoice endpoints recognise an
+ * order the session created.
+ */
+export const attachCustomerSession = async (
+  req: Request,
+  _res: Response,
+  next: NextFunction,
+) => {
+  try {
+    const session = await resolveSessionFromRequest(req as any);
+    if (session) {
+      req.customerSession = session;
+      // The session IS the customer for a checkout session: the order must be
+      // linked to it, not to whoever happens to hold the token.
+      if (!req.user) {
+        req.user = {
+          id: session.userId || session.id,
+          email: session.email || '',
+          role: 'customer',
+          phone_verified: session.phoneVerified,
+          scope: 'customer',
+          sid: session.id,
+        };
+      }
+    }
+  } catch {
+    /* no session — the request continues as it is */
+  }
+  next();
+};
+
 export const requireAdmin = (req: Request, res: Response, next: NextFunction) => {
   if (req.user?.role !== 'admin') {
     return res.status(403).json({ error: { message: 'Forbidden - Requires admin privileges' } });

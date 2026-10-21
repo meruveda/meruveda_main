@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { getOrders, getOrderById, createOrder, updateOrderStatus, getMyOrders, updateOrder, deleteOrder, trackOrder, trackByAwb, invoiceStatus, resendInvoice, downloadInvoice, downloadInvoiceForGuest, pushToShiprocket, retryShiprocketPushes } from '../controllers/ordersController';
-import { requireAuth, requireAdmin, requireFullAuth, requireCustomerSession } from '../middleware/auth';
+import { requireAuth, requireAdmin, requireFullAuth, requireCustomerSession, attachCustomerSession } from '../middleware/auth';
 import { orderCreateLimiter, trackAwbLimiter, trackInvoiceLimiter } from '../middleware/rateLimit';
 
 const router = Router();
@@ -24,6 +24,10 @@ router.get('/retry-shiprocket-failed', retryShiprocketPushes as any);
 router.post('/retry-shiprocket-failed', retryShiprocketPushes as any);
 
 router.use(requireAuth as any);
+// The customer session (the profile created at the checkout) is attached when
+// the request carries one. It is what records the session on the order, so the
+// order history of a session is scoped to the orders that session created.
+router.use(attachCustomerSession as any);
 
 router.get('/my', requireCustomerSession as any, getMyOrders as any);
 router.post('/', orderCreateLimiter, createOrder as any);
