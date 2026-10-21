@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
 import cors from 'cors';
-import { parseAllowedOrigins, isOriginAllowed, normalizeOrigin } from './corsOrigins';
+import { parseAllowedOrigins, isOriginAllowed, normalizeOrigin, expandStorefrontOrigins } from './corsOrigins';
 
 const PROD_ORIGINS = 'https://meruveda.com/,https://admin.meruveda.com';
 
@@ -80,4 +80,28 @@ test('CORS headers: allowed origin gets ACAO, evil origin none, no-origin passes
   const noOrigin = await fetch(`${base}/ping`);
   assert.equal(noOrigin.status, 200);
   assert.equal(noOrigin.headers.get('access-control-allow-origin'), null);
+});
+
+// --- the storefront origin is always allowed (apex and www) ----------------
+// A browser on one spelling that reaches the API on the other makes a
+// cross-origin request; without the origin in the allowlist the browser
+// blocks the answer and the page shows a bare "Network Error".
+test('expandStorefrontOrigins: the storefront origin and its www twin are allowed', () => {
+  const allowed = expandStorefrontOrigins(new Set<string>(), 'https://meruvedawellness.com');
+  assert.ok(allowed.has('https://meruvedawellness.com'));
+  assert.ok(allowed.has('https://www.meruvedawellness.com'));
+  assert.ok(isOriginAllowed('https://www.meruvedawellness.com', allowed, 'production'));
+  assert.ok(isOriginAllowed('https://meruvedawellness.com', allowed, 'production'));
+  assert.ok(!isOriginAllowed('https://evil.com', allowed, 'production'));
+});
+
+test('expandStorefrontOrigins: a www storefront url also allows the apex', () => {
+  const allowed = expandStorefrontOrigins(new Set<string>(), 'https://www.meruvedawellness.com/');
+  assert.ok(allowed.has('https://www.meruvedawellness.com'));
+  assert.ok(allowed.has('https://meruvedawellness.com'));
+});
+
+test('expandStorefrontOrigins: without a storefront url nothing is added', () => {
+  const allowed = expandStorefrontOrigins(new Set<string>(['https://admin.example.com']), undefined);
+  assert.equal(allowed.size, 1);
 });

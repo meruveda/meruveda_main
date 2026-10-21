@@ -63,7 +63,7 @@ if (!process.env.PAYU_SALT) {
   process.exit(1);
 }
 
-import { parseAllowedOrigins } from './corsOrigins';
+import { parseAllowedOrigins, expandStorefrontOrigins } from './corsOrigins';
 
 const nodeEnv = process.env.NODE_ENV || 'development';
 
@@ -77,6 +77,10 @@ try {
   console.error(`❌ FATAL: ${err.message}`);
   process.exit(1);
 }
+
+// The storefront's own origin (apex and www) is always allowed, so a browser
+// that reaches the API on the other spelling is never blocked by CORS.
+expandStorefrontOrigins(allowedOriginsSet, process.env.FRONTEND_URL);
 
 export const config = {
   port: process.env.PORT || 5000,

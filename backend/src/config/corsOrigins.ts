@@ -34,6 +34,46 @@ export function parseAllowedOrigins(raw: string | undefined, nodeEnv: string): S
   return set;
 }
 
+/**
+ * The storefront's own origin is always allowed.
+ *
+ * The shop is served on the apex and on `www`, and a browser that talks to
+ * the API on the OTHER one makes a cross-origin request. When that origin is
+ * missing from the allowlist the browser blocks the answer and the page shows
+ * a bare "Network Error" instead of the server's message. `ALLOWED_ORIGINS`
+ * is a secret env var, so this cannot be fixed by editing it on the server -
+ * the storefront origin is derived from `FRONTEND_URL` instead, and both
+ * spellings (apex and www) are allowed.
+ */
+export function expandStorefrontOrigins(
+  allowed: Set<string>,
+  storefrontUrl: string | undefined,
+): Set<string> {
+  const raw = (storefrontUrl || '').trim().replace(/\/+$/, '');
+  if (!raw) return allowed;
+  let origin: string;
+  let host: string;
+  try {
+    const url = new URL(raw);
+    origin = `${url.protocol}//${url.host}`;
+    host = url.host;
+  } catch {
+    origin = raw;
+    host = '';
+  }
+  const hosts = new Set<string>();
+  if (host) {
+    hosts.add(host);
+    // apex <-> www
+    if (host.startsWith('www.')) hosts.add(host.slice(4));
+    else hosts.add(`www.${host}`);
+  }
+  for (const candidate of hosts) {
+    allowed.add(normalizeOrigin(`${origin.split('//')[0]}//${candidate}`));
+  }
+  return allowed;
+}
+
 export function isOriginAllowed(
   origin: string | undefined,
   allowed: Set<string>,
