@@ -5,6 +5,7 @@ import axiosInstance from '../api/axiosInstance';
 import { useAuth } from './AuthContext';
 import { track } from '@vercel/analytics';
 import { track as trackEvent } from '@/lib/analytics';
+import { getMainImageUrl } from '@/lib/productImage';
 
 export type CartItem = {
   id: string;
@@ -89,7 +90,7 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
           cartItemId: item.id, // Keep the actual cart_item PK
           name: item.products?.name,
           price: item.products?.selling_price,
-          image: item.products?.images?.[0]?.url || '/images/placeholder.jpg',
+          image: getMainImageUrl(item.products?.images),
           quantity: item.quantity,
           gst: item.products?.seo_metadata?.gst !== undefined 
             ? item.products.seo_metadata.gst 

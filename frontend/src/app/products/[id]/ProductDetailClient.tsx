@@ -14,6 +14,7 @@ import { Minus, Plus, ShoppingCart, Sparkles, Droplets, Star, Loader2, ArrowRigh
 import { useCart } from '@/context/CartContext';
 import { useAuth } from '@/context/AuthContext';
 import { track } from '@/lib/analytics';
+import { getImageUrls } from '@/lib/productImage';
 import { motion, AnimatePresence } from 'framer-motion';
 
 /** One approved review as GET /api/reviews returns it. */
@@ -54,8 +55,11 @@ export default function ProductDetailClient({
   const { isAuthenticated } = useAuth();
   const router = useRouter();
 
+  // The MAIN image is the first one the catalogue stores; it can be a plain
+  // url or a {id,url,alt} entry, so it is read through the shared helper.
+  const galleryImages = getImageUrls(product.images);
   const [mainImage, setMainImage] = useState(
-    product.images?.[0]?.url || product.thumbnail || '/images/placeholder.jpg'
+    galleryImages[0] || product.thumbnail || '/images/placeholder.jpg'
   );
   
   const [localQuantity, setLocalQuantity] = useState(1);
@@ -180,16 +184,16 @@ const ratingSummary = useMemo(() => summarize(reviewSource), [reviewSource]);
             </div>
             
             {/* Thumbnails */}
-            {product.images && product.images.length > 1 && (
+            {galleryImages.length > 1 && (
               <div className="flex gap-4 overflow-x-auto pb-2 scrollbar-hide">
-                {product.images.map((img: any, idx: number) => (
-                  <button 
-                    key={idx}
-                    onClick={() => setMainImage(img.url)}
-                    className={`relative w-20 h-20 rounded-xl overflow-hidden flex-shrink-0 transition-all border ${mainImage === img.url ? 'border-gold-antique' : 'border-transparent bg-stone-100 hover:border-gold-antique/50'}`}
+                {galleryImages.map((url: string, idx: number) => (
+                  <button
+                    key={`${url}-${idx}`}
+                    onClick={() => setMainImage(url)}
+                    className={`relative w-20 h-20 rounded-xl overflow-hidden flex-shrink-0 transition-all border ${mainImage === url ? 'border-gold-antique' : 'border-transparent bg-stone-100 hover:border-gold-antique/50'}`}
                   >
                     <div className="absolute inset-0 p-2">
-                      <MediaImage src={img.url} alt={`${product.name} thumbnail ${idx + 1}`} fill sizes="80px" className="object-contain" />
+                      <MediaImage src={url} alt={`${product.name} thumbnail ${idx + 1}`} fill sizes="80px" className="object-contain" />
                     </div>
                   </button>
                 ))}

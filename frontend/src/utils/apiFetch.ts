@@ -33,8 +33,8 @@ export interface ApiFetchOptions {
   attempts?: number;
   /** The overall budget for every attempt and every backoff. */
   totalTimeoutMs?: number;
-  /** Next.js fetch options, e.g. `{ next: { revalidate: 300 } }`. */
-  next?: { revalidate?: number | false };
+  /** Next.js fetch options, e.g. `{ next: { revalidate: 60, tags: ['products'] } }`. */
+  next?: { revalidate?: number | false; tags?: string[] };
   /** A label used in the server log. */
   label?: string;
 }

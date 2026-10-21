@@ -115,3 +115,35 @@ test('oversize body (> 10 MB) is rejected with 502', async (t) => {
     return true;
   });
 });
+
+// --- the redirect target must never point at an object that does not exist --
+// The bucket only holds the -400/-800/-1600 derivative of an upload when the
+// upload wrote it. Redirecting to a missing derivative is a 404 in the
+// browser, which is what broke every product photo, card and hero banner.
+const { r2RedirectTarget } = require('./imageRoutes') as typeof import('./imageRoutes');
+
+// A different object per test: the existence probe is cached per url.
+const uploaded = (hash: string) =>
+  'https://pub-unit-test.r2.dev/general-media/1792563989318-' + hash + '.webp';
+
+test('a missing derivative falls back to the original object, never a 404', async (t) => {
+  // Every HEAD probe says "not found" - the bucket has no derivatives.
+  t.mock.method(globalThis, 'fetch', (async () => resp(404)) as any);
+  const target = await r2RedirectTarget(uploaded('aaaaaaaa'), 640);
+  assert.equal(target, uploaded('aaaaaaaa'));
+});
+
+test('an existing derivative is used', async (t) => {
+  t.mock.method(globalThis, 'fetch', (async (url: any) => {
+    const href = String(url);
+    return href.endsWith('-800.webp') ? resp(200) : resp(404);
+  }) as any);
+  const target = await r2RedirectTarget(uploaded('bbbbbbbb'), 640);
+  assert.equal(target, 'https://pub-unit-test.r2.dev/general-media/1792563989318-bbbbbbbb-800.webp');
+});
+
+test('a request wider than every derivative is served from the original', async (t) => {
+  t.mock.method(globalThis, 'fetch', (async () => resp(404)) as any);
+  const target = await r2RedirectTarget(uploaded('cccccccc'), 1920);
+  assert.equal(target, uploaded('cccccccc'));
+});

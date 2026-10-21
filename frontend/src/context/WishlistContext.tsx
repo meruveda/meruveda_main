@@ -4,6 +4,7 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import axiosInstance from '../api/axiosInstance';
 import { useAuth } from './AuthContext';
 import { useAccountPages } from './StoreConfigContext';
+import { getMainImageUrl } from '@/lib/productImage';
 
 export type WishlistItem = {
   id: string;
@@ -49,7 +50,7 @@ export function WishlistProvider({ children }: { children: React.ReactNode }) {
           wishlistItemId: item.id,
           name: item.products?.name,
           price: item.products?.selling_price,
-          image: item.products?.images?.[0]?.url || '/images/placeholder.jpg',
+          image: getMainImageUrl(item.products?.images),
         }));
         setWishlist(dbWishlist);
       } catch (e) {

@@ -71,11 +71,37 @@ function isAllowedHost(hostname: string): boolean {
 }
 
 /**
+ * Does this object exist in the public bucket?
+ *
+ * The bucket only holds the `-400/-800/-1600` derivative of an upload when the
+ * upload actually wrote it. Redirecting to a derivative that was never written
+ * is a 404 in the browser - every product photo, card and hero banner was
+ * broken by exactly that. The answer is cached for a few minutes so the
+ * storefront does not pay for a HEAD per request.
+ */
+const variantProbeCache = new Map<string, { exists: boolean; expiresAt: number }>();
+const VARIANT_PROBE_TTL_MS = 10 * 60 * 1000;
+
+async function r2ObjectExists(url: string): Promise<boolean> {
+  const cached = variantProbeCache.get(url);
+  if (cached && cached.expiresAt > Date.now()) return cached.exists;
+  let exists = false;
+  try {
+    const res = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(5000) });
+    exists = res.ok;
+  } catch {
+    exists = false;
+  }
+  variantProbeCache.set(url, { exists, expiresAt: Date.now() + VARIANT_PROBE_TTL_MS });
+  return exists;
+}
+
+/**
  * Map a stored object URL onto its key inside the R2 public bucket and 302
  * there. Returns null when the URL is not a storage object we can map (the
  * caller then falls back to the proxy path).
  */
-function r2RedirectTarget(rawUrl: string, width: number): string | null {
+async function r2RedirectTarget(rawUrl: string, width: number): Promise<string | null> {
   if (!r2PublicBase) return null;
   let parsed: URL;
   try {
@@ -97,19 +123,18 @@ function r2RedirectTarget(rawUrl: string, width: number): string | null {
   if (!key) return null;
 
   // Prefer a pre-rendered variant when the requested width is smaller than the
-  // original. Uploaded media always has 400/800/1600 variants; legacy assets may
-  // not, in which case the original key is the correct answer.
+  // original. The derivative only exists when the upload wrote it, so the
+  // candidate is probed first: a redirect to a missing object is a 404 in the
+  // browser and every photo on the site was broken by it. The original object
+  // is always a valid fallback.
   if (/\.webp$/i.test(key)) {
-    for (const variant of [1600, 800, 400]) {
-      if (width <= variant) {
-        const candidate = key.replace(/\.webp$/i, `-${variant}.webp`);
-        // We cannot cheaply HEAD every request here; the CDN will 404 a missing
-        // variant, so only rewrite when we know variants are generated for this
-        // path (uploaded media always is). Legacy asset keys are left untouched
-        // by the upload-assets script, so use the original for non-media paths.
-        if (/^(general-media|banners|journal)\//.test(key) && /\d{13}-[a-f0-9]{8}\.webp$/i.test(key)) {
-          return `${r2PublicBase}/${candidate}`;
-        }
+    const uploaded = /^(general-media|banners|journal)\//.test(key) && /\d{13}-[a-f0-9]{8}\.webp$/i.test(key);
+    if (uploaded) {
+      // Smallest derivative that is still at least as wide as the request.
+      const candidates = [400, 800, 1600].filter((variant) => variant >= width).sort((a, b) => a - b);
+      for (const variant of candidates) {
+        const candidate = `${r2PublicBase}/${key.replace(/\.webp$/i, `-${variant}.webp`)}`;
+        if (await r2ObjectExists(candidate)) return candidate;
       }
     }
   }
@@ -350,7 +375,7 @@ router.get('/fetch', imageProxyLimiter, async (req: Request, res: Response) => {
 
     // Canonical path: the object already exists on R2. Redirecting (rather than
     // proxying/resizing again) removes the per-cold-start re-download entirely.
-    const redirect = r2RedirectTarget(source, width);
+    const redirect = await r2RedirectTarget(source, width);
     if (redirect) {
       res.setHeader('Cache-Control', 'public, max-age=300');
       return res.redirect(302, redirect);
@@ -413,5 +438,5 @@ router.get('/fetch', imageProxyLimiter, async (req: Request, res: Response) => {
   }
 });
 
-export { validateUpstreamUrl, fetchUpstreamImage, snapWidth };
+export { validateUpstreamUrl, fetchUpstreamImage, snapWidth, r2RedirectTarget };
 export default router;

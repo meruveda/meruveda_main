@@ -1,4 +1,4 @@
-export const revalidate = 300; // ISR: public pages are revalidated every 5 minutes
+export const revalidate = 60; // ISR: the admin drops this cache right after a save (see /api/revalidate); 60s is the fallback
 import MediaImage from "@/components/MediaImage";
 import Link from "next/link";
 import { Search, Leaf, ShieldCheck, Heart, Wind, Sparkles, Droplet, Star, ArrowRight } from "lucide-react";
@@ -10,6 +10,7 @@ import { API_BASE_URL } from "@/utils/apiUrl";
 import { apiGetJson, shouldThrowOnFetchFailure } from "@/utils/apiFetch";
 import { CatalogueLoading } from "@/components/CatalogueLoading";
 import ProfileRequiredNotice from "@/components/ProfileRequiredNotice";
+import { getMainImageUrl } from "@/lib/productImage";
 
 export const metadata = {
   title: "MERUVEDA | Authentic Ayurvedic Products",
@@ -22,7 +23,7 @@ async function getBanners() {
   // error is THROWN so the App Router keeps serving the last good ISR page
   // instead of replacing the home page with an empty hero.
   const json = await apiGetJson<any>(`${API_BASE_URL}/banners`, {
-    next: { revalidate: 300 },
+    next: { revalidate: 60, tags: ['products'] },
     label: 'Home/banners',
   });
   return json?.data || [];
@@ -30,18 +31,13 @@ async function getBanners() {
 
 async function getFeaturedProducts() {
   const json = await apiGetJson<any>(`${API_BASE_URL}/products?isFeatured=true&limit=4`, {
-    next: { revalidate: 300 },
+    next: { revalidate: 60, tags: ['products'] },
     label: 'Home/featured',
   });
   return (json?.data || []).map((p: any) => {
-    let img = '/images/product_oil.png';
-    if (p.images && Array.isArray(p.images) && p.images.length > 0 && typeof p.images[0] === 'string' && p.images[0].trim() !== '') {
-      img = p.images[0];
-    } else if (typeof p.images === 'string' && p.images.trim() !== '') {
-      img = p.images;
-    } else if (p.images && p.images[0] && typeof p.images[0] === 'object' && p.images[0].url) {
-      img = p.images[0].url;
-    }
+    // The MAIN image is the first one, whatever shape the catalogue stores it
+    // in (plain urls or {id,url,alt} entries).
+    const img = getMainImageUrl(p.images, '/images/product_oil.png');
     const price = (p.sellingPrice !== undefined && p.sellingPrice !== null && p.sellingPrice < p.price) ? p.sellingPrice : p.price;
     const originalPrice = (p.sellingPrice !== undefined && p.sellingPrice !== null && p.sellingPrice < p.price) ? p.price : null;
     const discount = originalPrice ? `${Math.round(((originalPrice - price) / originalPrice) * 100)}% OFF` : null;
@@ -89,7 +85,7 @@ function getHomepageReviews() {
 
 async function getBlogPosts() {
   const json = await apiGetJson<any>(`${API_BASE_URL}/blogs?status=published`, {
-    next: { revalidate: 300 },
+    next: { revalidate: 60, tags: ['products'] },
     label: 'Home/blogs',
   });
   return json?.data || [];

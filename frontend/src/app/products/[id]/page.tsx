@@ -3,7 +3,7 @@ import ProductDetailClient from './ProductDetailClient';
 import { API_BASE_URL } from '@/utils/apiUrl';
 import { apiGetJson, shouldThrowOnFetchFailure } from '@/utils/apiFetch';
 
-export const revalidate = 300; // ISR: public pages are revalidated every 5 minutes
+export const revalidate = 60; // ISR: the admin drops this cache right after a save (see /api/revalidate); 60s is the fallback
 
   async function getProduct(id: string) {
     // Retried, and on total failure the error is THROWN so the App Router
@@ -12,7 +12,7 @@ export const revalidate = 300; // ISR: public pages are revalidated every 5 minu
     // compiled, and that must not fail the deployment.
     try {
       const json = await apiGetJson<any>(`${API_BASE_URL}/products/${id}`, {
-        next: { revalidate: 300 },
+        next: { revalidate: 60, tags: ['products'] },
         label: 'Product/detail',
       });
       return json?.data ?? null;
@@ -34,7 +34,7 @@ export const revalidate = 300; // ISR: public pages are revalidated every 5 minu
     try {
       const json = await apiGetJson<any>(
         `${API_BASE_URL}/reviews?productId=${encodeURIComponent(id)}`,
-        { next: { revalidate: 300 }, label: 'Product/reviews' },
+        { next: { revalidate: 60, tags: ['products'] }, label: 'Product/reviews' },
       );
       return Array.isArray(json?.data) ? json.data : [];
     } catch {

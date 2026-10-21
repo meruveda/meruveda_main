@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { productService } from '../services/productService';
+import { triggerStorefrontRevalidation } from '../services/revalidateService';
 
 export const getProducts = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -35,6 +36,9 @@ export const getProductById = async (req: Request, res: Response, next: NextFunc
 export const createProduct = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const data = await productService.createProduct(req.body);
+    // The storefront renders the catalogue with ISR: drop its cache now so the
+    // new product shows up on the next reload instead of after the TTL.
+    await triggerStorefrontRevalidation('product:create');
     res.status(201).json({ data });
   } catch (error) {
     next(error);
@@ -45,6 +49,7 @@ export const updateProduct = async (req: Request, res: Response, next: NextFunct
   try {
     const { id } = req.params;
     const data = await productService.updateProduct(id as string, req.body);
+    await triggerStorefrontRevalidation('product:update');
     res.json({ data });
   } catch (error) {
     next(error);
@@ -55,6 +60,7 @@ export const deleteProduct = async (req: Request, res: Response, next: NextFunct
   try {
     const { id } = req.params;
     await productService.deleteProduct(id as string);
+    await triggerStorefrontRevalidation('product:delete');
     res.status(204).send();
   } catch (error) {
     next(error);

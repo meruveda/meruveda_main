@@ -1,8 +1,9 @@
-export const revalidate = 300; // ISR: public pages are revalidated every 5 minutes
+export const revalidate = 60; // ISR: the admin drops this cache right after a save (see /api/revalidate); 60s is the fallback
 import ProductGrid from "@/components/ProductGrid";
 import { API_BASE_URL } from "@/utils/apiUrl";
 import { apiGetJson, shouldThrowOnFetchFailure } from "@/utils/apiFetch";
 import { CatalogueLoading } from "@/components/CatalogueLoading";
+import { getMainImageUrl } from "@/lib/productImage";
 
 export const metadata = {
   title: "All Products | MeruVeda",
@@ -26,7 +27,7 @@ async function getProducts() {
   // a friendly placeholder and the first real request revalidates the page.
   let json: any;
   try {
-    json = await apiGetJson<any>(targetUrl, { next: { revalidate: 300 }, label: 'Products' });
+    json = await apiGetJson<any>(targetUrl, { next: { revalidate: 60, tags: ['products'] }, label: 'Products' });
   } catch (error) {
     if (!shouldThrowOnFetchFailure()) {
       console.warn('[Products] the catalogue service was not reachable.');
@@ -35,14 +36,9 @@ async function getProducts() {
     throw error;
   }
   const products = (json?.data || []).map((p: any) => {
-    let img = '/images/product_oil.png';
-    if (p.images && Array.isArray(p.images) && p.images.length > 0 && typeof p.images[0] === 'string' && p.images[0].trim() !== '') {
-      img = p.images[0];
-    } else if (typeof p.images === 'string' && p.images.trim() !== '') {
-      img = p.images;
-    } else if (p.images && p.images[0] && typeof p.images[0] === 'object' && p.images[0].url) {
-      img = p.images[0].url;
-    }
+    // The MAIN image is the first one, whatever shape the catalogue stores it
+    // in (plain urls or {id,url,alt} entries).
+    const img = getMainImageUrl(p.images, '/images/product_oil.png');
     const price = (p.sellingPrice !== undefined && p.sellingPrice !== null && p.sellingPrice < p.price) ? p.sellingPrice : p.price;
     const originalPrice = (p.sellingPrice !== undefined && p.sellingPrice !== null && p.sellingPrice < p.price) ? p.price : null;
     const discount = originalPrice ? `${Math.round(((originalPrice - price) / originalPrice) * 100)}% OFF` : null;
