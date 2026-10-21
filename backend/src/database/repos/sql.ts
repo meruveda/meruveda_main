@@ -14,14 +14,31 @@ export function ident(name: string): string {
   return `"${name}"`;
 }
 
+export interface WriteOptions {
+  /**
+   * Columns that hold JSON text. node-postgres and Neon's HTTP driver turn a
+   * JS array/object parameter into a Postgres array literal (`{"a","b"}`),
+   * which a json/jsonb column rejects with "invalid input syntax for type
+   * json". Callers stringify those values and list them here so the bind is
+   * explicitly cast.
+   */
+  jsonColumns?: string[];
+}
+
+function bindPlaceholder(col: string, index: number, jsonColumns: Set<string>): string {
+  return jsonColumns.has(col) ? `$${index + 1}::jsonb` : `$${index + 1}`;
+}
+
 export async function insertRow<T = any>(
   table: string,
   data: Record<string, any>,
   q: QueryFn = query,
+  opts: WriteOptions = {},
 ): Promise<T> {
   const cols = Object.keys(data);
   if (cols.length === 0) throw new Error(`insertRow(${table}) called with no columns`);
-  const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
+  const jsonColumns = new Set(opts.jsonColumns ?? []);
+  const placeholders = cols.map((c, i) => bindPlaceholder(c, i, jsonColumns)).join(', ');
   const text = `INSERT INTO ${ident(table)} (${cols.map(ident).join(', ')}) VALUES (${placeholders}) RETURNING *`;
   const rows = await q<T>(text, cols.map((c) => data[c]));
   return rows[0];
@@ -54,13 +71,15 @@ export async function updateById<T = any>(
   id: string,
   data: Record<string, any>,
   q: QueryFn = query,
+  opts: WriteOptions = {},
 ): Promise<T | null> {
   const cols = Object.keys(data);
   if (cols.length === 0) {
     const rows = await q<T>(`SELECT * FROM ${ident(table)} WHERE id = $1`, [id]);
     return rows[0] ?? null;
   }
-  const sets = cols.map((c, i) => `${ident(c)} = $${i + 1}`).join(', ');
+  const jsonColumns = new Set(opts.jsonColumns ?? []);
+  const sets = cols.map((c, i) => `${ident(c)} = ${bindPlaceholder(c, i, jsonColumns)}`).join(', ');
   const text = `UPDATE ${ident(table)} SET ${sets} WHERE id = $${cols.length + 1} RETURNING *`;
   const rows = await q<T>(text, [...cols.map((c) => data[c]), id]);
   return rows[0] ?? null;
