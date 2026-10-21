@@ -8,7 +8,18 @@ import tseslint from 'typescript-eslint';
 export default tseslint.config(
   {
     // Build output / Next caches / generated files — never linted.
-    ignores: ['.next/**', 'out/**', 'node_modules/**', 'next-env.d.ts', 'dist/**'],
+    // The node scripts (scripts/**) and the root *.cjs helpers are plain
+    // CommonJS tools, not part of the app: they use require/process and are
+    // not covered by the browser globals below.
+    ignores: [
+      '.next/**',
+      'out/**',
+      'node_modules/**',
+      'next-env.d.ts',
+      'dist/**',
+      'scripts/**',
+      '*.cjs',
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

@@ -10,8 +10,6 @@ import { INDIAN_STATES, isIndianState } from "@/constants/states";
 import { CountryPhoneField } from "@/components/CountryPhoneField";
 import { DEFAULT_COUNTRY, type Country } from "@/constants/countries";
 
-const [phoneCountry, setPhoneCountry] = useState<Country>(DEFAULT_COUNTRY);
-
 const EMPTY_FORM = {
   fullName: "",
   houseFlat: "",
@@ -29,6 +27,7 @@ type FormState = typeof EMPTY_FORM;
 
 export default function AddressesPage() {
   const [addresses, setAddresses] = useState<AccountAddress[]>([]);
+  const [phoneCountry, setPhoneCountry] = useState<Country>(DEFAULT_COUNTRY);
   const [formOpen, setFormOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
