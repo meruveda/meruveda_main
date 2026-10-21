@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import * as reviewsRepo from '../database/repos/reviews';
+import * as productsRepo from '../database/repos/products';
 import { hasColumn } from '../services/schemaGuard';
 import { verifyToken } from '../utils/jwt';
 
@@ -37,8 +38,20 @@ export const getReviews = async (req: Request, res: Response, next: NextFunction
       statusFilter = 'approved';
     }
 
+    // `productId` may be a uuid (the admin app) or a slug (a product-page URL).
+    // reviews.product_id is a uuid, so a slug must be resolved first — binding
+    // it directly answers `invalid input syntax for type uuid` (a 500).
+    // No matching product means an empty list, not an error.
+    let productIdFilter: string | undefined;
+    if (productId) {
+      productIdFilter = (await productsRepo.resolveProductId(String(productId))) ?? undefined;
+      if (!productIdFilter) {
+        return res.json({ data: [], total: 0 });
+      }
+    }
+
     const { rows: data, count } = await reviewsRepo.listReviews({
-      productId: productId ? String(productId) : undefined,
+      productId: productIdFilter,
       status: statusFilter,
     });
     res.json({ data, total: count });
@@ -77,10 +90,25 @@ export const createReview = async (req: Request, res: Response, next: NextFuncti
       return res.status(400).json({ error: { message: 'comment must be a string' } });
     }
 
+    // `product_id` may arrive as a slug from a product-page URL; resolve it to
+    // the uuid reviews.product_id stores. Unknown product → 404, not a uuid 500.
+    const resolvedProductId = await productsRepo.resolveProductId(String(product_id));
+    if (!resolvedProductId) {
+      return res.status(404).json({ error: { message: 'Product not found' } });
+    }
+
     // Whitelist customer-writable fields only. Privileged columns
-    // (is_featured, reply, user_id, status, id, timestamps) can never be
-    // mass-assigned; new reviews always enter the moderation queue.
-    const reviewData = { product_id, rating: ratingNum, comment: comment ?? null, user_id: userId, status: 'pending' };
+    // (is_featured, reply, user_id, id, timestamps) can never be mass-assigned.
+    // Status is the one moderation field the endpoint sets itself: an admin
+    // review is published immediately, a customer review always enters the
+    // moderation queue as pending.
+    const reviewData = {
+      product_id: resolvedProductId,
+      rating: ratingNum,
+      comment: comment ?? null,
+      user_id: userId,
+      status: requesterIsAdmin(req) ? 'approved' : 'pending',
+    };
 
     const data = await reviewsRepo.insertReview(reviewData);
     res.status(201).json({ data });

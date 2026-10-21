@@ -25,6 +25,23 @@ export const revalidate = 300; // ISR: public pages are revalidated every 5 minu
     }
   }
 
+  /**
+   * Approved reviews for this product. The id may be a slug or a uuid — the
+   * backend resolves both. Unlike the product itself, a failed reviews fetch
+   * must NEVER take the page down: it degrades to "no reviews".
+   */
+  async function getProductReviews(id: string): Promise<any[]> {
+    try {
+      const json = await apiGetJson<any>(
+        `${API_BASE_URL}/reviews?productId=${encodeURIComponent(id)}`,
+        { next: { revalidate: 300 }, label: 'Product/reviews' },
+      );
+      return Array.isArray(json?.data) ? json.data : [];
+    } catch {
+      return [];
+    }
+  }
+
 export async function generateMetadata({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const product = await getProduct(id);
@@ -41,7 +58,7 @@ export async function generateMetadata({ params }: { params: Promise<{ id: strin
 
 export default async function ProductDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const product = await getProduct(id);
+  const [product, reviews] = await Promise.all([getProduct(id), getProductReviews(id)]);
 
   if (!product) {
     notFound();
@@ -49,7 +66,7 @@ export default async function ProductDetailPage({ params }: { params: Promise<{ 
 
   return (
     <div className="bg-ivory min-h-screen">
-      <ProductDetailClient product={product} />
+      <ProductDetailClient product={product} reviews={reviews} />
     </div>
   );
 }

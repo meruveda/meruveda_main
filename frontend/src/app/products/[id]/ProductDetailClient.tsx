@@ -5,6 +5,7 @@ import {
   reviewsForProduct,
   sortReviews,
   summarize,
+  type Review,
   type ReviewSort,
 } from '@/data/reviews';
 import MediaImage from "@/components/MediaImage";
@@ -15,7 +16,40 @@ import { useAuth } from '@/context/AuthContext';
 import { track } from '@/lib/analytics';
 import { motion, AnimatePresence } from 'framer-motion';
 
-export default function ProductDetailClient({ product }: { product: any }) {
+/** One approved review as GET /api/reviews returns it. */
+interface ProductReviewApi {
+  id: string;
+  rating?: number | string | null;
+  comment?: string | null;
+  title?: string | null;
+  created_at?: string | null;
+  users?: { first_name?: string | null; last_name?: string | null } | null;
+}
+
+/** Map an API row onto the display shape the review wall already renders. */
+function toDisplayReview(review: ProductReviewApi, productId: string): Review {
+  const stars = Math.min(5, Math.max(1, Math.round(Number(review.rating) || 0)));
+  return {
+    id: review.id,
+    productId,
+    name:
+      [review.users?.first_name, review.users?.last_name].filter(Boolean).join(' ').trim() ||
+      'Customer',
+    rating: stars as Review['rating'],
+    title: review.title || undefined,
+    text: review.comment || '',
+    date: String(review.created_at || '').slice(0, 10),
+  };
+}
+
+export default function ProductDetailClient({
+  product,
+  reviews: apiReviews,
+}: {
+  product: any;
+  /** Approved reviews from GET /api/reviews (server-fetched; may be []). */
+  reviews?: ProductReviewApi[];
+}) {
   const { addToCartGuarded, cart, updateQuantity } = useCart();
   const { isAuthenticated } = useAuth();
   const router = useRouter();
@@ -41,21 +75,24 @@ export default function ProductDetailClient({ product }: { product: any }) {
   }, [product?.id]);
 
   /**
- * Reviews are a static, human-curated list (src/data/reviews.ts) — real reviews
- * from customers who gave permission, never generated rows and never a submit
- * form. There is no review POST and no moderation queue: a review gets added to
- * that file by a human, or it does not exist.
- *
- * The list currently ships empty, which is why there is no loading state and no
- * empty-state spinner: there is nothing to wait for.
+ * Reviews come from the database (GET /api/reviews, approved only) and are
+ * server-fetched with the page, so the wall, the average and the count always
+ * reflect what the admin has approved. The curated static list in
+ * src/data/reviews.ts remains the fallback when the API is unreachable.
  */
 const [sort, setSort] = useState<ReviewSort>('newest');
-  const reviews = useMemo(() => {
-  const list = reviewsForProduct(product.slug || product.name || '');
-  return sortReviews(list, sort);
-}, [product.slug, product.name, sort]);
 
-const ratingSummary = useMemo(() => summarize(reviewsForProduct(product.slug || product.name || '')), [product.slug, product.name]);
+  const reviewSource = useMemo(() => {
+    const fromApi = (apiReviews ?? [])
+      .map((review) => toDisplayReview(review, product.slug || product.id || 'all'))
+      .filter((review) => review.rating > 0);
+    if (fromApi.length > 0) return fromApi;
+    return reviewsForProduct(product.slug || product.name || '');
+  }, [apiReviews, product.slug, product.id, product.name]);
+
+  const reviews = useMemo(() => sortReviews(reviewSource, sort), [reviewSource, sort]);
+
+const ratingSummary = useMemo(() => summarize(reviewSource), [reviewSource]);
 
 
   const cartItem = cart.find((item: any) => item.id === product.id);
@@ -451,9 +488,9 @@ const ratingSummary = useMemo(() => summarize(reviewsForProduct(product.slug || 
           </div>
         </div>
 
-{/* Reviews — a static, curated list of real customer reviews.
-            No submit form and no moderation: a review exists because a human
-            added it to src/data/reviews.ts. */}
+{/* Ratings & Reviews — approved reviews from the database (rendered
+            server-side with the page), with the curated static list as the
+            fallback when the reviews service is unreachable. */}
         <div className="mt-20 pt-16 border-t border-stone-200">
           <h3 className="text-3xl font-fraunces font-medium text-plum-deep mb-8">Ratings &amp; Reviews</h3>
 

@@ -103,16 +103,53 @@ export async function listProducts(opts: ProductListOptions): Promise<{ rows: an
   return { rows, count };
 }
 
-export async function getProductById(id: string): Promise<any | null> {
+/**
+ * Canonical UUID shape.
+ *
+ * A non-uuid (a product slug) must never be bound to a uuid column: Postgres
+ * answers `invalid input syntax for type uuid`, which surfaces as a 500 where
+ * the caller wanted a 404. Note the blogs repo's `id = $1 OR slug = $1` trick
+ * does NOT work either — Postgres types $1 as uuid from the first comparison
+ * and then fails with `operator does not exist: text = uuid`. The lookup has
+ * to branch on the shape of the value before the SQL is built.
+ */
+export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * Find a product by id OR slug.
+ *
+ * The storefront URL segment (`/products/liver-detox`) and the admin id link
+ * (`/products/<uuid>`) both land here. `products.slug` is UNIQUE NOT NULL, so
+ * both lookups are deterministic; a miss returns null and the service answers
+ * 404 instead of crashing the request.
+ */
+export async function getProductById(idOrSlug: string): Promise<any | null> {
+  const isUuid = UUID_RE.test(idOrSlug);
   const rows = await query(
     `SELECT p.*, ${CATEGORY_JSON}
        FROM products p
        LEFT JOIN categories c ON c.id = p.category_id
-      WHERE p.id = $1
+      WHERE ${isUuid ? 'p.id = $1' : 'p.slug = $1'}
       LIMIT 1`,
-    [id],
+    [idOrSlug],
   );
   return rows[0] ?? null;
+}
+
+/**
+ * Resolve a product id or slug to the uuid the other tables key on
+ * (reviews.product_id, cart_items.product_id, wishlist_items.product_id).
+ *
+ * Returns null when nothing matches so callers can answer 404 rather than
+ * letting a slug crash a uuid comparison.
+ */
+export async function resolveProductId(idOrSlug: string): Promise<string | null> {
+  const isUuid = UUID_RE.test(idOrSlug);
+  const rows = await query<{ id: string }>(
+    `SELECT id FROM products WHERE ${isUuid ? 'id' : 'slug'} = $1 LIMIT 1`,
+    [idOrSlug],
+  );
+  return rows[0]?.id ?? null;
 }
 
 export async function getProductsByIds(ids: string[], columns = '*'): Promise<any[]> {

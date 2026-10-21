@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import * as cartRepo from '../database/repos/cart';
+import * as productsRepo from '../database/repos/products';
 
 export const getCart = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -15,7 +16,19 @@ export const addToCart = async (req: Request, res: Response, next: NextFunction)
     const userId = req.user?.id as string;
     const { product_id, quantity } = req.body;
 
-    const existing = await cartRepo.findItem(userId, product_id);
+    if (!product_id) {
+      return res.status(400).json({ error: { message: 'product_id is required' } });
+    }
+
+    // `product_id` may arrive as a slug (a stale localStorage cart, a
+    // product-page link). cart_items.product_id is a uuid, so resolve first —
+    // a slug bound directly answers `invalid input syntax for type uuid`.
+    const productId = await productsRepo.resolveProductId(String(product_id));
+    if (!productId) {
+      return res.status(404).json({ error: { message: 'Product not found' } });
+    }
+
+    const existing = await cartRepo.findItem(userId, productId);
 
     let result;
     if (existing) {
@@ -24,7 +37,7 @@ export const addToCart = async (req: Request, res: Response, next: NextFunction)
       if (!result) throw new Error('Cart item not found');
     } else {
       // Insert new
-      result = await cartRepo.insertItem({ user_id: userId, product_id, quantity });
+      result = await cartRepo.insertItem({ user_id: userId, product_id: productId, quantity });
     }
 
     res.json({ data: result });
