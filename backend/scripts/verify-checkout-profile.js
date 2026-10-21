@@ -98,16 +98,30 @@ async function fillAddress(page) {
   // The state is a searchable combobox.
   const state = page.locator('#checkout-state');
   await state.click();
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(500);
   const option = page.getByRole('option', { name: /Karnataka/i }).first();
   if (await option.count()) {
     await option.click();
   } else {
     await state.fill('Karnataka');
-    await page.waitForTimeout(400);
+    await page.waitForTimeout(500);
     await page.getByRole('option').first().click();
   }
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(500);
+
+  // The delivery step has its own email field.
+  const email = page.locator('#checkout-email-input');
+  if (await email.count()) {
+    await email.fill(EMAIL);
+    await page.waitForTimeout(300);
+  }
+
+  // Save the address so it is the one the order is placed to.
+  const save = page.getByRole('button', { name: /save address/i }).first();
+  if (await save.count()) {
+    await save.click();
+    await page.waitForTimeout(2500);
+  }
 }
 
 async function main() {

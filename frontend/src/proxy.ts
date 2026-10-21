@@ -16,14 +16,23 @@ export async function proxy(request: NextRequest) {
     // Fallback: check Authorization header (for future API use)
     request.headers.get('Authorization')?.replace('Bearer ', '');
 
-  // Protect /account routes — unauthenticated users go to the email login,
-  // which returns them here afterwards (?next=). (OTP login is commented
-  // out; checkout stays public but requires a signed-in account to order.)
+  // Protect /account routes.
+  //
+  // The password pages are switched off, so there is no /login to send a
+  // visitor to: the profile is created at the checkout. A visitor with no
+  // session is sent ONCE to the shop with a small explanation
+  // ("Place an order to create your profile"). The account layout verifies
+  // the session with the backend and repeats the redirect when the cookie is
+  // stale, so there is never a loop and never a /login.
   if (pathname.startsWith('/account')) {
-    if (!authToken) {
+    const hasSession =
+      request.cookies.get('mv_customer_session')?.value ||
+      request.cookies.get('meruveda_auth_token')?.value;
+    if (!hasSession) {
       const url = request.nextUrl.clone();
-      url.pathname = '/login';
-      url.searchParams.set('next', pathname);
+      url.pathname = '/';
+      url.search = '';
+      url.searchParams.set('profile', 'required');
       return NextResponse.redirect(url);
     }
   }
