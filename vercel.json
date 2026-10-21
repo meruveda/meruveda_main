@@ -55,6 +55,12 @@
       }
     },
     {
+      "source": "/api/revalidate",
+      "destination": {
+        "service": "frontend"
+      }
+    },
+    {
       "source": "/api/(.*)",
       "destination": {
         "service": "backend"
