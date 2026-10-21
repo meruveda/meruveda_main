@@ -69,12 +69,16 @@
   ],
   "crons": [
     {
-      "path": "/api/jobs/review-requests",
-      "schedule": "0 10 * * *"
+      "path": "/api/warmup",
+      "schedule": "0 1 * * *"
     },
     {
       "path": "/api/jobs/sweep?limit=20",
       "schedule": "0 2 * * *"
+    },
+    {
+      "path": "/api/jobs/review-requests",
+      "schedule": "0 10 * * *"
     },
     {
       "path": "/api/orders/retry-shiprocket-failed?limit=20",

@@ -75,12 +75,20 @@ app.get('/api/health', async (req, res) => {
 });
 
 // Deep health: schema drift vs expected-schema.json, both R2 buckets, env
-// names (names only), Shiprocket token, WhatsApp Graph token, and the
+// names (names only), Shiprocket auth, WhatsApp Graph auth, and the
 // Shiprocket/invoice queues. Authenticated (CRON_SECRET bearer or admin JWT)
 // so it is not a public oracle for internal state. Read-only: no writes, no
 // messages, one Shiprocket login at most.
 import { authorize } from './routes/jobRoutes';
 import { runDeepHealth } from './services/healthDeep';
+import { warmUp } from './controllers/warmupController';
+
+/**
+ * Warm the backend so the storefront's server-side fetch never races a cold
+ * start. It touches the database and the products query - the two things the
+ * public pages read - and exposes nothing.
+ */
+app.get('/api/warmup', warmUp as any);
 
 app.get('/api/health/deep', authorize, async (_req, res) => {
   try {

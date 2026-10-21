@@ -3,19 +3,18 @@ import Link from "next/link";
 import MediaImage from "@/components/MediaImage";
 import { ChevronRight, Calendar, Clock, ArrowLeft } from "lucide-react";
 import { API_BASE_URL } from "@/utils/apiUrl";
+import { apiGetJson } from "@/utils/apiFetch";
 import { notFound } from "next/navigation";
 
-async function getPost(slug: string) {
-  try {
-    // Try fetching by slug first, then by ID as fallback
-    const res = await fetch(`${API_BASE_URL}/blogs/${slug}`, { next: { revalidate: 300 } });
-    if (!res.ok) return null;
-    const json = await res.json();
-    return json.data || json;
-  } catch {
-    return null;
+  async function getPost(slug: string) {
+    // Retried, and on total failure the error is THROWN so the App Router
+    // keeps serving the last good ISR page for this post.
+    const json = await apiGetJson<any>(`${API_BASE_URL}/blogs/${slug}`, {
+      next: { revalidate: 300 },
+      label: 'Blog/post',
+    });
+    return json?.data || json;
   }
-}
 
 export default async function BlogPostPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
