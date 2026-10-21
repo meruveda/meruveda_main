@@ -326,10 +326,10 @@ export default function CheckoutPage() {
    * 'off' means the store is taking guest checkouts (name + number) while a
    * WhatsApp template is reviewed. The answer comes from a never-cached public
    * endpoint, so switching OTP_MODE back to 'auto' restores the OTP flow with
-   * no rebuild. Until it is known, the OTP form is shown: the safe default.
+   * no rebuild. Until it is known, the GUEST form (Continue) is shown: the
+   * checkout never asks for an OTP by default.
    */
-  const [otpRequired, setOtpRequired] = useState(true);
-  const [otpModeKnown, setOtpModeKnown] = useState(false);
+  const [otpRequired, setOtpRequired] = useState(false);
   /** The honeypot: a field a human never sees and never fills in. */
   const [website, setWebsite] = useState("");
   /** When the form was rendered - a form filled in implausibly fast is a bot. */
@@ -476,18 +476,17 @@ export default function CheckoutPage() {
   //
   // The answer changes with OTP_MODE (a store-wide switch, not a build), so
   // it is read at page load from a never-cached public endpoint. Until it
-  // arrives the OTP form is shown: it is the safe default, and a guest
-  // checkout simply waits a moment for it.
+  // arrives the GUEST form (Continue) is shown: the checkout never asks for
+  // an OTP by default.
   useEffect(() => {
     let cancelled = false;
     getOtpConfig()
       .then((config) => {
         if (cancelled) return;
         setOtpRequired(config.otpRequired);
-        setOtpModeKnown(true);
       })
       .catch(() => {
-        if (!cancelled) setOtpModeKnown(true);
+        /* the default (guest / Continue) stays */
       });
     return () => {
       cancelled = true;
@@ -1022,8 +1021,9 @@ export default function CheckoutPage() {
   // With the OTP flow the WhatsApp code is the identity gate: there is no
   // login redirect, verifying the number signs the customer in. With guest
   // checkout the customer presses "Continue" under the number, which confirms
-  // the contact and opens a checkout-only session.
-  const guestMode = otpModeKnown && !otpRequired;
+  // the contact and opens a checkout-only session. The default is GUEST
+  // (Continue); the server can require an OTP via OTP_MODE.
+  const guestMode = !otpRequired;
 
   /** The number as it will be stored, used for the confirmation snapshot. */
   const currentDigits = fullPhoneDigits(mobile, phoneCountry);
