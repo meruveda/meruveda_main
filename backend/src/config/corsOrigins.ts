@@ -45,12 +45,22 @@ export function parseAllowedOrigins(raw: string | undefined, nodeEnv: string): S
  * the storefront origin is derived from `FRONTEND_URL` instead, and both
  * spellings (apex and www) are allowed.
  */
+/**
+ * The storefront's own hosts, used when FRONTEND_URL is not set in the backend
+ * service. The shop is served on the apex and on `www`; both must be able to
+ * reach the API from a browser.
+ */
+const STOREFRONT_HOSTS = ['meruvedawellness.com', 'www.meruvedawellness.com'];
+
 export function expandStorefrontOrigins(
   allowed: Set<string>,
   storefrontUrl: string | undefined,
 ): Set<string> {
   const raw = (storefrontUrl || '').trim().replace(/\/+$/, '');
-  if (!raw) return allowed;
+  if (!raw) {
+    for (const host of STOREFRONT_HOSTS) allowed.add(`https://${host}`);
+    return allowed;
+  }
   let origin: string;
   let host: string;
   try {

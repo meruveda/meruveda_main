@@ -101,7 +101,10 @@ test('expandStorefrontOrigins: a www storefront url also allows the apex', () =>
   assert.ok(allowed.has('https://meruvedawellness.com'));
 });
 
-test('expandStorefrontOrigins: without a storefront url nothing is added', () => {
+test('expandStorefrontOrigins: without a storefront url the shop hosts are allowed', () => {
   const allowed = expandStorefrontOrigins(new Set<string>(['https://admin.example.com']), undefined);
-  assert.equal(allowed.size, 1);
+  assert.ok(allowed.has('https://meruvedawellness.com'));
+  assert.ok(allowed.has('https://www.meruvedawellness.com'));
+  assert.ok(isOriginAllowed('https://www.meruvedawellness.com', allowed, 'production'));
+  assert.ok(!isOriginAllowed('https://evil.com', allowed, 'production'));
 });
