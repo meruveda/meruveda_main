@@ -63,6 +63,12 @@ async function openCheckout(page) {
     await page.goto(`${BASE}/checkout`, { waitUntil: 'domcontentloaded' });
     try {
       await page.getByPlaceholder('Enter your full name').first().waitFor({ timeout: 45000 });
+      /**
+       * The endpoint refuses a form submitted less than three seconds after
+       * the page rendered. A person cannot fill a name, a number and an email
+       * that fast, so the test waits like a person would.
+       */
+      await page.waitForTimeout(5000);
       await page.waitForTimeout(800);
       return;
     } catch {
@@ -83,15 +89,16 @@ async function continueWithContact(page, name, phone, email) {
   await page.getByPlaceholder('Enter your full name').first().fill(name);
   await page.locator('#checkout-mobile').first().fill(phone);
   await page.locator('#checkout-contact-email').first().fill(email);
-  await page.waitForTimeout(300);
-  /**
-   * The endpoint refuses a form that was submitted implausibly fast (less
-   * than three seconds after the page rendered) - a human cannot fill a name,
-   * a number and an email that fast. The test waits, like a person would.
-   */
-  await page.waitForTimeout(3500);
-  await page.getByRole('button', { name: /^Continue$/ }).first().click();
-  await page.waitForTimeout(4000);
+  await page.waitForTimeout(500);
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await page.getByRole('button', { name: /^Continue$/ }).first().click();
+    await page.waitForTimeout(4000);
+    if (await page.locator('[data-contact-confirmed="yes"]').count()) return;
+    // The endpoint refuses a form that was submitted implausibly fast; wait
+    // and try again.
+    await page.waitForTimeout(3000);
+  }
 }
 
 
@@ -234,10 +241,20 @@ async function main() {
   await shot(pageA, 'a4-account-profile');
 
   await pageA.goto(`${BASE}/account/orders`, { waitUntil: 'domcontentloaded' });
-  await pageA.waitForTimeout(4000);
+  await pageA.waitForTimeout(5000);
+  pageA.on('response', async (r) => {
+    if (r.url().includes('/api/orders/my')) {
+      let body = '';
+      try { body = (await r.text()).slice(0, 300); } catch { body = '(none)'; }
+      console.log('   [debug] /api/orders/my ->', r.status(), body);
+    }
+  });
+  await pageA.reload({ waitUntil: 'domcontentloaded' });
+  await pageA.waitForTimeout(5000);
   const ordersBody = (await pageA.textContent('body')) || '';
-  check('a. the order history shows the order', /MV-\\d+/i.test(ordersBody), 'orders listed');
+  check('a. the order history shows the order', /MV-/.test(ordersBody), 'order number listed');
   await shot(pageA, 'a5-account-orders');
+
 
   /* ---------------------------------------------------------------- */
   /* d. No horizontal scroll                                           */

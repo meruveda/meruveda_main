@@ -32,6 +32,32 @@ import { generateToken, isCustomerScope, verifyToken } from '../utils/jwt';
 import { hasColumn } from './schemaGuard';
 import { canonicalPhoneAny, isValidEmail, isValidPhoneAny, phoneVariants } from '../utils/phone';
 
+const SYSTEM_USER_EMAIL = 'system@meruveda.internal';
+
+/**
+ * Get or create a system user for isolated sessions (where the phone number
+ * already belonged to another customer).
+ */
+async function getOrCreateSystemUser(): Promise<string> {
+  const existing = await usersRepo.findByEmail(SYSTEM_USER_EMAIL, 'id');
+  if (existing) return existing.id;
+
+  const { nanoid } = await import('nanoid');
+  const passwordHash = `system:${nanoid()}`;
+  const created = await usersRepo.insertUser({
+    email: SYSTEM_USER_EMAIL,
+    password_hash: `system:${nanoid()}`,
+    first_name: 'System',
+    last_name: 'User',
+    phone: null,
+    role: 'customer',
+    active: true,
+    source: 'system',
+    phone_verified: false,
+  });
+  return created.id;
+}
+
 export interface CustomerSessionInput {
   name?: string;
   phone?: string;
@@ -140,9 +166,12 @@ export async function openCustomerSession(input: CustomerSessionInput): Promise<
       userId = null;
       void byEmail;
     }
+  } else {
+    // The number already belongs to a customer. For security, this session
+    // is NOT attached to that account. Instead, we use a system user so
+    // the order has a valid user_id (avoiding FK/NOT NULL issues).
+    userId = await getOrCreateSystemUser();
   }
-  // If the number already existed, `userId` stays null: the session is
-  // deliberately NOT attached to that account (the security rule).
 
   // 6. The session row.
   const session = await sessionsRepo.insertSession({

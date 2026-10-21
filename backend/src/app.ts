@@ -102,6 +102,7 @@ app.get('/api/health/deep', authorize, async (_req, res) => {
 
 import authRoutes from './routes/authRoutes';
 import accountRoutes from './routes/accountRoutes';
+import migrationRoutes from './routes/migrationRoutes';
 import healthRoutes from './routes/healthRoutes';
 import productRoutes from './routes/productRoutes';
 import orderRoutes from './routes/orderRoutes';
@@ -133,6 +134,7 @@ import path from 'path';
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/account', accountRoutes);
+app.use('/api/migration', migrationRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/orders', orderRoutes);
 app.use('/api/cart', cartRoutes);

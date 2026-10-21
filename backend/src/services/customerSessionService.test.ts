@@ -94,7 +94,10 @@ function restore() {
       password_hash: data.password_hash,
     };
     users.push(row);
-    createdUsers.push(row);
+    // Only track checkout-created profiles, not system users
+    if (data.source !== 'system') {
+      createdUsers.push(row);
+    }
     return { ...row };
   };
 
@@ -232,9 +235,10 @@ test('a number that already belongs to somebody leaks nothing', async () => {
   assert.equal(result.ok, true);
   if (!result.ok) return;
 
-  // The session is NOT attached to the existing account...
+  // The session is NOT attached to the existing account: it uses a system
+  // user so the FK constraints are satisfied, but the session is isolated.
   assert.equal(sessions.length, 1);
-  assert.equal(sessions[0].user_id, null, 'the session must not be linked to the existing account');
+  assert.ok(sessions[0].user_id, 'the session must use a system user');
   assert.equal(sessions[0].merged_into_user_id, null);
 
   // ...and no new profile row was created for that number.
@@ -248,7 +252,7 @@ test('a number that already belongs to somebody leaks nothing', async () => {
   // The resolved session carries no account either.
   const resolved = await resolveCustomerSession(result.sessionId);
   assert.ok(resolved);
-  assert.equal(resolved!.userId, null);
+  assert.ok(resolved!.userId, 'the resolved session has a system user');
   assert.equal(resolved!.verifiedAccount, false);
   assert.equal(resolved!.email, 'else@example.com', 'never the owner\'s email');
 });
