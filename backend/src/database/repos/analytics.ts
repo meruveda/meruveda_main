@@ -36,8 +36,14 @@ export async function recentOrders(limit: number): Promise<any[]> {
 
 export async function orderStatsRows(): Promise<any[]> {
   return query(
+    // The numeric columns are NUMERIC in Postgres and arrive as strings, so
+    // they are cast to float here rather than being summed as text.
     `SELECT id, created_at, status, payment_status, payment_method,
-            subtotal, discount, tax, shipping_fee, total
+            subtotal::float AS subtotal,
+            discount::float AS discount,
+            tax::float AS tax,
+            shipping_fee::float AS shipping_fee,
+            total::float AS total
        FROM orders`,
   );
 }
@@ -45,7 +51,11 @@ export async function orderStatsRows(): Promise<any[]> {
 export async function summaryOrderRows(): Promise<any[]> {
   return query(
     `SELECT id, created_at, status, payment_status, payment_method,
-            subtotal, discount, tax, total
+            subtotal::float AS subtotal,
+            discount::float AS discount,
+            tax::float AS tax,
+            shipping_fee::float AS shipping_fee,
+            total::float AS total
        FROM orders`,
   );
 }

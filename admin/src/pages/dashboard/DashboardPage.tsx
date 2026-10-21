@@ -129,7 +129,7 @@ export const DashboardPage: React.FC = () => {
               {formatCurrency(stats.totalRevenue)}
             </h3>
             <span className="text-xs text-slate-400 font-medium inline-flex items-center gap-1 bg-slate-50 dark:bg-slate-900/20 px-2 py-0.5 rounded-full block w-fit">
-              Total from delivered orders
+              Total from all non-cancelled orders
             </span>
             <div className="flex gap-2.5 text-[11px] text-slate-400 font-medium mt-1">
               <span>GST: <span className="font-semibold text-slate-600 dark:text-slate-300">{formatCurrency(stats.gstCollected || 0)}</span></span>
@@ -150,8 +150,27 @@ export const DashboardPage: React.FC = () => {
               {stats.totalOrders}
             </h3>
             <span className="text-xs text-slate-400 font-medium inline-flex items-center gap-1 bg-slate-50 dark:bg-slate-900/20 px-2 py-0.5 rounded-full">
-              Total orders placed
+              Non-cancelled orders
             </span>
+            <div className="flex gap-2.5 text-[11px] text-slate-400 font-medium mt-1">
+              <span>
+                Avg order:{' '}
+                <span className="font-semibold text-slate-600 dark:text-slate-300">
+                  {formatCurrency(stats.avgOrderValue || 0)}
+                </span>
+              </span>
+              {typeof stats.excludedOrders === 'number' && stats.excludedOrders > 0 && (
+                <>
+                  <span>-</span>
+                  <span>
+                    Excluded:{' '}
+                    <span className="font-semibold text-slate-600 dark:text-slate-300">
+                      {stats.excludedOrders}
+                    </span>
+                  </span>
+                </>
+              )}
+            </div>
           </div>
           <div className="p-3 bg-blue-50 dark:bg-blue-950/30 text-blue-600 dark:text-blue-400 rounded-2xl">
             <ShoppingBag className="h-6 w-6" />
@@ -196,7 +215,7 @@ export const DashboardPage: React.FC = () => {
         <div className="flex items-center justify-between mb-6">
           <div>
             <h3 className="text-lg font-bold text-slate-900 dark:text-white">Revenue Performance</h3>
-            <p className="text-xs text-slate-400">Weekly sales distribution performance.</p>
+            <p className="text-xs text-slate-400">Daily order value, last 7 days (India time).</p>
           </div>
         </div>
         <div className="h-[300px] w-full">

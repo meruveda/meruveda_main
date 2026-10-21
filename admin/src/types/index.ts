@@ -226,7 +226,14 @@ export interface DashboardStats {
   gstCollected?: number
   todayRevenue: number
   monthlyRevenue: number
+  /** The orders the revenue is over (cancelled and failed ones are excluded). */
   totalOrders: number
+  /** Every order on record, cancelled ones included. */
+  allOrders?: number
+  /** Cancelled and failed orders, reported rather than silently dropped. */
+  excludedOrders?: number
+  /** Revenue divided by the number of orders it is over. */
+  avgOrderValue?: number
   pendingOrders: number
   deliveredOrders: number
   cancelledOrders: number

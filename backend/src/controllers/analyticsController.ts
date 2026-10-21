@@ -6,36 +6,154 @@ import { hasTable } from '../services/schemaGuard';
 /**
  * Revenue eligibility.
  *
- * The business rules are unchanged and were not touched:
- *   - COD        counts once the order is delivered (cash is only banked on
- *                delivery, so recognising an order before that would overstate
- *                revenue).
- *   - Prepaid    counts once payment_status = paid, regardless of delivery.
+ * THE RULE: an order counts unless it was CANCELLED or FAILED. A cash-on-
+ * delivery order is a real sale the moment it is placed - the money is
+ * collected on delivery, and the order is live - so it counts straight away.
  *
- * What was broken is the status COMPARISON. Postgres stores these values
- * lower-case — the live `orders.status` column contains 'delivered' and
- * 'pending', never 'Delivered' — while this compared against 'Delivered'.
- * The comparison could therefore never be true and no COD order was ever
- * counted. Comparisons are now case-insensitive so they match the stored data
- * and stay correct if the casing ever changes upstream.
+ * The previous rule was "a COD order counts only once it is delivered" and
+ * "a prepaid order counts only once it is paid". In practice that counted
+ * almost nothing: the 16 most recent orders are all COD and still pending, so
+ * every day of the Revenue Performance chart was 0 even though the orders
+ * were there. `ordersGraph`, which counts ALL orders, was correct the whole
+ * time - that is what proved the data was present and only the revenue rule
+ * was hiding it.
+ *
+ * Cancelled and failed orders are excluded, and are reported separately as
+ * `excludedOrders` so the exclusion is visible rather than silent.
  *
  * Exported so the rule can be unit tested directly rather than only through an
  * HTTP round trip.
  */
-export const isOrderQualifying = (order: any) => {
-  const isCOD = order.payment_method === 'Cash On Delivery' || String(order.payment_method).toUpperCase() === 'COD';
-  const isPaid = String(order.payment_status ?? '').toLowerCase() === 'paid';
-  const status = String(order.status ?? '').toLowerCase();
-
-  if (isCOD) {
-    return status === 'delivered';
-  }
-  return isPaid;
+export const isOrderQualifying = (order: any): boolean => {
+  const status = String(order?.status ?? '').trim().toLowerCase();
+  const paymentStatus = String(order?.payment_status ?? '').trim().toLowerCase();
+  if (['cancelled', 'canceled', 'failed'].includes(status)) return false;
+  if (['cancelled', 'canceled', 'failed'].includes(paymentStatus)) return false;
+  return true;
 };
 
-/** Revenue = subtotal - discount - tax (GST). Shipping is excluded, as before. */
-export const orderRevenue = (o: any) =>
-  Number(o.subtotal || 0) - Number(o.discount || 0) - Number(o.tax || 0);
+/**
+ * Revenue for one order = the order total.
+ *
+ * The order total is what the customer was charged and what the Orders page
+ * shows, so the dashboard now agrees with it exactly. (The old formula,
+ * subtotal - discount - tax, left the shipping charge and the GST out and so
+ * never matched any order the customer could see.)
+ *
+ * The numeric columns are NUMERIC in Postgres and arrive as strings, so every
+ * value goes through Number() here.
+ */
+export const orderRevenue = (o: any): number => {
+  const raw = o?.total;
+  const total = Number(raw);
+  // A present, finite total is the revenue. Only when it is missing does the
+  // older subtotal arithmetic apply.
+  if (raw !== undefined && raw !== null && raw !== '' && Number.isFinite(total)) {
+    return total;
+  }
+  const subtotal = Number(o?.subtotal ?? 0);
+  const discount = Number(o?.discount ?? 0);
+  const tax = Number(o?.tax ?? 0);
+  return (Number.isFinite(subtotal) ? subtotal : 0) -
+    (Number.isFinite(discount) ? discount : 0) -
+    (Number.isFinite(tax) ? tax : 0);
+};
+
+/** Asia/Kolkata is 5h30m ahead of UTC. */
+export const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+/**
+ * The calendar day an order belongs to, in Asia/Kolkata.
+ *
+ * The store is in India, so an order placed at 19:15 UTC is the NEXT day in
+ * India. Grouping in UTC put it in the wrong bucket, which is why the last
+ * day of the week was empty even with orders on it.
+ */
+export const istDayKey = (value: Date | string | number): string => {
+  const d = new Date(value);
+  const t = new Date(d.getTime() + IST_OFFSET_MS);
+  const m = String(t.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(t.getUTCDate()).padStart(2, '0');
+  return `${t.getUTCFullYear()}-${m}-${day}`;
+};
+
+/** The Asia/Kolkata "today" as a Date whose UTC getters read as IST. */
+const istNow = (now: Date): Date => new Date(now.getTime() + IST_OFFSET_MS);
+
+/**
+ * The daily revenue series for the last 7 days, in Asia/Kolkata.
+ *
+ * Every day is present, with 0 for the days that had no orders.
+ */
+export const buildRevenueSeries = (
+  orders: any[],
+  now: Date = new Date(),
+): Array<{ date: string; revenue: number; orders: number }> => {
+  const qualifying = orders.filter(isOrderQualifying);
+  const today = istNow(now);
+  const series: Array<{ date: string; revenue: number; orders: number }> = [];
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(today.getTime() - i * 86_400_000);
+    const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+    const dayOrders = qualifying.filter((o) => istDayKey(o.created_at) === key);
+    const revenue = dayOrders.reduce((sum, o) => sum + orderRevenue(o), 0);
+    series.push({
+      date: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' }),
+      revenue: Number(revenue.toFixed(2)),
+      orders: dayOrders.length,
+    });
+  }
+  return series;
+};
+
+/**
+ * The monthly revenue series for the last 6 months, in Asia/Kolkata.
+ */
+export const buildSalesSeries = (
+  orders: any[],
+  now: Date = new Date(),
+): Array<{ month: string; sales: number; orders: number }> => {
+  const qualifying = orders.filter(isOrderQualifying);
+  const today = istNow(now);
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const series: Array<{ month: string; sales: number; orders: number }> = [];
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - i, 1));
+    const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+    const monthOrders = qualifying.filter((o) => istDayKey(o.created_at).startsWith(key));
+    const revenue = monthOrders.reduce((sum, o) => sum + orderRevenue(o), 0);
+    series.push({
+      month: `${months[d.getUTCMonth()]} ${String(d.getUTCFullYear()).slice(2)}`,
+      sales: Number(revenue.toFixed(2)),
+      orders: monthOrders.length,
+    });
+  }
+  return series;
+};
+
+/**
+ * The order COUNT for the last 7 days, in Asia/Kolkata.
+ *
+ * Every order counts here, cancelled ones included, so this is "orders
+ * placed" rather than "orders that counted for revenue".
+ */
+export const buildOrdersSeries = (
+  orders: any[],
+  now: Date = new Date(),
+): Array<{ day: string; orders: number }> => {
+  const today = istNow(now);
+  const series: Array<{ day: string; orders: number }> = [];
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(today.getTime() - i * 86_400_000);
+    const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+    const count = orders.filter((o) => istDayKey(o.created_at) === key).length;
+    series.push({
+      day: d.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' }),
+      orders: count,
+    });
+  }
+  return series;
+};
 
 export const getDashboardStats = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -64,82 +182,44 @@ export const getDashboardStats = async (req: Request, res: Response, next: NextF
       return stock > 0 && stock <= minStock;
     }).length;
 
-    // Filter qualifying orders for revenue metrics
+    // Filter qualifying orders for revenue metrics. The rule is: every order
+    // counts unless it was cancelled or failed (see isOrderQualifying).
     const qualifyingOrders = allOrders.filter(isOrderQualifying);
+    const excludedOrders = allOrders.length - qualifyingOrders.length;
 
-    // Sum financial metrics
-    // Revenue = Subtotal - Discount - Tax (GST)
+    // Sum financial metrics. Revenue is the order TOTAL, so the dashboard
+    // agrees with the Orders page and with the invoice.
     const totalRevenue = qualifyingOrders.reduce((sum, o) => sum + orderRevenue(o), 0);
     const shippingCollected = qualifyingOrders.reduce((sum, o) => sum + Number(o.shipping_fee || 0), 0);
     const gstCollected = qualifyingOrders.reduce((sum, o) => sum + Number(o.tax || 0), 0);
 
-    // Calculate today's and monthly revenue
-    const today = new Date();
+    // The average order value, over the SAME set the revenue is over, so the
+    // three tiles describe one set of orders and agree with each other.
+    const avgOrderValue = qualifyingOrders.length
+      ? Number((totalRevenue / qualifyingOrders.length).toFixed(2))
+      : 0;
+
+    // Calculate today's and monthly revenue (Asia/Kolkata).
+    const now = new Date();
+    const todayKey = istDayKey(now);
     const todayRevenue = qualifyingOrders
-      .filter(o => new Date(o.created_at).toDateString() === today.toDateString())
+      .filter((o) => istDayKey(o.created_at) === todayKey)
       .reduce((sum, o) => sum + orderRevenue(o), 0);
 
+    const monthKey = todayKey.slice(0, 7);
     const monthlyRevenue = qualifyingOrders
-      .filter(o => {
-        const oDate = new Date(o.created_at);
-        return oDate.getMonth() === today.getMonth() && oDate.getFullYear() === today.getFullYear();
-      })
+      .filter((o) => istDayKey(o.created_at).startsWith(monthKey))
       .reduce((sum, o) => sum + orderRevenue(o), 0);
 
     // Order status counts
-    const pendingOrders = allOrders.filter((o: any) => o.status === 'Pending').length;
-    const deliveredOrders = allOrders.filter((o: any) => o.status === 'Delivered').length;
-    const cancelledOrders = allOrders.filter((o: any) => o.status === 'Cancelled').length;
+    const pendingOrders = allOrders.filter((o: any) => String(o.status || '').toLowerCase() === 'pending').length;
+    const deliveredOrders = allOrders.filter((o: any) => String(o.status || '').toLowerCase() === 'delivered').length;
+    const cancelledOrders = allOrders.filter((o: any) => String(o.status || '').toLowerCase() === 'cancelled').length;
 
-    // Generate last 7 days' daily data for weekly revenueChart
-    const revenueChart = [];
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date();
-      d.setDate(d.getDate() - i);
-      const dateString = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); // e.g., "Jul 25"
-      
-      const dayOrders = qualifyingOrders.filter(o => new Date(o.created_at).toDateString() === d.toDateString());
-      const dayRevenue = dayOrders.reduce((sum, o) => sum + orderRevenue(o), 0);
-      
-      revenueChart.push({
-        date: dateString,
-        revenue: Number(dayRevenue.toFixed(2))
-      });
-    }
-
-    // Generate salesChart (last 6 months)
-    const salesChart = [];
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    for (let i = 5; i >= 0; i--) {
-      const d = new Date();
-      d.setMonth(d.getMonth() - i);
-      const monthLabel = `${months[d.getMonth()]} ${d.getFullYear().toString().substring(2)}`;
-      
-      const monthOrders = qualifyingOrders.filter(o => {
-        const oDate = new Date(o.created_at);
-        return oDate.getMonth() === d.getMonth() && oDate.getFullYear() === d.getFullYear();
-      });
-      const monthRevenue = monthOrders.reduce((sum, o) => sum + orderRevenue(o), 0);
-      
-      salesChart.push({
-        month: monthLabel,
-        sales: Number(monthRevenue.toFixed(2))
-      });
-    }
-
-    // Generate ordersGraph (last 7 days counts)
-    const ordersGraph = [];
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date();
-      d.setDate(d.getDate() - i);
-      const dayLabel = d.toLocaleDateString('en-US', { weekday: 'short' });
-      
-      const dayOrdersCount = allOrders.filter(o => new Date(o.created_at).toDateString() === d.toDateString()).length;
-      ordersGraph.push({
-        day: dayLabel,
-        orders: dayOrdersCount
-      });
-    }
+    // The three series, all in Asia/Kolkata, with 0 for the empty days.
+    const revenueChart = buildRevenueSeries(allOrders, now);
+    const salesChart = buildSalesSeries(allOrders, now);
+    const ordersGraph = buildOrdersSeries(allOrders, now);
 
     res.json({
       data: {
@@ -148,7 +228,15 @@ export const getDashboardStats = async (req: Request, res: Response, next: NextF
         gstCollected: Number(gstCollected.toFixed(2)),
         todayRevenue: Number(todayRevenue.toFixed(2)),
         monthlyRevenue: Number(monthlyRevenue.toFixed(2)),
-        totalOrders,
+        // The count of the orders the revenue is over, so the revenue, the
+        // order count and the average order value all describe one set.
+        totalOrders: qualifyingOrders.length,
+        // Every order on record, so the Orders page and this tile can be
+        // compared at a glance.
+        allOrders: allOrders.length,
+        // Cancelled and failed orders, reported rather than silently dropped.
+        excludedOrders,
+        avgOrderValue,
         pendingOrders,
         deliveredOrders,
         cancelledOrders,

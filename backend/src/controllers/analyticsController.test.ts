@@ -1,18 +1,30 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isOrderQualifying, orderRevenue } from './analyticsController';
+import {
+  isOrderQualifying,
+  orderRevenue,
+  buildRevenueSeries,
+  buildSalesSeries,
+  buildOrdersSeries,
+  istDayKey,
+} from './analyticsController';
 
 /**
- * Revenue eligibility.
+ * Revenue eligibility and the dashboard series.
  *
- * The regression these lock down is concrete: `orders.status` stores 'delivered'
- * (lower-case) in Postgres, and the qualifier used to compare against
- * 'Delivered', so no COD order could ever be counted and the admin revenue
- * total silently omitted every cash sale.
+ * THE BUG THIS LOCKS DOWN: the qualifier used to require a COD order to be
+ * `delivered` (and a prepaid order to be `paid`). Every recent order in the
+ * live table is a COD order that is still `pending`, so the Revenue Performance
+ * chart was 0 for every single day even though the orders were right there -
+ * `ordersGraph`, which counts all orders, was correct the whole time.
  *
- * The values used here are copied verbatim from the live `orders` table, not
- * invented: payment_method is 'Cash On Delivery' or 'PayOnline (via PayU)',
- * payment_status is 'paid' or 'pending', status is 'delivered' or 'pending'.
+ * THE RULE NOW: an order counts unless it was CANCELLED or FAILED. The
+ * revenue is the order total, the days are grouped in Asia/Kolkata, and the
+ * empty days are present with 0.
+ *
+ * The values used here are copied verbatim from the live `orders` table:
+ * payment_method is 'Cash On Delivery' or 'PayOnline (via PayU)',
+ * payment_status is 'paid' or 'pending', status is 'pending' or 'delivered'.
  */
 
 // Exactly as stored in the database.
@@ -26,76 +38,73 @@ const order = (over: Record<string, any> = {}) => ({
   subtotal: 1000,
   discount: 0,
   tax: 180,
+  total: 1180,
   ...over,
 });
 
-// --- COD ------------------------------------------------------------------
+// --- the rule --------------------------------------------------------------
 
-test('COD is excluded until it is delivered', () => {
-  assert.equal(isOrderQualifying(order()), false);
+test('a COD order counts as soon as it is placed', () => {
+  assert.equal(isOrderQualifying(order()), true);
 });
 
-test('COD counts once delivered — the case that was silently dropped', () => {
-  assert.equal(isOrderQualifying(order({ status: 'delivered' })), true);
-});
-
-test('COD also matches if the casing ever changes upstream', () => {
-  for (const s of ['Delivered', 'DELIVERED', 'delivered']) {
-    assert.equal(isOrderQualifying(order({ status: s })), true, `status "${s}" should qualify`);
+test('a COD order counts whatever state it is in', () => {
+  for (const s of ['pending', 'processing', 'shipped', 'delivered', 'confirmed', '']) {
+    assert.equal(isOrderQualifying(order({ status: s })), true, `status "${s}" should count`);
   }
 });
 
-test('COD in other states never counts', () => {
-  for (const s of ['pending', 'processing', 'cancelled', 'payment_failed', 'shipped', '']) {
-    assert.equal(isOrderQualifying(order({ status: s })), false, `status "${s}" must not qualify`);
+test('the status comparison tolerates any casing', () => {
+  for (const s of ['Cancelled', 'CANCELLED', 'cancelled']) {
+    assert.equal(isOrderQualifying(order({ status: s })), false, `status "${s}" must not count`);
   }
 });
 
-test('COD is not gated on payment_status — cash has none until delivery', () => {
-  // A COD order that somehow shows payment_status=paid is still only counted
-  // when delivered, so a premature flag cannot inflate revenue.
-  assert.equal(isOrderQualifying(order({ status: 'pending', payment_status: 'paid' })), false);
-  assert.equal(isOrderQualifying(order({ status: 'delivered', payment_status: 'pending' })), true);
-});
-
-test('COD detected by the COD shorthand as well as the full label', () => {
-  assert.equal(isOrderQualifying(order({ payment_method: 'COD', status: 'delivered' })), true);
-  assert.equal(isOrderQualifying(order({ payment_method: 'cod', status: 'delivered' })), true);
-});
-
-// --- prepaid --------------------------------------------------------------
-
-test('prepaid counts as soon as it is paid, whatever the delivery state', () => {
-  for (const s of ['pending', 'processing', 'delivered', 'shipped', 'cancelled']) {
-    assert.equal(
-      isOrderQualifying(order({ payment_method: PREPAID, payment_status: 'paid', status: s })),
-      true,
-      `paid prepaid should count even when status is "${s}"`
-    );
+test('a cancelled order never counts', () => {
+  for (const s of ['cancelled', 'canceled', 'failed']) {
+    assert.equal(isOrderQualifying(order({ status: s })), false, `status "${s}" must not count`);
   }
 });
 
-test('unpaid prepaid never counts', () => {
-  for (const ps of ['pending', 'failed', '', null, undefined]) {
+test('a failed payment never counts, whatever the status says', () => {
+  for (const ps of ['failed', 'FAILED', 'cancelled']) {
     assert.equal(
       isOrderQualifying(order({ payment_method: PREPAID, payment_status: ps, status: 'delivered' })),
       false,
-      `payment_status "${ps}" must not qualify`
+      `payment_status "${ps}" must not count`
     );
   }
 });
 
-test('the prepaid rule is unchanged: payment_status drives it, not status', () => {
-  assert.equal(isOrderQualifying(order({ payment_method: PREPAID, payment_status: 'paid', status: 'pending' })), true);
-  assert.equal(isOrderQualifying(order({ payment_method: PREPAID, payment_status: 'pending', status: 'delivered' })), false);
+test('a prepaid order counts whether it is paid or not', () => {
+  for (const ps of ['paid', 'pending']) {
+    assert.equal(
+      isOrderQualifying(order({ payment_method: PREPAID, payment_status: ps, status: 'pending' })),
+      true,
+      `prepaid with payment_status "${ps}" is a real order and counts`
+    );
+  }
 });
 
-test('payment_status comparison tolerates casing without changing the rule', () => {
-  assert.equal(isOrderQualifying(order({ payment_method: PREPAID, payment_status: 'PAID' })), true);
-  assert.equal(isOrderQualifying(order({ payment_method: PREPAID, payment_status: 'paid' })), true);
+test('missing fields do not throw', () => {
+  assert.equal(isOrderQualifying({}), true);
+  assert.equal(isOrderQualifying({ status: null, payment_status: null, payment_method: null }), true);
 });
 
-// --- no double counting, no null crashes ---------------------------------
+// --- revenue arithmetic ----------------------------------------------------
+
+test('revenue is the order total', () => {
+  assert.equal(orderRevenue({ total: 1180, subtotal: 1000, discount: 0, tax: 180 }), 1180);
+  assert.equal(orderRevenue({ total: '475.24' }), 475.24);
+});
+
+test('a missing total falls back to the subtotal arithmetic', () => {
+  assert.equal(orderRevenue({}), 0);
+  assert.equal(orderRevenue({ subtotal: 475.24 }), 475.24);
+  assert.equal(orderRevenue({ subtotal: '475.24', discount: null, tax: undefined }), 475.24);
+});
+
+// --- no double counting ----------------------------------------------------
 
 test('an order is counted at most once', () => {
   const list = [order({ status: 'delivered' }), order({ payment_method: PREPAID, payment_status: 'paid' })];
@@ -104,52 +113,81 @@ test('an order is counted at most once', () => {
   assert.equal(new Set(qualifying).size, 2, 'no order appears twice');
 });
 
-test('cancelled and failed orders are excluded regardless of method', () => {
-  assert.equal(isOrderQualifying(order({ status: 'cancelled', payment_status: 'paid' })), false);
-  assert.equal(isOrderQualifying(order({ payment_method: PREPAID, payment_status: 'failed' })), false);
-});
-
-test('missing fields do not throw', () => {
-  assert.equal(isOrderQualifying({}), false);
-  assert.equal(isOrderQualifying({ status: null, payment_status: null, payment_method: null }), false);
-});
-
-// --- revenue arithmetic ---------------------------------------------------
-
-test('revenue is subtotal - discount - tax, excluding shipping', () => {
-  assert.equal(orderRevenue({ subtotal: 1000, discount: 100, tax: 180 }), 720);
-  assert.equal(orderRevenue({ subtotal: 500, discount: 0, tax: 90 }), 410);
-  assert.equal(orderRevenue({ subtotal: 500, discount: 0, tax: 0, shipping_fee: 99 }), 500);
-});
-
-test('missing numeric fields are treated as zero', () => {
-  assert.equal(orderRevenue({}), 0);
-  assert.equal(orderRevenue({ subtotal: 475.24 }), 475.24);
-  assert.equal(orderRevenue({ subtotal: '475.24', discount: null, tax: undefined }), 475.24);
-});
-
-// --- combined totals ------------------------------------------------------
-
 test('COD and prepaid are summed together without double counting', () => {
   const orders = [
-    order({ status: 'delivered', subtotal: 400, tax: 0 }),                                  // COD  -> 400
-    order({ status: 'pending', subtotal: 500, tax: 0 }),                                    // COD, undelivered -> out
-    order({ payment_method: PREPAID, payment_status: 'paid', status: 'pending', subtotal: 300, tax: 0 }), // -> 300
-    order({ payment_method: PREPAID, payment_status: 'pending', status: 'delivered', subtotal: 900, tax: 0 }), // unpaid -> out
+    order({ status: 'pending', total: 400, tax: 0 }),                                       // COD -> 400
+    order({ status: 'cancelled', total: 500, tax: 0 }),                                     // cancelled -> out
+    order({ payment_method: PREPAID, payment_status: 'paid', status: 'pending', total: 300, tax: 0 }),   // -> 300
+    order({ payment_method: PREPAID, payment_status: 'failed', status: 'delivered', total: 900, tax: 0 }), // failed -> out
   ];
   const total = orders.filter(isOrderQualifying).reduce((s, o) => s + orderRevenue(o), 0);
   assert.equal(total, 700);
 });
 
-test('date filtering operates on the already-qualified set, so COD is included', () => {
+// --- the timezone ----------------------------------------------------------
+
+test('a late-evening UTC order belongs to the next day in India', () => {
+  // 19:15 UTC on the 20th is 00:45 on the 21st in Asia/Kolkata.
+  assert.equal(istDayKey('2026-10-20T19:15:49.585Z'), '2026-10-21');
+  // 18:30 UTC is exactly midnight in India, so it is the 21st there too.
+  assert.equal(istDayKey('2026-10-20T18:30:00.000Z'), '2026-10-21');
+  // 20:00 UTC on the 20th is 01:30 on the 21st.
+  assert.equal(istDayKey('2026-10-20T20:00:00.000Z'), '2026-10-21');
+  // Midday UTC on the 20th is still the 20th in India.
+  assert.equal(istDayKey('2026-10-20T12:00:00.000Z'), '2026-10-20');
+});
+
+// --- the weekly series -----------------------------------------------------
+
+test('the weekly series sums a COD and a paid order and leaves out the cancelled one', () => {
+  const now = new Date('2026-10-21T12:00:00.000Z');
   const orders = [
-    order({ status: 'delivered', subtotal: 400, tax: 0, created_at: new Date().toISOString() }),
-    order({ status: 'delivered', subtotal: 999, tax: 0, created_at: '2000-01-01T00:00:00.000Z' }),
+    // A COD order placed today, in India time.
+    order({ status: 'pending', total: 1647, tax: 0, created_at: '2026-10-21T04:00:00.000Z' }),
+    // A paid order placed today.
+    order({ payment_method: PREPAID, payment_status: 'paid', status: 'delivered', total: 499, tax: 0, created_at: '2026-10-21T05:00:00.000Z' }),
+    // A cancelled order placed today - it must not be counted.
+    order({ status: 'cancelled', payment_status: 'paid', total: 9999, tax: 0, created_at: '2026-10-21T06:00:00.000Z' }),
+    // An order from last week - outside the window.
+    order({ status: 'pending', total: 5000, tax: 0, created_at: '2026-10-10T05:00:00.000Z' }),
   ];
-  const today = new Date();
-  const todayRevenue = orders
-    .filter(isOrderQualifying)
-    .filter((o) => new Date(o.created_at).toDateString() === today.toDateString())
-    .reduce((s, o) => s + orderRevenue(o), 0);
-  assert.equal(todayRevenue, 400, "today's COD order is inside the date-filtered total");
+
+  const series = buildRevenueSeries(orders, now);
+  assert.equal(series.length, 7, 'every day is present');
+
+  const today = series[series.length - 1];
+  assert.equal(today.revenue, 2146, 'the COD order and the paid order are summed, the cancelled one is not');
+  assert.equal(today.orders, 2);
+
+  const total = series.reduce((s, d) => s + d.revenue, 0);
+  assert.equal(total, 2146, 'the whole week sums to the same figure');
+
+  // The empty days are present with 0.
+  for (const day of series.slice(0, -1)) {
+    assert.equal(day.revenue, 0);
+    assert.equal(day.orders, 0);
+  }
+});
+
+test('the monthly series follows the same rule', () => {
+  const now = new Date('2026-10-21T12:00:00.000Z');
+  const orders = [
+    order({ status: 'pending', total: 100, tax: 0, created_at: '2026-10-05T05:00:00.000Z' }),
+    order({ status: 'cancelled', total: 700, tax: 0, created_at: '2026-10-06T05:00:00.000Z' }),
+  ];
+  const series = buildSalesSeries(orders, now);
+  assert.equal(series.length, 6);
+  const october = series[series.length - 1];
+  assert.equal(october.month, 'Oct 26');
+  assert.equal(october.sales, 100, 'the cancelled order is left out');
+});
+
+test('the order count series counts every order, cancelled ones included', () => {
+  const now = new Date('2026-10-21T12:00:00.000Z');
+  const orders = [
+    order({ status: 'pending', created_at: '2026-10-21T04:00:00.000Z' }),
+    order({ status: 'cancelled', created_at: '2026-10-21T06:00:00.000Z' }),
+  ];
+  const series = buildOrdersSeries(orders, now);
+  assert.equal(series[series.length - 1].orders, 2, 'both orders are counted as orders placed');
 });
