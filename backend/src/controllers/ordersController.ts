@@ -3,6 +3,7 @@ import { orderService, pushOrderToShiprocket, retryFailedShiprocketPushes } from
 import { postOrderConfirmed, isCodOrder, sendOrderConfirmationText } from '../services/postOrderConfirmed';
 import { invoiceDispatchService, deriveInvoiceStatus } from '../services/invoiceDispatchService';
 import * as ordersRepo from '../database/repos/orders';
+import * as usersRepo from '../database/repos/users';
 import { normalizePhone } from '../services/whatsappService';
 import { verifyToken } from '../utils/jwt';
 import { keepAlive } from '../utils/keepAlive';
@@ -98,8 +99,14 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       body.email = String(req.body.email).trim().toLowerCase();
     }
 
-    const data = await orderService.createOrder(body, session?.userId ?? undefined);
+    if (body.user_id) {
+      const owner = await usersRepo.findById(body.user_id, 'id');
+      if (!owner) {
+        return res.status(401).json({ error: { message: 'Session expired, please login again.' } });
+      }
+    }
 
+    const data = await orderService.createOrder(body, session?.userId ?? undefined);
     // Every order is invoiced the moment it is created â€” COD and prepaid alike,
     // paid or not. A tax invoice documents the sale, and the sale happens when
     // the order is placed; waiting for a payment callback used to leave prepaid

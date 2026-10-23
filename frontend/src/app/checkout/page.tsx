@@ -1008,6 +1008,16 @@ export default function CheckoutPage() {
       }
     } catch (err: any) {
       console.error("Order processing error", err);
+      if (err.response?.status === 401) {
+        localStorage.removeItem('meruveda_auth_token');
+        localStorage.removeItem('meruveda_user');
+        sessionStorage.removeItem('meruveda_auth_token');
+        sessionStorage.removeItem('meruveda_user');
+        document.cookie = 'meruveda_auth_token=; path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT; SameSite=Lax';
+        document.cookie = 'mv_customer_session=; path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT; SameSite=Lax';
+        window.location.href = '/login';
+        return;
+      }
       alert(err.response?.data?.error?.message || "Failed to process order. Please try again.");
       setIsPlacingOrder(false);
     }

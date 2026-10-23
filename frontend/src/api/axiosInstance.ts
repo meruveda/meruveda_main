@@ -121,6 +121,7 @@ axiosInstance.interceptors.response.use(
         localStorage.removeItem('meruveda_auth_token');
         localStorage.removeItem('meruveda_user');
         document.cookie = 'meruveda_auth_token=; path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT; SameSite=Lax';
+        document.cookie = 'mv_customer_session=; path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT; SameSite=Lax';
         window.location.reload();
         // Return a pending promise to prevent unhandled rejection/errors during page reload
         return new Promise(() => {});
