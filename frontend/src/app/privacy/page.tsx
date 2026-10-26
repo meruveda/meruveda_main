@@ -73,10 +73,9 @@ export default function PrivacyPolicyPage() {
                 address.
               </li>
               <li>
-                <strong>Google Analytics and Meta Pixel (only after you accept).</strong>
-                These are third-party analytics tools. They are not loaded and
-                send nothing at all until you press Accept in the cookie banner.
-                If you reject, they never run.
+                <strong>Google Analytics and Meta Pixel.</strong>
+                These third-party analytics tools help us understand store
+                usage at an aggregate level.
               </li>
               <li>
                 <strong>Vercel Web Analytics and Speed Insights (always on).</strong>
@@ -86,8 +85,6 @@ export default function PrivacyPolicyPage() {
               </li>
             </ul>
             <p className="text-gray-700 leading-relaxed mt-3">
-              Your choice is stored in your browser under the key{" "}
-              <code className="text-xs bg-gray-50 px-1 py-0.5 rounded">meruveda_consent</code>.
               We do not send your name, phone number, email address or delivery
               address to any analytics tool, and we do not use advertising
               identifiers to build a profile of you.
@@ -121,10 +118,8 @@ export default function PrivacyPolicyPage() {
               <li>Access your information</li>
               <li>Correct inaccurate information</li>
               <li>Delete your account or data (subject to legal obligations)</li>
-              <li>Withdraw your analytics consent — clear the{" "}
-                <code className="text-xs bg-gray-50 px-1 py-0.5 rounded">meruveda_consent</code>{" "}
-                key in your browser, or ask us and we will remove the
-                first-party records we hold for your visits</li>
+              <li>Ask us to remove the first-party records we hold for your
+                visits</li>
             </ul>
           </section>
 

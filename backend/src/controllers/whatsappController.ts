@@ -74,6 +74,24 @@ export const receiveWebhook = async (req: Request, res: Response, next: NextFunc
 
         // Delivery / read / failure receipts
         for (const status of value.statuses || []) {
+          /**
+           * Meta only reports the FINAL outcome of a send here: "accepted by
+           * the API" is not "delivered to the phone". Printing each receipt
+           * means an OTP the customer never received shows up as a
+           * `status=failed` line with Meta's own code/title/reason.
+           */
+          const failure = status.errors?.[0];
+          if (status.status === 'failed') {
+            console.error(
+              `[WhatsApp Webhook] status=failed id=${status.id} recipient=${status.recipient_id} ` +
+                `code=${failure?.code ?? 'n/a'} title=${failure?.title ?? 'n/a'} ` +
+                `reason=${failure?.details || failure?.message || 'no reason given'}`,
+            );
+          } else {
+            console.log(
+              `[WhatsApp Webhook] status=${status.status} id=${status.id} recipient=${status.recipient_id}`,
+            );
+          }
           try {
             await whatsappLogRepo.insertMessage({
               recipient: status.recipient_id || 'unknown',

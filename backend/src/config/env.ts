@@ -36,6 +36,7 @@ const TRIM_ON_BOOT = [
   'ALLOWED_ORIGINS',
   'OTP_HASH_PEPPER',
   'OTP_HASH_SECRET',
+  'OTP_HMAC_SECRET',
 ] as const;
 const whitespaceHits: string[] = [];
 for (const key of TRIM_ON_BOOT) {
@@ -223,8 +224,12 @@ export const config = {
   // Server-side pepper for OTP digests (src/utils/otpHash.ts). Must never be
   // sent to a client or stored in the database. Changing it invalidates every
   // outstanding OTP, which is acceptable because they live 5 minutes.
-  // Accepts either spelling; OTP_HASH_PEPPER is the deployed name.
-  otpHashPepper: process.env.OTP_HASH_PEPPER || process.env.OTP_HASH_SECRET || '',
+  // Accepts any of the three spellings; OTP_HASH_PEPPER is the deployed name.
+  otpHashPepper:
+    process.env.OTP_HASH_PEPPER ||
+    process.env.OTP_HASH_SECRET ||
+    process.env.OTP_HMAC_SECRET ||
+    '',
 
   // ---- Business identity printed on the tax invoice ----
   // Read from env only — never commit real values. `GSTIN` is the legacy name
@@ -485,8 +490,8 @@ if (nodeEnv === 'production') {
   // OTP digests are only as strong as their pepper. Without it the fallback is
   // a constant published in the source tree, so the otps table is effectively
   // brute-forceable by anyone holding a dump. Both documented spellings count.
-  if (!(process.env.OTP_HASH_PEPPER || process.env.OTP_HASH_SECRET)) {
-    warn.push('OTP_HASH_PEPPER (or OTP_HASH_SECRET) — OTP codes are hashed with a development fallback pepper; rotate before going live');
+  if (!(process.env.OTP_HASH_PEPPER || process.env.OTP_HASH_SECRET || process.env.OTP_HMAC_SECRET)) {
+    warn.push('OTP_HASH_PEPPER (or OTP_HASH_SECRET / OTP_HMAC_SECRET) — OTP codes are hashed with a development fallback pepper; rotate before going live');
   }
 
   // WHATSAPP_DRY_RUN=true in production makes sendTemplate return true without

@@ -1,24 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  CONSENT_KEY,
   analyticsEnabled,
   claimPurchaseOnce,
-  getConsent,
   gaEnabled,
   pixelEnabled,
   sanitizeParams,
   setBeacon,
-  setConsent,
   track,
 } from "./analytics";
 
 /**
- * The consent contract, which is the whole point of this module:
- *   - GA4 / Meta Pixel never receive anything before the visitor accepts.
+ * The analytics contract:
+ *   - GA4 / Meta Pixel fire based only on the ANALYTICS_ENABLED master switch
+ *     + their env ids (there is no consent banner on the site).
  *   - Nothing fires at all when the ids are missing (scripts not loaded).
  *   - purchase is counted once per order, across refreshes.
  *
- * The first-party beacon is consent-free by design (it is our own database),
+ * The first-party beacon is cookieless by design (it is our own database),
  * so it is stubbed here and asserted separately.
  */
 
@@ -40,26 +38,14 @@ function makeStorage() {
 function installBrowser() {
   const localStorage = makeStorage();
   const sessionStorage = makeStorage();
-  const listeners: Record<string, Array<() => void>> = {};
 
   const win: any = {
     localStorage,
     sessionStorage,
     location: { pathname: "/products" },
-    addEventListener: (type: string, fn: () => void) => {
-      (listeners[type] ||= []).push(fn);
-    },
-    removeEventListener: (type: string, fn: () => void) => {
-      listeners[type] = (listeners[type] || []).filter((f) => f !== fn);
-    },
-    dispatchEvent: () => true,
-    CustomEvent: class {
-      constructor(public type: string, public init?: any) {}
-    },
   };
 
   (globalThis as any).window = win;
-  (globalThis as any).CustomEvent = win.CustomEvent;
 
   return {
     win,
@@ -94,7 +80,7 @@ describe("track()", () => {
     delete process.env.NEXT_PUBLIC_ANALYTICS_ENABLED;
   });
 
-  it("sends the first-party beacon even without consent (it is our own database)", () => {
+  it("sends the first-party beacon on its own (it is our own database)", () => {
     track("view_item", { items: [{ item_id: "p1", item_name: "Ashwagandha", price: 500 }] });
 
     expect(beacon).toHaveBeenCalledTimes(1);
@@ -104,13 +90,12 @@ describe("track()", () => {
     expect(body.product_id).toBe("p1");
   });
 
-  it("is a no-op for GA4 and Meta Pixel without consent", () => {
+  it("is a no-op for GA4 and Meta Pixel when the master switch is OFF", () => {
     const gtag = vi.fn();
     const fbq = vi.fn();
     env.win.gtag = gtag;
     env.win.fbq = fbq;
 
-    expect(getConsent()).toBeNull();
     track("add_to_cart", { items: [{ item_id: "p1", price: 500, quantity: 1 }] });
 
     expect(gtag).not.toHaveBeenCalled();
@@ -119,22 +104,8 @@ describe("track()", () => {
     expect(beacon).toHaveBeenCalledTimes(1);
   });
 
-  it("still sends nothing to GA4/Meta after the visitor REJECTS", () => {
-    const gtag = vi.fn();
-    const fbq = vi.fn();
-    env.win.gtag = gtag;
-    env.win.fbq = fbq;
-
-    setConsent("denied");
-    track("add_to_cart", { items: [{ item_id: "p1", price: 500, quantity: 1 }] });
-
-    expect(gtag).not.toHaveBeenCalled();
-    expect(fbq).not.toHaveBeenCalled();
-    expect(getConsent()).toBe("denied");
-  });
-
-  it("does not call the vendor globals when the ids are unset, even if consented", () => {
-    setConsent("granted");
+  it("does not call the vendor globals when the ids are unset, even with the switch on", () => {
+    process.env.NEXT_PUBLIC_ANALYTICS_ENABLED = "true";
     const gtag = vi.fn();
     const fbq = vi.fn();
     // Simulates a global left over from somewhere else: with no id configured,
@@ -167,32 +138,7 @@ describe("track()", () => {
     expect(analyticsEnabled()).toBe(true);
   });
 
-  it("sends nothing to GA4/Meta while the master switch is OFF, even if consent was granted earlier", () => {
-    // The realistic case after the consent banner is removed: a visitor who
-    // accepted on a previous visit still has meruveda_consent=granted in
-    // localStorage, so consent alone must not switch the vendors back on.
-    process.env.NEXT_PUBLIC_GA_ID = "G-TEST123";
-    process.env.NEXT_PUBLIC_META_PIXEL_ID = "9876543210";
-    const gtag = vi.fn();
-    const fbq = vi.fn();
-    env.win.gtag = gtag;
-    env.win.fbq = fbq;
-    setConsent("granted");
-
-    expect(getConsent()).toBe("granted");
-    expect(analyticsEnabled()).toBe(false);
-    expect(gaEnabled()).toBe(false);
-    expect(pixelEnabled()).toBe(false);
-
-    track("add_to_cart", { items: [{ item_id: "p1", price: 500, quantity: 1 }] });
-
-    expect(gtag).not.toHaveBeenCalled();
-    expect(fbq).not.toHaveBeenCalled();
-    // The cookieless first-party record still happened.
-    expect(beacon).toHaveBeenCalledTimes(1);
-  });
-
-  it("fans out to GA4 and Meta Pixel once consent is granted", () => {
+  it("fans out to GA4 and Meta Pixel once the switch is on and ids are set", () => {
     process.env.NEXT_PUBLIC_ANALYTICS_ENABLED = "true";
     process.env.NEXT_PUBLIC_GA_ID = "G-TEST123";
     process.env.NEXT_PUBLIC_META_PIXEL_ID = "9876543210";
@@ -200,7 +146,9 @@ describe("track()", () => {
     const fbq = vi.fn();
     env.win.gtag = gtag;
     env.win.fbq = fbq;
-    setConsent("granted");
+
+    expect(gaEnabled()).toBe(true);
+    expect(pixelEnabled()).toBe(true);
 
     track("add_to_cart", { items: [{ item_id: "p1", item_name: "Ashwagandha", price: 500, quantity: 2 }] });
 
@@ -219,7 +167,6 @@ describe("track()", () => {
     process.env.NEXT_PUBLIC_GA_ID = "G-TEST123";
     process.env.NEXT_PUBLIC_META_PIXEL_ID = "9876543210";
     env.win.gtag = gtag;
-    setConsent("granted");
 
     // `as any` on purpose: the PII fields below are exactly what the type
     // system rejects at compile time. This proves the RUNTIME scrub drops them
@@ -256,7 +203,6 @@ describe("track()", () => {
     process.env.NEXT_PUBLIC_GA_ID = "G-TEST123";
     process.env.NEXT_PUBLIC_META_PIXEL_ID = "9876543210";
     env.win.gtag = gtag;
-    setConsent("granted");
 
     const params = {
       transaction_id: "MV-654321",
@@ -281,7 +227,6 @@ describe("track()", () => {
     process.env.NEXT_PUBLIC_GA_ID = "G-TEST123";
     process.env.NEXT_PUBLIC_META_PIXEL_ID = "9876543210";
     env.win.gtag = gtag;
-    setConsent("granted");
 
     track("purchase", { transaction_id: "MV-1", value: 100, items: [{ item_id: "p1", price: 100, quantity: 1 }] });
     track("purchase", { transaction_id: "MV-2", value: 200, items: [{ item_id: "p2", price: 200, quantity: 1 }] });
@@ -292,7 +237,6 @@ describe("track()", () => {
   it("does not send purchase at all when the order number is missing", () => {
     const gtag = vi.fn();
     env.win.gtag = gtag;
-    setConsent("granted");
 
     track("purchase", { value: 100 });
 
@@ -344,20 +288,5 @@ describe("sanitizeParams", () => {
       payment_type: "cod",
       session_id: "sid-123",
     });
-  });
-});
-
-describe("consent storage", () => {
-  it("round-trips the choice under meruveda_consent", () => {
-    setConsent("granted");
-    expect(env.localStorage.getItem(CONSENT_KEY)).toBe("granted");
-    expect(getConsent()).toBe("granted");
-  });
-
-  it("is NOT wiped by the card-vault cleanup pattern", () => {
-    // CardVaultCleanup removes keys matching /^meruveda_.*(card|vault)/i.
-    const VAULT_KEY = /^meruveda_.*(card|vault)/i;
-    expect(VAULT_KEY.test(CONSENT_KEY)).toBe(false);
-    expect(VAULT_KEY.test("meruveda_purchase_seen")).toBe(false);
   });
 });

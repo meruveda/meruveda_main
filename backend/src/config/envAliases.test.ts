@@ -28,7 +28,7 @@ const withEnv = (over: Record<string, string | undefined>, fn: () => void) => {
     (config as any).whatsappReviewTemplateName = (over.WHATSAPP_REVIEW_TEMPLATE_NAME || '').trim();
 (config as any).whatsappTemplateLang = (over.WHATSAPP_TEMPLATE_LANG || 'en').trim();
     (config as any).whatsappDryRun = over.WHATSAPP_DRY_RUN === 'true';
-    (config as any).otpHashPepper = over.OTP_HASH_PEPPER || over.OTP_HASH_SECRET || '';
+    (config as any).otpHashPepper = over.OTP_HASH_PEPPER || over.OTP_HASH_SECRET || over.OTP_HMAC_SECRET || '';
     fn();
   } finally {
     Object.assign(config, before);
@@ -54,6 +54,12 @@ test('WHATSAPP_API_TOKEN wins when both are present', () => {
 test('OTP_HASH_SECRET is accepted as an alias for OTP_HASH_PEPPER', () => {
   withEnv({ OTP_HASH_PEPPER: undefined, OTP_HASH_SECRET: 'pep-from-short-name' }, () => {
     assert.equal(config.otpHashPepper, 'pep-from-short-name');
+  });
+});
+
+test('OTP_HMAC_SECRET is accepted as an alias for OTP_HASH_PEPPER', () => {
+  withEnv({ OTP_HASH_PEPPER: undefined, OTP_HASH_SECRET: undefined, OTP_HMAC_SECRET: 'pep-from-hmac-name' }, () => {
+    assert.equal(config.otpHashPepper, 'pep-from-hmac-name');
   });
 });
 

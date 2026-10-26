@@ -74,6 +74,15 @@ export function normalizePhone(raw?: string | null): string {
   return digits;
 }
 
+/**
+ * Enough of the token to tell WHICH credential was used, never enough to use it.
+ * The token itself never enters a log line.
+ */
+function maskToken(token: string): string {
+  if (!token) return '<unset>';
+  return token.length <= 4 ? '****' : `****${token.slice(-4)}`;
+}
+
 async function graphPost(path: string, body: unknown): Promise<any> {
   const res = await fetch(path, {
     method: 'POST',
@@ -82,8 +91,16 @@ async function graphPost(path: string, body: unknown): Promise<any> {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
+    // 10s hard timeout so a hung Meta call can never stall the OTP flow.
+    signal: AbortSignal.timeout(10_000),
   });
   const json = await res.json().catch(() => ({}));
+  // Meta's raw answer is ALWAYS printed (token masked) so a send the customer
+  // never received can be traced: HTTP 200 carries the wamid that later shows
+  // up in the delivery webhook, an error carries code/subcode/message.
+  const line = `[WhatsApp] Meta ${res.status} POST ${path} auth=Bearer ${maskToken(config.whatsappApiToken)} -> ${JSON.stringify(json)}`;
+  if (res.ok) console.log(line);
+  else console.error(line);
   if (!res.ok) {
     const message = json?.error?.message || `WhatsApp API HTTP ${res.status}`;
     // The numeric code and subcode are attached so the error can be classified
