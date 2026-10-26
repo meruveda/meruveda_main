@@ -1,15 +1,15 @@
 /**
  * Analytics wrapper — one entry point, fanned out to every backend we use.
  *
- *   track()  ->  first-party beacon (ours, cookieless, no consent needed)
- *                Vercel Web Analytics (cookieless, no consent needed)
- *                GA4 + Meta Pixel   (CONSENT-GATED: only after the user accepts)
+ *   track()  ->  first-party beacon (ours, cookieless)
+ *                Vercel Web Analytics (cookieless)
+ *                GA4 + Meta Pixel   (gated by env ids + ANALYTICS_ENABLED)
  *
  * Design rules, all enforced here rather than at each call site:
  *   0. GA4 + Meta Pixel sit behind the ANALYTICS_ENABLED master switch, which
- *      is OFF by default (see analyticsEnabled). Two gates must both open.
- *   1. Nothing is loaded and nothing fires for GA4/Meta before consent is
- *      granted (DPDP Act). `track()` is a safe no-op for them without it.
+ *      is OFF by default (see analyticsEnabled).
+ *   1. There is no consent banner and no consent gate anywhere — vendor scripts
+ *      load and fire based purely on the env ids + the master switch.
  *   2. Missing env ids (NEXT_PUBLIC_GA_ID / NEXT_PUBLIC_META_PIXEL_ID) mean the
  *      scripts were never rendered, so the global is absent and we skip.
  *   3. No PII leaves the site. Params are passed through a denylist scrub, and
@@ -18,17 +18,10 @@
  *      (or the polling this page already does) cannot double count.
  */
 
-/** localStorage key holding the consent choice. */
-export const CONSENT_KEY = "meruveda_consent";
 /** localStorage key holding order numbers we already counted as a purchase. */
 const PURCHASE_SEEN_KEY = "meruveda_purchase_seen";
 /** Most recent order numbers kept in that list (bound the storage growth). */
 const PURCHASE_SEEN_MAX = 50;
-
-/** Custom DOM event so an Accept click can load the scripts without a reload. */
-export const CONSENT_EVENT = "meruveda:consent";
-
-export type ConsentValue = "granted" | "denied";
 
 export type AnalyticsValue = string | number | boolean | null | undefined;
 
@@ -64,39 +57,6 @@ const FIRST_PARTY_EVENTS = new Set([
 ]);
 
 // ---------------------------------------------------------------------------
-// Consent
-// ---------------------------------------------------------------------------
-
-export function getConsent(): ConsentValue | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = window.localStorage.getItem(CONSENT_KEY);
-    return raw === "granted" || raw === "denied" ? raw : null;
-  } catch {
-    return null;
-  }
-}
-
-export function setConsent(value: ConsentValue): void {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(CONSENT_KEY, value);
-  } catch {
-    /* storage unavailable — the banner will simply ask again next visit */
-  }
-  try {
-    window.dispatchEvent(new CustomEvent(CONSENT_EVENT, { detail: { consent: value } }));
-  } catch {
-    /* no CustomEvent support: scripts load on the next navigation */
-  }
-}
-
-/** True only when the user actively accepted. Anything else blocks GA4/Meta. */
-export function hasThirdPartyConsent(): boolean {
-  return getConsent() === "granted";
-}
-
-// ---------------------------------------------------------------------------
 // Master switch — Google Analytics + Meta Pixel
 // ---------------------------------------------------------------------------
 
@@ -106,18 +66,12 @@ export function hasThirdPartyConsent(): boolean {
  *
  * Both vendors are DISABLED unless NEXT_PUBLIC_ANALYTICS_ENABLED is exactly the
  * string "true". With it off, no gtag/js and no fbevents.js are ever rendered or
- * requested, so no third-party cookie is set and nothing reaches either vendor.
- * The cookieless first-party measurement (our own beacon + Vercel) is NOT behind
- * this switch and keeps running.
+ * requested. The cookieless first-party measurement (our own beacon + Vercel)
+ * is NOT behind this switch and keeps running.
  *
  * Read at call time instead of being captured in a module-level const: Next.js
  * inlines the NEXT_PUBLIC_ literal at build time either way, and per-call
- * reading keeps the consent contract testable (tests flip env between cases).
- *
- * When the ads start: mount CookieConsentBanner again in the root layout AND set
- * this to "true". Do not enable one without the other — with no banner there is
- * no way to grant consent, and hasThirdPartyConsent() would correctly keep
- * every event switched off anyway.
+ * reading keeps the switch testable (tests flip env between cases).
  */
 export function analyticsEnabled(): boolean {
   return process.env.NEXT_PUBLIC_ANALYTICS_ENABLED === "true";
@@ -266,29 +220,26 @@ function globals(): AnalyticsGlobals {
 
 /**
  * True only when GA4 is fully usable: the master switch is on, an id is
- * configured (so the script was actually rendered), the visitor accepted, and
- * the global has loaded.
+ * configured (so the script was actually rendered), and the global has loaded.
  */
 export function gaEnabled(): boolean {
   return (
     analyticsEnabled() &&
     !!gaId() &&
-    hasThirdPartyConsent() &&
     typeof globals().gtag === "function"
   );
 }
 
-/** Same four conditions for Meta Pixel. */
+/** Same conditions for Meta Pixel. */
 export function pixelEnabled(): boolean {
   return (
     analyticsEnabled() &&
     !!pixelId() &&
-    hasThirdPartyConsent() &&
     typeof globals().fbq === "function"
   );
 }
 
-/** Vercel Web Analytics is cookieless and consent-free, so it needs no gate. */
+/** Vercel Web Analytics is cookieless, so it needs no gate. */
 export function vercelEnabled(): boolean {
   return typeof window !== "undefined";
 }
@@ -400,8 +351,8 @@ function newEventId(): string {
 /**
  * The single call site for every analytics event in the storefront.
  *
- * Consent-gated destinations (GA4, Meta Pixel) are skipped unless the user has
- * accepted AND the script is actually loaded. Cookieless destinations (our own
+ * GA4 and Meta Pixel are skipped unless the master switch is on, the id is
+ * configured and the script has loaded. Cookieless destinations (our own
  * beacon, Vercel) always run. `purchase` is deduped per order id.
  */
 export function track(event: string, params: TrackParams = {}): void {

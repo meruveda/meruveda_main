@@ -66,12 +66,9 @@ export default function RootLayout({
         {/* Cookieless — no consent gate. */}
         <Analytics />
         <SpeedInsights />
-        {/* GA4 + Meta Pixel: gated by the ANALYTICS_ENABLED master switch
-            (analyticsEnabled() in lib/analytics), which is off by default, so
-            no vendor script, request or cookie is loaded. */}
+        {/* GA4 + Meta Pixel: gated only by the ANALYTICS_ENABLED master switch
+            + their env ids. No consent banner exists on the site. */}
         <AnalyticsScripts />
-        {/* CookieConsentBanner intentionally unmounted — re-enable it together
-            with ANALYTICS_ENABLED when ads start. */}
       </body>
     </html>
   );
