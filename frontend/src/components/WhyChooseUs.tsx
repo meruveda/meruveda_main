@@ -1,17 +1,16 @@
 import React from "react";
 import { Leaf, ShieldCheck, HeartHandshake, Sprout, Flower2, CircleUser, SunMedium, Sparkles } from "lucide-react";
-import { Cormorant_Garamond, Outfit } from "next/font/google";
+import "@fontsource/cormorant-garamond/400.css";
+import "@fontsource/cormorant-garamond/400-italic.css";
+import "@fontsource/cormorant-garamond/500.css";
+import "@fontsource/cormorant-garamond/600.css";
+import "@fontsource/cormorant-garamond/700.css";
+import "@fontsource/outfit/300.css";
+import "@fontsource/outfit/400.css";
+import "@fontsource/outfit/500.css";
 
-const cormorant = Cormorant_Garamond({ 
-  subsets: ["latin"], 
-  weight: ["300", "400", "500", "600", "700"],
-  style: ["normal", "italic"]
-});
-
-const outfit = Outfit({ 
-  subsets: ["latin"], 
-  weight: ["300", "400", "500"] 
-});
+const cormorant = { className: "font-cormorant-local" };
+const outfit = { className: "font-outfit-local" };
 
 const WhyChooseUs = () => {
   return (
