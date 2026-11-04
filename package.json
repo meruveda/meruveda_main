@@ -15,23 +15,6 @@
     "concurrently": "^8.2.2",
     "playwright": "^1.64.1"
   },
-{
-  "name": "meruveda-root",
-  "version": "1.0.0",
-  "private": true,
-  "workspaces": [
-    "frontend",
-    "admin",
-    "backend",
-    "shared"
-  ],
-  "dependencies": {
-    "date-fns": "^3.6.0"
-  },
-  "devDependencies": {
-    "concurrently": "^8.2.2",
-    "playwright": "^1.64.1"
-  },
   "scripts": {
     "dev": "concurrently -n \"frontend,admin,backend\" -c \"cyan,magenta,green\" \"npm run dev -w meruveda\" \"npm run dev -w meruveda-admin\" \"npm run dev -w backend\"",
     "dev:clean": "node -e \"require('fs').rmSync('frontend/.next',{recursive:true,force:true})\" && npm run dev",
