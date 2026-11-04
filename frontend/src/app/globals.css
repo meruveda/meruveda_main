@@ -56,3 +56,11 @@ body {
   font-weight: 700 !important;
 }
 
+:root {
+  --font-fraunces: "Fraunces Variable", serif;
+  --font-instrument-sans: "Instrument Sans Variable", sans-serif;
+  --font-ibm-plex-mono: "IBM Plex Mono", monospace;
+}
+
+.font-cormorant-local { font-family: "Cormorant Garamond", serif; }
+.font-outfit-local { font-family: "Outfit", sans-serif; }
