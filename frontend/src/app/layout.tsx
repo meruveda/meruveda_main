@@ -50,8 +50,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body
-        className={`${fraunces.variable} ${instrumentSans.variable} ${ibmPlexMono.variable} font-sans antialiased bg-bg-ivory text-plum-deep`}
-      >
+        className="font-sans antialiased bg-bg-ivory text-plum-deep"      >
         <AuthProvider>
           <WishlistProvider>
             <CartProvider>
