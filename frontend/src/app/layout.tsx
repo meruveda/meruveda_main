@@ -18,22 +18,6 @@ import BeaconProvider from "@/components/BeaconProvider";
 import { Analytics } from "@vercel/analytics/next";
 import { SpeedInsights } from "@vercel/speed-insights/next";
 
-const fraunces = Fraunces({
-  variable: "--font-fraunces",
-  subsets: ["latin"],
-});
-
-const instrumentSans = Instrument_Sans({
-  variable: "--font-instrument-sans",
-  subsets: ["latin"],
-});
-
-const ibmPlexMono = IBM_Plex_Mono({
-  variable: "--font-ibm-plex-mono",
-  weight: ["400", "500", "600"],
-  subsets: ["latin"],
-});
-
 export const metadata: Metadata = {
   title: "MeruVeda | Authentic Ayurvedic Wellness",
   description: "Discover authentic, organic, lab-tested Ayurvedic medicines and wellness products.",
@@ -49,8 +33,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body
-        className="font-sans antialiased bg-bg-ivory text-plum-deep"      >
+      <body className="font-sans antialiased bg-bg-ivory text-plum-deep">
         <AuthProvider>
           <WishlistProvider>
             <CartProvider>
